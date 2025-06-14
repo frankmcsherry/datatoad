@@ -8,14 +8,13 @@ fn main() {
 
     let mut state = State::default();
 
-    for arg in std::env::args().skip(1) {
+    for filename in std::env::args().skip(1) {
 
         // Read input data from a handy file.
         use std::fs::File;
         use std::io::{BufRead, BufReader};
 
         let mut dict: BTreeMap<String, facts::FactBuilder> = BTreeMap::default();
-        let filename = arg;
         let file = BufReader::new(File::open(filename).unwrap());
         for readline in file.lines() {
             let line = readline.expect("read error");
