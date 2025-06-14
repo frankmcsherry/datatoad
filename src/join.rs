@@ -23,15 +23,16 @@ pub fn implement_plan(rule: &Rule, plan: &JoinPlan, pos: usize, stable: bool, fa
         else {
             let new_name = format!("{}-{:?}-in", name, index);
             let mut builder = FactBuilder::default();
-            let found = facts.entry(new_name.clone()).or_default();
-            if stable {
-                for layer in found.stable.layers.iter() {
-                    plan.apply(layer, &mut builder);
+            if let Some(found) = facts.get(&atom.name) {
+                if stable {
+                    for layer in found.stable.layers.iter() {
+                        plan.apply(layer, &mut builder);
+                    }
                 }
+                plan.apply(&found.recent, &mut builder);
             }
-            plan.apply(&found.recent, &mut builder);
 
-            facts.get_mut(&new_name).unwrap().add_set(builder);
+            facts.entry(new_name.clone()).or_default().add_set(builder);
             names.push(new_name);
         }
     }
