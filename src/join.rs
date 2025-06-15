@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use columnar::{Columnar, Container, Index, Len};
-use crate::{Rule, Atom, Term};
+use crate::types::{Rule, Atom, Term};
 use crate::facts::{Fact, Facts, FactBuilder, FactContainer, FactSet};
 
 /// Implements a provided rule by way of a provided plan.

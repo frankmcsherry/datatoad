@@ -1,10 +1,10 @@
 //! Methods and types to support parsing Datalog rules.
 
 use std::iter::Peekable;
-use crate::{Rule, Atom, Term};
+use crate::types::{Rule, Atom, Term};
 
 /// Attempt to parse `text` as a sequence of Datalog rules.
-pub(crate) fn datalog(text: &str) -> Option<Vec<Rule>> {
+pub fn datalog(text: &str) -> Option<Vec<Rule>> {
     parse(tokenize(text)?)
 }
 
