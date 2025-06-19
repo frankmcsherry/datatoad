@@ -31,7 +31,7 @@ pub mod types {
     }
 
     impl State {
-        /// Applies all rules to all facts, and indicates if new facts were
+        /// Applies all rules to all facts.
         pub fn update(&mut self) {
             self.advance();
             while self.active() {

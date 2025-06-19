@@ -13,6 +13,45 @@ pub struct FactSet {
     pub to_add: FactLSM,
 }
 
+impl FactSet {
+
+    pub fn len(&self) -> usize { self.stable.layers.iter().map(|x| x.len()).sum::<usize>() + self.recent.len() }
+
+    pub fn active(&self) -> bool {
+        !self.recent.is_empty() || !self.to_add.layers.is_empty()
+    }
+
+    pub fn add_set(&mut self, facts: FactBuilder) {
+        let mut facts = facts.finish();
+        if !facts.layers.is_empty() {
+            self.to_add.extend(&mut facts);
+        }
+    }
+
+    pub fn advance(&mut self) {
+        // Move recent into stable
+        if !self.recent.is_empty() {
+            self.stable.push(std::mem::take(&mut self.recent));
+        }
+
+        if let Some(to_add) = self.to_add.flatten() {
+
+            // Tidy stable by an amount proportional to the work we are about to do.
+            self.stable.tidy_through(2 * to_add.len());
+
+            // Remove from to_add any facts already in stable.
+            let mut starts = vec![0; self.stable.layers.len()];
+            let stable = &self.stable;
+            self.recent = to_add.filter(move |x| {
+                starts.iter_mut().zip(&stable.layers).all(|(start, layer)| {
+                    crate::join::gallop::<Fact>(layer.borrow(), start, |y| y < x);
+                    *start >= layer.borrow().len() || layer.borrow().get(*start) != x
+                })
+            });
+        }
+    }
+}
+
 /// A sorted list of distinct facts.
 #[derive(Clone, Default)]
 pub struct FactContainer {
@@ -50,7 +89,7 @@ impl FactContainer {
         let mut iter2 = other.borrow().into_index_iter().peekable();
     
         while let (Some(fact1), Some(fact2)) = (iter1.peek(), iter2.peek()) {
-            match fact1.cmp(&fact2) {
+            match fact1.cmp(fact2) {
                 std::cmp::Ordering::Less => {
                     ordered.push(*fact1);
                     iter1.next();
@@ -74,7 +113,7 @@ impl FactContainer {
     
     fn from(facts: &<Fact as Columnar>::Container) -> Self {
         let mut indexes = (0 .. facts.len()).collect::<Vec<_>>();
-        let borrowed = <<Fact as Columnar>::Container as Container<Fact>>::borrow(&facts);
+        let borrowed = <<Fact as Columnar>::Container as Container<Fact>>::borrow(facts);
         indexes.sort_by_key(|i| borrowed.get(*i));
         indexes.dedup_by_key(|i| borrowed.get(*i));
     
@@ -88,45 +127,6 @@ impl std::ops::Deref for FactContainer {
     type Target = <Fact as Columnar>::Container;
     fn deref(&self) -> &Self::Target {
         &self.ordered
-    }
-}
-
-impl FactSet {
-
-    pub fn len(&self) -> usize { self.stable.layers.iter().map(|x| x.len()).sum::<usize>() + self.recent.len() }
-
-    pub fn active(&self) -> bool {
-        !self.recent.is_empty() || !self.to_add.layers.is_empty()
-    }
-
-    pub fn add_set(&mut self, facts: FactBuilder) {
-        let mut facts = facts.finish();
-        if !facts.layers.is_empty() {
-            self.to_add.extend(&mut facts);
-        }
-    }
-
-    pub fn advance(&mut self) {
-        // Move recent into stable
-        if !self.recent.is_empty() {
-            self.stable.push(std::mem::take(&mut self.recent));
-        }
-
-        if let Some(to_add) = self.to_add.flatten() {
-
-            // Tidy stable by an amount proportional to the work we are about to do.
-            self.stable.tidy_through(2 * to_add.len());
-
-            // Remove from to_add any facts already in stable.
-            let mut starts = vec![0; self.stable.layers.len()];
-            let stable = &self.stable;
-            self.recent = to_add.filter(move |x| {
-                starts.iter_mut().zip(&stable.layers).all(|(start, layer)| {
-                    crate::join::gallop::<Fact>(layer.borrow(), start, |y| y < x);
-                    *start >= layer.borrow().len() || layer.borrow().get(*start) != x
-                })
-            });
-        }
     }
 }
 

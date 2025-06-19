@@ -34,7 +34,7 @@ fn tokenize(text: &str) -> Option<Vec<Token>> {
         if !prev.is_empty() {
             result.push(Token::Text(prev.to_owned()));
         }
-        let next = token.chars().rev().next().unwrap();
+        let next = token.chars().next_back().unwrap();
         result.push (
             match next {
                 '.' => Token::Period,

@@ -30,7 +30,7 @@ fn main() {
     state.update();
 
     use std::io::Write;
-    println!("");
+    println!();
     print!("> ");
     let _ = std::io::stdout().flush();
 
@@ -45,27 +45,46 @@ fn main() {
         }
 
         else {
-            match text.trim() {
-                ".list" => {
-                    for (name, facts) in state.facts.iter() {
-                        println!("\t{}:\t{:?}", name, facts.len());
-                    }    
-                }
-                ".load" => {
-
-                }
-                ".save" => {
-
-                }
-                _ => {
-                    println!("Parse failure: {:?}", text);
+            let mut words = text.split_whitespace();
+            if let Some(word) = words.next() {
+                match word {
+                    ".list" => {
+                        for (name, facts) in state.facts.iter() {
+                            println!("\t{}:\t{:?}", name, facts.len());
+                        }
+                    }
+                    ".show" => {
+                        use columnar::Index;
+                        for name in words {
+                            if let Some(found) = state.facts.get(name) {
+                                println!();
+                                let mut temp = found.stable.layers.iter().flat_map(|i| i.borrow().into_index_iter().take(10)).collect::<Vec<_>>();
+                                temp.sort();
+                                for item in temp.iter().take(10) {
+                                    print!("\t(");
+                                    for coord in (*item).into_index_iter() {
+                                        print!("{:?},", str::from_utf8(coord.as_slice()).unwrap());
+                                    }
+                                    println!(")");
+                                }
+                                if found.len() > 10 {
+                                    println!("\t .. ({:?} more)", found.len() - 10);
+                                }
+                            }
+                        }
+                    }
+                    ".load" => { println!("unimplemnted: {:?}", word); }
+                    ".save" => { println!("unimplemnted: {:?}", word); }
+                    _ => {
+                        println!("Parse failure: {:?}", text);
+                    }
                 }
             }
         }
 
         println!("{:?}", timer.elapsed());
 
-        println!("");
+        println!();
         print!("> ");
         let _ = std::io::stdout().flush();
         text.clear();

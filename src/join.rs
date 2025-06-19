@@ -224,7 +224,7 @@ impl<'a> From<&'a Rule> for JoinPlan {
             // The inputs are two slices, each starting with `keys[index]` and continuing independently.
             // We need to find the indexes 
             let needed_keys = &keys[index-1];
-            let mut needed_vals = bodys[index].binding.iter().chain(schema.iter().map(|x| *x)).collect::<BTreeSet<_>>();
+            let mut needed_vals = bodys[index].binding.iter().chain(schema.iter().copied()).collect::<BTreeSet<_>>();
             for key in needed_keys.iter() {
                 needed_vals.remove(key);
             }
@@ -240,7 +240,7 @@ impl<'a> From<&'a Rule> for JoinPlan {
             joins.push((keys[index].len(), permute));
 
             schema.clear();
-            Extend::extend(&mut schema, needed_keys.into_iter().map(|x| *x).chain(needed_vals));
+            Extend::extend(&mut schema, needed_keys.iter().copied().chain(needed_vals));
         }
         joins.reverse();
 
