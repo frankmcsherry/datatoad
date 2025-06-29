@@ -45,7 +45,7 @@ impl FactSet {
             self.recent = to_add.filter(move |x| {
                 starts.iter_mut().zip(&stable.layers).all(|(start, layer)| {
                     crate::join::gallop::<Fact>(layer.borrow(), start, |y| y < x);
-                    *start >= layer.borrow().len() || layer.borrow().get(*start) != x
+                    *start >= layer.len() || layer.borrow().get(*start) != x
                 })
             });
         }
@@ -59,9 +59,13 @@ pub struct FactContainer {
 }
 
 impl FactContainer {
+
     pub fn borrow(&self) -> <<Fact as Columnar>::Container as Container<Fact>>::Borrowed<'_> {
         <<Fact as Columnar>::Container as Container<Fact>>::borrow(&self.ordered)
     }
+
+    pub fn len(&self) -> usize { self.borrow().len() }
+    pub fn is_empty(&self) -> bool { self.borrow().is_empty() }
 
     fn filter(mut self, mut p: impl FnMut(<Fact as Columnar>::Ref<'_>) -> bool) -> FactContainer {
         let mut ordered = <Fact as Columnar>::Container::default();
@@ -110,23 +114,42 @@ impl FactContainer {
     
         Self { ordered }
     }
-    
-    fn from(facts: &<Fact as Columnar>::Container) -> Self {
-        let mut indexes = (0 .. facts.len()).collect::<Vec<_>>();
-        let borrowed = <<Fact as Columnar>::Container as Container<Fact>>::borrow(facts);
-        indexes.sort_by_key(|i| borrowed.get(*i));
-        indexes.dedup_by_key(|i| borrowed.get(*i));
+
+    /// Merges many sorted deduplicated lists into one sorted deduplicated list.
+    fn _multiway_merge<const K: usize>(many: &[Self; K]) -> Self {
     
         let mut ordered = <Fact as Columnar>::Container::default();
-        ordered.extend(indexes.into_iter().map(|i| borrowed.get(i)));
+
+        let mut iters: [_; K] =
+        many.iter()
+            .map(|x| x.borrow().into_index_iter().peekable())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap_or_else(|_| panic!());
+
+        while let Some((_min, idx)) = iters.iter_mut().enumerate().filter_map(|(i,x)| x.peek().map(|x| (x,i))).min() {
+            let min = iters[idx].next().unwrap();
+            ordered.push(min);
+            for iter in iters.iter_mut() {
+                if iter.peek() == Some(&min) {
+                    iter.next();
+                }
+            }
+        }
+
         Self { ordered }
     }
-}
 
-impl std::ops::Deref for FactContainer {
-    type Target = <Fact as Columnar>::Container;
-    fn deref(&self) -> &Self::Target {
-        &self.ordered
+    fn from(facts: &<Fact as Columnar>::Container) -> Self {
+        let mut ordered = <Fact as Columnar>::Container::default();
+        let borrowed = <<Fact as Columnar>::Container as Container<Fact>>::borrow(facts);
+
+        let mut items = borrowed.into_index_iter().collect::<Vec<_>>();
+        items.sort();
+        items.dedup();
+        ordered.extend(items);
+
+        Self { ordered }
     }
 }
 
@@ -154,18 +177,24 @@ impl FactBuilder {
 /// A list of fact lists that double in length, each sorted and distinct.
 #[derive(Clone, Default)]
 pub struct FactLSM {
-    pub layers: Vec<FactContainer>,
+    layers: Vec<FactContainer>,
 }
 
 impl FactLSM {
     fn push(&mut self, layer: FactContainer) {
-        self.layers.push(layer);
-        self.tidy();
+        if !layer.is_empty() {
+            self.layers.push(layer);
+            self.tidy();
+        }
     }
     
     fn extend(&mut self, other: &mut FactLSM) {
         Extend::extend(&mut self.layers, other.layers.drain(..));
         self.tidy();
+    }
+
+    pub fn contents(&self) -> impl Iterator<Item = &FactContainer> {
+        self.layers.iter()
     }
 
     /// Flattens the layers into one layer, and takes it.

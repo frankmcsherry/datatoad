@@ -36,8 +36,7 @@ pub mod types {
             self.advance();
             while self.active() {
                 for (index, rule) in self.rules.iter().enumerate() {
-                    let rule_plan = crate::join::JoinPlan::from(rule);
-                    join::implement_plan(rule, &rule_plan, index, false, &mut self.facts);
+                    join::implement_plan(rule, index, false, &mut self.facts);
                 }
                 self.advance();
             }
@@ -79,8 +78,7 @@ pub mod types {
                 }
             }
             else {
-                let rule_plan = crate::join::JoinPlan::from(&rule);
-                join::implement_plan(&rule, &rule_plan, self.rules.len(), true, &mut self.facts);
+                join::implement_plan(&rule, self.rules.len(), true, &mut self.facts);
                 self.rules.push(rule);
             }
         }

@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 columnar = "0.5"
+eggsalad = { git = "https://github.com/frankmcsherry/eggsalad.git" }
+itertools = "0.14.0"

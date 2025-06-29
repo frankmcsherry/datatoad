@@ -58,7 +58,7 @@ fn main() {
                         for name in words {
                             if let Some(found) = state.facts.get(name) {
                                 println!();
-                                let mut temp = found.stable.layers.iter().flat_map(|i| i.borrow().into_index_iter().take(10)).collect::<Vec<_>>();
+                                let mut temp = found.stable.contents().flat_map(|i| i.borrow().into_index_iter().take(10)).collect::<Vec<_>>();
                                 temp.sort();
                                 for item in temp.iter().take(10) {
                                     print!("\t(");
