@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 use columnar::{Columnar, Container, Index, Len, Push};
 
-pub type Fact = Vec<Vec<u8>>;
+/// Use the `List` type to access an alternate columnar container.
+pub type Fact = List<List<u8>>;
 pub type Facts = BTreeMap<String, FactSet>;
 
 #[derive(Default)]
@@ -52,23 +53,251 @@ impl FactSet {
     }
 }
 
+pub type InternalContainer = Lists<Lists<Vec<u8>>>;
+
+pub use lists::{List, Lists};
+/// An internal container implementation that optimizes offsets when strided.
+///
+/// This module exists mostly because of limitations in `columnar`, and how
+/// containers require an owned type that they are a container of. In this
+/// case there is no good type that isn't already taken, or that seems to be.
+mod lists {
+
+    use std::ops::Deref;
+    use columnar::{Columnar, Container, Index, Len, AsBytes, FromBytes};
+
+    #[derive(Clone, Debug, Default)]
+    pub struct List<T> { pub items: Vec<T> }
+    impl<T> Deref for List<T> { type Target = Vec<T>; fn deref(&self) -> &Self::Target { &self.items } }
+
+    impl<T: Columnar> Columnar for List<T> {
+        type Ref<'a> = ListRef<<<T as Columnar>::Container as Container<T>>::Borrowed<'a>>;
+        #[inline(always)]
+        fn copy_from<'a>(&mut self, other: Self::Ref<'a>) {
+            self.items.truncate(other.len());
+            for i in 0 .. self.items.len() {
+                T::copy_from(&mut self.items[i], other.get(i));
+            }
+            for i in self.items.len() .. other.len() {
+                self.items.push(T::into_owned(other.get(i)));
+            }
+        }
+        #[inline(always)]
+        fn into_owned<'a>(other: Self::Ref<'a>) -> Self {
+            let mut list = List { items: Vec::with_capacity(other.len()) };
+            Self::copy_from(&mut list, other);
+            list
+        }
+        type Container = Lists<T::Container>;
+        #[inline(always)]
+        fn reborrow<'b, 'a: 'b>(thing: Self::Ref<'a>) -> Self::Ref<'b> where Self: 'a {
+            ListRef {
+                lower: thing.lower,
+                upper: thing.upper,
+                items: <T::Container as Container<T>>::reborrow(thing.items),
+            }
+        }
+    }
+
+    #[derive(Copy, Clone, Default)]
+    pub struct Lists<VC, BC = Vec<u64>> {
+        bounds: Strides<BC>,
+        values: VC,
+    }
+
+    impl<T: Columnar> Container<List<T>> for Lists<T::Container> {
+        type Borrowed<'a> = Lists<<T::Container as Container<T>>::Borrowed<'a> , &'a [u64]>;
+        #[inline(always)]
+        fn borrow<'a>(&'a self) -> Self::Borrowed<'a> {
+            Lists {
+                bounds: Strides { bounds: &self.bounds.bounds[..] },
+                values: self.values.borrow(),
+            }
+        }
+        #[inline(always)]
+        fn reborrow<'b, 'a: 'b>(thing: Self::Borrowed<'a>) -> Self::Borrowed<'b> {
+            Lists {
+                bounds: Strides { bounds: &thing.bounds.bounds[..] },
+                values: T::Container::reborrow(thing.values),
+            }
+        }
+    }
+
+    impl<'a, VC: Copy> Index for Lists<VC, &'a [u64]> {
+        type Ref = ListRef<VC>;
+        #[inline(always)]
+        fn get(&self, index: usize) -> Self::Ref {
+            let (lower, upper) = self.bounds.bounds(index);
+            ListRef { lower, upper, items: self.values }
+        }
+    }
+
+    #[derive(Copy, Clone, Debug)]
+    pub struct ListRef<VC> {
+        lower: usize,
+        upper: usize,
+        items: VC,
+    }
+
+    impl<'a, T> ListRef<&'a [T]> {
+        pub fn as_slice(&self) -> &'a [T] {
+            &self.items[self.lower .. self.upper]
+        }
+    }
+
+    impl<VC: Index> ListRef<VC> {
+        #[inline(always)]
+        pub fn len(&self) -> usize { self.upper - self.lower }
+        #[inline(always)]
+        pub fn get(&self, index: usize) -> <VC as Index>::Ref {
+            self.items.get(index + self.lower)
+        }
+        #[inline(always)]
+        pub fn iter(&self) -> impl Iterator<Item=<VC as Index>::Ref> {
+            (0 .. self.len()).map(|i| self.get(i))
+        }
+    }
+
+    impl<VC: Index<Ref: PartialEq>> PartialEq for ListRef<VC> {
+        #[inline(always)]
+        fn eq(&self, other: &Self) -> bool { self.iter().eq(other.iter()) }
+    }
+    impl<VC: Index<Ref: Eq>> Eq for ListRef<VC> { }
+    impl<VC: Index<Ref: PartialOrd>> PartialOrd for ListRef<VC> {
+        #[inline(always)]
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { self.iter().partial_cmp(other.iter()) }
+    }
+    impl<VC: Index<Ref: Ord>> Ord for ListRef<VC> {
+        #[inline(always)]
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.iter().cmp(other.iter()) }
+    }
+
+    /// The first two integers describe a stride pattern, [stride, length].
+    ///
+    /// If the length is zero the collection is empty. The first `item` pushed
+    /// always becomes the first list element. The next element is the number of
+    /// items at position `i` whose value is `item * (i+1)`. After this comes
+    /// the remaining entries in the bounds container.
+    #[derive(Copy, Clone, Default)]
+    pub struct Strides<BC = Vec<u64>> { bounds: BC }
+
+    impl<BC: Deref<Target=[u64]>> Strides<BC> {
+        #[inline(always)]
+        fn len(&self) -> usize { if self.bounds.len() < 2 { 0 } else { self.bounds[1] as usize + self.bounds[2..].len() } }
+        #[inline(always)]
+        fn bounds(&self, index: usize) -> (usize, usize) {
+            let stride = self.bounds[0];
+            let length = self.bounds[1];
+            let index = index as u64;
+            let lower = if index == 0 { 0 } else {
+                let index = index - 1;
+                if index < length { (index+1) * stride } else { self.bounds[(index - length + 2) as usize] }
+            } as usize;
+            let upper = if index < length { (index+1) * stride } else { self.bounds[(index - length + 2) as usize] } as usize;
+            (lower, upper)
+        }
+    }
+
+    impl Strides {
+        #[inline(always)]
+        fn push(&mut self, item: u64) {
+            if self.bounds.len() < 2 { self.clear() }
+            if self.bounds[..2] == [0,0] {
+                self.bounds[0] = item;
+                self.bounds[1] = 1;
+            }
+            else if self.bounds.len() > 2 {
+                self.bounds.push(item);
+            }
+            else if item == self.bounds[0] * (self.bounds[1] + 1) {
+                self.bounds[1] += 1;
+            }
+            else {
+                self.bounds.push(item);
+            }
+        }
+        #[inline(always)]
+        fn clear(&mut self) {
+            self.bounds.clear();
+            self.bounds.push(0);
+            self.bounds.push(0);
+        }
+    }
+
+    use columnar::Push;
+    impl<VC1: Index, VC2: Len + Push<<VC1 as Index>::Ref>> Push<ListRef<VC1>> for Lists<VC2> {
+        #[inline(always)]
+        fn push(&mut self, item: ListRef<VC1>) {
+            for index in 0 .. item.len() {
+                self.values.push(item.get(index));
+            }
+            self.bounds.push(self.values.len() as u64);
+        }
+    }
+    impl<'a, T: Columnar, VC: Len + Push<&'a T>> Push<&'a List<T>> for Lists<VC> {
+        #[inline(always)]
+        fn push(&mut self, list: &'a List<T>) {
+            self.values.extend(list.items.iter());
+            self.bounds.push(self.values.len() as u64);
+        }
+    }
+    impl<I: IntoIterator, VC: Len + Push<I::Item>> Push<I> for Lists<VC> {
+        #[inline(always)]
+        fn push(&mut self, item: I) {
+            self.values.extend(item);
+            self.bounds.push(self.values.len() as u64);
+        }
+    }
+
+    impl<VC, BC: Deref<Target=[u64]>> Len for Lists<VC, BC> {
+        #[inline(always)]
+        fn len(&self) -> usize { self.bounds.len() }
+    }
+
+    use columnar::Clear;
+    impl<VC: Clear> Clear for Lists<VC> {
+        #[inline(always)]
+        fn clear(&mut self) {
+            self.bounds.clear();
+            self.values.clear();
+        }
+    }
+
+    impl<'a, VC: AsBytes<'a>, BC: AsBytes<'a>> AsBytes<'a> for Lists<VC, BC> {
+        #[inline(always)]
+        fn as_bytes(&self) -> impl Iterator<Item=(u64, &'a [u8])> {
+            self.bounds.bounds.as_bytes().chain(self.values.as_bytes())
+        }
+    }
+
+    impl<'a, VC: FromBytes<'a>, BC: FromBytes<'a>> FromBytes<'a> for Lists<VC, BC> {
+        #[inline(always)]
+        fn from_bytes(bytes: &mut impl Iterator<Item=&'a [u8]>) -> Self {
+            Self {
+                bounds: Strides { bounds: BC::from_bytes(bytes) },
+                values: VC::from_bytes(bytes),
+            }
+        }
+    }
+}
+
 /// A sorted list of distinct facts.
 #[derive(Clone, Default)]
 pub struct FactContainer {
-    ordered: <Fact as Columnar>::Container,
+    ordered: InternalContainer,
 }
 
 impl FactContainer {
 
-    pub fn borrow(&self) -> <<Fact as Columnar>::Container as Container<Fact>>::Borrowed<'_> {
-        <<Fact as Columnar>::Container as Container<Fact>>::borrow(&self.ordered)
+    pub fn borrow(&self) -> <InternalContainer as Container<Fact>>::Borrowed<'_> {
+        <InternalContainer as Container<Fact>>::borrow(&self.ordered)
     }
 
     pub fn len(&self) -> usize { self.borrow().len() }
     pub fn is_empty(&self) -> bool { self.borrow().is_empty() }
 
     fn filter(mut self, mut p: impl FnMut(<Fact as Columnar>::Ref<'_>) -> bool) -> FactContainer {
-        let mut ordered = <Fact as Columnar>::Container::default();
+        let mut ordered = InternalContainer::default();
         ordered.extend(self.borrow().into_index_iter().filter(|x| p(*x)));
         use columnar::Clear;
         self.ordered.clear();
@@ -87,7 +316,7 @@ impl FactContainer {
 
         // TODO: Have columnar learn to extend from ranges of containers with memcpy.
     
-        let mut ordered = <Fact as Columnar>::Container::default();
+        let mut ordered = InternalContainer::default();
 
         let mut iter1 = self.borrow().into_index_iter().peekable();
         let mut iter2 = other.borrow().into_index_iter().peekable();
@@ -118,7 +347,7 @@ impl FactContainer {
     /// Merges many sorted deduplicated lists into one sorted deduplicated list.
     fn _multiway_merge<const K: usize>(many: &[Self; K]) -> Self {
     
-        let mut ordered = <Fact as Columnar>::Container::default();
+        let mut ordered = InternalContainer::default();
 
         let mut iters: [_; K] =
         many.iter()
@@ -140,9 +369,9 @@ impl FactContainer {
         Self { ordered }
     }
 
-    fn from(facts: &<Fact as Columnar>::Container) -> Self {
-        let mut ordered = <Fact as Columnar>::Container::default();
-        let borrowed = <<Fact as Columnar>::Container as Container<Fact>>::borrow(facts);
+    fn from(facts: &InternalContainer) -> Self {
+        let mut ordered = InternalContainer::default();
+        let borrowed = <InternalContainer as Container<Fact>>::borrow(facts);
 
         let mut items = borrowed.into_index_iter().collect::<Vec<_>>();
         items.sort();
@@ -155,12 +384,12 @@ impl FactContainer {
 
 #[derive(Clone, Default)]
 pub struct FactBuilder {
-    active: <Fact as Columnar>::Container,
+    active: InternalContainer,
     layers: FactLSM,
 }
 
 impl FactBuilder {
-    pub fn push<I>(&mut self, item: I) where <Fact as Columnar>::Container: Push<I> {
+    pub fn push<I>(&mut self, item: I) where InternalContainer: Push<I> {
         self.active.push(item);
         if self.active.len() > 1_000_000 {
             use columnar::Clear;

@@ -70,7 +70,7 @@ pub mod types {
                         }
                     }
                     let mut builder = facts::FactBuilder::default();
-                    builder.push(lits);
+                    builder.push(lits.iter().map(|x| &x[..]));
                     self.facts
                         .entry(atom.name.to_owned())
                         .or_default()

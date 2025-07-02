@@ -11,6 +11,7 @@ fn main() {
         // Read input data from a handy file.
         use std::fs::File;
         use std::io::{BufRead, BufReader};
+        use datatoad::facts::{Fact, List};
 
         let mut dict: BTreeMap<String, facts::FactBuilder> = BTreeMap::default();
         let file = BufReader::new(File::open(filename).unwrap());
@@ -19,9 +20,10 @@ fn main() {
             if !line.is_empty() && !line.starts_with('#') {
                 let mut elts = line.split_whitespace().rev();
                 if let Some(name) = elts.next() {
+                    let items = elts.rev().map(|x| x.parse::<u32>().unwrap()).map(|u| List { items: vec![(u >> 16) as u8, (u >> 8) as u8, u as u8] }).collect::<Vec<_>>();
                     dict.entry(name.to_string())
                         .or_default()
-                        .push(elts.rev().map(|x| x.as_bytes()));
+                        .push(&Fact { items });
                 }
             }
         }
@@ -62,7 +64,7 @@ fn main() {
                                 temp.sort();
                                 for item in temp.iter().take(10) {
                                     print!("\t(");
-                                    for coord in (*item).into_index_iter() {
+                                    for coord in item.iter() {
                                         print!("{:?},", str::from_utf8(coord.as_slice()).unwrap());
                                     }
                                     println!(")");

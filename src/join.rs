@@ -47,7 +47,7 @@ pub fn join_with(
 }
 
 /// Match keys in `input1` and `input2` and act on matches.
-fn join<'a, T: Columnar<Ref<'a> : Ord+std::fmt::Debug>> (
+fn join<'a, T: Columnar<Ref<'a> : Ord>> (
     input1: <T::Container as Container<T>>::Borrowed<'a>,
     input2: <T::Container as Container<T>>::Borrowed<'a>,
     mut order: impl FnMut(T::Ref<'a>, T::Ref<'a>) -> std::cmp::Ordering,
