@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use datatoad::{facts, parse, types};
+use datatoad::facts::{Fact, List};
 
 fn main() {
 
@@ -11,8 +12,6 @@ fn main() {
         // Read input data from a handy file.
         use std::fs::File;
         use std::io::{BufRead, BufReader};
-        use datatoad::facts::{Fact, List};
-
         let mut dict: BTreeMap<String, facts::FactBuilder> = BTreeMap::default();
         let file = BufReader::new(File::open(filename).unwrap());
         for readline in file.lines() {
@@ -53,6 +52,38 @@ fn main() {
                     ".list" => {
                         for (name, facts) in state.facts.iter() {
                             println!("\t{}:\t{:?}", name, facts.len());
+                        }
+                    }
+                    ".test" => {
+                        for name in words {
+                            if let Some(found) = state.facts.get(name) {
+                                println!("Found {:?}", name);
+                                for list in found.stable.contents() {
+                                    use datatoad::facts::forests::Forest;
+                                    let forest = Forest::<List<u8>>::form(&list.ordered);
+                                    print!("Layer sizes: {:?}", list.len());
+                                    for layer in forest.layers.iter().rev() {
+                                        use columnar::Len;
+                                        print!(" -> {:?}", layer.list.len());
+                                    }
+                                    println!();
+                                    use std::fmt::Write;
+                                    use columnar::AsBytes;
+                                    use columnar::Container;
+                                    let mut total = 0;
+                                    let mut explain = String::default();
+                                    list.borrow().as_bytes().for_each(|(_,s)| { write!(&mut explain, " {:?}", s.len()).unwrap(); total += s.len() });
+                                    println!("\told bytes: {:?}:\t{}", total, explain);
+                                    let mut total = 0;
+                                    let mut explain = String::default();
+                                    forest.layers
+                                          .iter()
+                                          .for_each(|layer| <<List<List<u8>> as columnar::Columnar>::Container as Container<List<List<u8>>>>::borrow(&layer.list)
+                                                .as_bytes()
+                                                .for_each(|(_,s)| { write!(&mut explain, " {:?}", s.len()).unwrap(); total += s.len()}));
+                                    println!("\tnew bytes: {:?}:\t{}", total, explain);
+                                }
+                            }
                         }
                     }
                     ".show" => {

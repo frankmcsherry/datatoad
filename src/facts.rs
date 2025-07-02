@@ -101,8 +101,8 @@ mod lists {
 
     #[derive(Copy, Clone, Default)]
     pub struct Lists<VC, BC = Vec<u64>> {
-        bounds: Strides<BC>,
-        values: VC,
+        pub bounds: Strides<BC>,
+        pub values: VC,
     }
 
     impl<T: Columnar> Container<List<T>> for Lists<T::Container> {
@@ -185,7 +185,7 @@ mod lists {
         #[inline(always)]
         fn len(&self) -> usize { if self.bounds.len() < 2 { 0 } else { self.bounds[1] as usize + self.bounds[2..].len() } }
         #[inline(always)]
-        fn bounds(&self, index: usize) -> (usize, usize) {
+        pub fn bounds(&self, index: usize) -> (usize, usize) {
             let stride = self.bounds[0];
             let length = self.bounds[1];
             let index = index as u64;
@@ -200,7 +200,7 @@ mod lists {
 
     impl Strides {
         #[inline(always)]
-        fn push(&mut self, item: u64) {
+        pub fn push(&mut self, item: u64) {
             if self.bounds.len() < 2 { self.clear() }
             if self.bounds[..2] == [0,0] {
                 self.bounds[0] = item;
@@ -284,7 +284,7 @@ mod lists {
 /// A sorted list of distinct facts.
 #[derive(Clone, Default)]
 pub struct FactContainer {
-    ordered: InternalContainer,
+    pub ordered: InternalContainer,
 }
 
 impl FactContainer {
@@ -467,5 +467,74 @@ impl FactLSM {
             self.layers.reverse();
         }
         self.tidy();
+    }
+}
+
+/// A layered trie representation in columns.
+pub mod forests {
+
+    use columnar::{Columnar, Index, Len, Push};
+    use crate::facts::List;
+
+    /// A sequence of `[T]` ordered lists, each acting as a map.
+    ///
+    /// For each integer input, corresponding to a path to a tree node,
+    /// the node forks by way of the associated list of `T`, where each
+    /// child has an index that can be used in a next layer (or not!).
+    pub struct Layer<T: Columnar> { pub list: <List<T> as Columnar>::Container }
+
+    /// A sequence of layers, where the outputs in one match the inputs in the next.
+    ///
+    /// Represents a layered trie, where each layer introduces a new "symbol".
+    pub struct Forest<T: Columnar> { pub layers: Vec<Layer<T>> }
+
+    /// A report we would expect to see in a sequence about two layers.
+    ///
+    /// A sequence of these reports reveal an ordered traversal of the keys
+    /// of two layers, with ranges exclusive to one, ranges exclusive to the
+    /// other, and individual elements (not ranges) common to both.
+    #[derive(Copy, Clone)]
+    pub enum Report {
+        /// Range of indices in this input.
+        This(usize, usize),
+        /// Range of indices in that input.
+        That(usize, usize),
+        /// Matching indices in both inputs.
+        Both(usize, usize),
+    }
+
+    impl<T: for<'a> Columnar<Ref<'a>: Ord>> Forest<T> {
+
+        /// Create a forest from an ordered list of `[T]` of a common length.
+        pub fn form(sorted: &<List<T> as Columnar>::Container) -> Self {
+            use columnar::Container;
+            let mut sorted = <<List<T> as Columnar>::Container as Container<List<T>>>::borrow(sorted).into_index_iter().peekable();
+            if let Some(prev) = sorted.next() {
+                let arity = prev.len();
+                let mut layers = (0 .. arity).map(|_| Layer { list: <List<T> as Columnar>::Container::default() }).collect::<Vec<_>>();
+
+                for index in 0 .. arity { layers[index].list.values.push(prev.get(index)); }
+
+                // For each new item, we assess the first coordinate it diverges from the prior,
+                // then seal subsequent lists and push all values from this coordinate onward.
+                for item in sorted {
+                    let mut differs = false;
+                    for index in 0 .. arity {
+                        let len = layers[index].list.values.len();
+                        if differs {  layers[index].list.bounds.push(len as u64); }
+                        differs |= T::reborrow(item.get(index)) != layers[index].list.values.borrow().get(len-1);
+                        if differs { layers[index].list.values.push(T::reborrow(item.get(index))); }
+                    }
+                }
+                // Seal the last lists with their bounds.
+                for layer in layers.iter_mut() { layer.list.bounds.push(layer.list.values.len() as u64); }
+
+                Self { layers }
+            }
+            else {
+                println!("Formed an empty forest");
+                Self { layers: Vec::default() }
+            }
+        }
     }
 }
