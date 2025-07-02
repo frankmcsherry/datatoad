@@ -117,13 +117,13 @@ mod lists {
         #[inline(always)]
         fn reborrow<'b, 'a: 'b>(thing: Self::Borrowed<'a>) -> Self::Borrowed<'b> {
             Lists {
-                bounds: Strides { bounds: &thing.bounds.bounds[..] },
+                bounds: Strides { bounds: thing.bounds.bounds },
                 values: T::Container::reborrow(thing.values),
             }
         }
     }
 
-    impl<'a, VC: Copy> Index for Lists<VC, &'a [u64]> {
+    impl<VC: Copy> Index for Lists<VC, &[u64]> {
         type Ref = ListRef<VC>;
         #[inline(always)]
         fn get(&self, index: usize) -> Self::Ref {
@@ -513,17 +513,17 @@ pub mod forests {
                 let arity = prev.len();
                 let mut layers = (0 .. arity).map(|_| Layer { list: <List<T> as Columnar>::Container::default() }).collect::<Vec<_>>();
 
-                for index in 0 .. arity { layers[index].list.values.push(prev.get(index)); }
+                for (index, layer) in layers.iter_mut().enumerate() { layer.list.values.push(prev.get(index)); }
 
                 // For each new item, we assess the first coordinate it diverges from the prior,
                 // then seal subsequent lists and push all values from this coordinate onward.
                 for item in sorted {
                     let mut differs = false;
-                    for index in 0 .. arity {
-                        let len = layers[index].list.values.len();
-                        if differs {  layers[index].list.bounds.push(len as u64); }
-                        differs |= T::reborrow(item.get(index)) != layers[index].list.values.borrow().get(len-1);
-                        if differs { layers[index].list.values.push(T::reborrow(item.get(index))); }
+                    for (index, layer) in layers.iter_mut().enumerate().take(arity) {
+                        let len = layer.list.values.len();
+                        if differs {  layer.list.bounds.push(len as u64); }
+                        differs |= T::reborrow(item.get(index)) != layer.list.values.borrow().get(len-1);
+                        if differs { layer.list.values.push(T::reborrow(item.get(index))); }
                     }
                 }
                 // Seal the last lists with their bounds.
