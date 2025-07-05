@@ -1,12 +1,12 @@
-use columnar::{Columnar, Container, Index, Len};
+use columnar::{Container, Index, Len};
 use crate::types::Rule;
-use crate::facts::{Fact, Facts, FactSet};
+use crate::facts::{Facts, FactSet, Relations};
 
 /// Implements a provided rule by way of a provided plan.
 ///
 /// Additionally, a rule-unique identifier allows the logic to create new relation names.
 /// The `stable` argument indicates whether we need to perform a full evaluation or only the changes.
-pub fn implement_plan(rule: &Rule, pos: usize, stable: bool, facts: &mut Facts) {
+pub fn implement_plan(rule: &Rule, pos: usize, stable: bool, facts: &mut Relations) {
     planning::Plan::from(rule).implement(pos, stable, facts);
 }
 
@@ -20,38 +20,38 @@ pub fn join_with(
     body2: &FactSet,
     stable: bool,
     arity: usize,
-    mut action: impl FnMut(<Fact as Columnar>::Ref<'_>, <Fact as Columnar>::Ref<'_>),
+    mut action: impl FnMut(<Facts as Container>::Ref<'_>, <Facts as Container>::Ref<'_>),
 )
 {
     // Compare elements by their first `arity` columns only.
     // This is a moment where compile-time information about types would help us; perhaps column introspection can recover.
-    let order = |x: <Fact as Columnar>::Ref<'_>, y: <Fact as Columnar>::Ref<'_>| { (0 .. arity).map(|i| x.get(i)).cmp((0 .. arity).map(|i| y.get(i))) };
+    let order = |x: <Facts as Container>::Ref<'_>, y: <Facts as Container>::Ref<'_>| { (0 .. arity).map(|i| x.get(i)).cmp((0 .. arity).map(|i| y.get(i))) };
 
     if stable {
         for layer1 in body1.stable.contents() {
             for layer2 in body2.stable.contents() {
-                join::<Fact>(layer1.borrow(), layer2.borrow(), order, &mut action);
+                join::<Facts>(layer1.borrow(), layer2.borrow(), order, &mut action);
             }
         }
     }
 
     for stable2 in body2.stable.contents() {
-        join::<Fact>(body1.recent.borrow(), stable2.borrow(), order, &mut action);
+        join::<Facts>(body1.recent.borrow(), stable2.borrow(), order, &mut action);
     }
 
     for stable1 in body1.stable.contents() {
-        join::<Fact>(stable1.borrow(), body2.recent.borrow(), order, &mut action);
+        join::<Facts>(stable1.borrow(), body2.recent.borrow(), order, &mut action);
     }
 
-    join::<Fact>(body1.recent.borrow(), body2.recent.borrow(), order, &mut action);
+    join::<Facts>(body1.recent.borrow(), body2.recent.borrow(), order, &mut action);
 }
 
 /// Match keys in `input1` and `input2` and act on matches.
-fn join<'a, T: Columnar<Ref<'a> : Ord>> (
-    input1: <T::Container as Container<T>>::Borrowed<'a>,
-    input2: <T::Container as Container<T>>::Borrowed<'a>,
-    mut order: impl FnMut(T::Ref<'a>, T::Ref<'a>) -> std::cmp::Ordering,
-    mut action: impl FnMut(T::Ref<'a>, T::Ref<'a>),
+fn join<'a, TC: Container<Ref<'a> : Ord>> (
+    input1: TC::Borrowed<'a>,
+    input2: TC::Borrowed<'a>,
+    mut order: impl FnMut(TC::Ref<'a>, TC::Ref<'a>) -> std::cmp::Ordering,
+    mut action: impl FnMut(TC::Ref<'a>, TC::Ref<'a>),
 ) {
     use std::cmp::Ordering;
 
@@ -66,7 +66,7 @@ fn join<'a, T: Columnar<Ref<'a> : Ord>> (
         match order(pos1, pos2) {
             Ordering::Less => {
                 // advance `index1` while strictly less than `pos2`.
-                gallop::<T>(input1, &mut index1, |x| order(x, pos2) == Ordering::Less);
+                gallop::<TC>(input1, &mut index1, |x| order(x, pos2) == Ordering::Less);
             },
             Ordering::Equal => {
                 // Find *all* matches and increment indexes.
@@ -86,7 +86,7 @@ fn join<'a, T: Columnar<Ref<'a> : Ord>> (
             },
             std::cmp::Ordering::Greater => {
                 // advance `index2` while strictly less than `pos1`.
-                gallop::<T>(input2, &mut index2, |x| order(x, pos1) == Ordering::Less);
+                gallop::<TC>(input2, &mut index2, |x| order(x, pos1) == Ordering::Less);
             },
         }
     }
@@ -97,7 +97,7 @@ fn join<'a, T: Columnar<Ref<'a> : Ord>> (
 /// The method assumes that `cmp` is monotonic, never becoming true once it is false.
 /// If an `upper` is supplied, it acts as a constraint on the interval of `input` explored.
 #[inline(always)]
-pub(crate) fn gallop<'a, T: Columnar>(input: <T::Container as Container<T>>::Borrowed<'a>, index: &mut usize, mut cmp: impl FnMut(<T as Columnar>::Ref<'a>) -> bool) {
+pub(crate) fn gallop<'a, TC: Container>(input: TC::Borrowed<'a>, index: &mut usize, mut cmp: impl FnMut(TC::Ref<'a>) -> bool) {
     let upper = input.len();
     // if empty input, or already >= element, return
     if *index < upper && cmp(input.get(*index)) {
@@ -125,7 +125,7 @@ pub mod planning {
     use std::collections::{BTreeMap, BTreeSet};
     use eggsalad::{Function, egraph::{EGraph, ENode, Id}};
     use crate::types::{Rule, Term};
-    use crate::facts::Facts;
+    use crate::facts::Relations;
 
     pub struct Plan<'a> {
         /// The original rule, used for finishing detail.
@@ -144,7 +144,7 @@ pub mod planning {
     }
 
     impl<'a> Plan<'a> {
-        pub fn implement(&self, pos: usize, stable: bool, facts: &mut Facts) {
+        pub fn implement(&self, pos: usize, stable: bool, facts: &mut Relations) {
 
             use columnar::Index;
             use crate::{facts::FactBuilder, join::join_with, types::Atom};

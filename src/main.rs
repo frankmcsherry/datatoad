@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use datatoad::{facts, parse, types};
-use datatoad::facts::{Fact, List};
+use datatoad::facts::Terms;
 
 fn main() {
 
@@ -19,10 +19,15 @@ fn main() {
             if !line.is_empty() && !line.starts_with('#') {
                 let mut elts = line.split_whitespace().rev();
                 if let Some(name) = elts.next() {
-                    let items = elts.rev().map(|x| x.parse::<u32>().unwrap()).map(|u| List { items: vec![(u >> 16) as u8, (u >> 8) as u8, u as u8] }).collect::<Vec<_>>();
+                    let items = elts.rev().map(|x| x.parse::<u32>().unwrap()).map(|u| { vec![
+                        (u >> 24) as u8,
+                        (u >> 16) as u8,
+                        (u >>  8) as u8,
+                        (u >>  0) as u8,
+                    ] }).collect::<Vec<_>>();
                     dict.entry(name.to_string())
                         .or_default()
-                        .push(&Fact { items });
+                        .push(&items);
                 }
             }
         }
@@ -60,7 +65,8 @@ fn main() {
                                 println!("Found {:?}", name);
                                 for list in found.stable.contents() {
                                     use datatoad::facts::forests::Forest;
-                                    let forest = Forest::<List<u8>>::form(&list.ordered);
+                                    use columnar::Index;
+                                    let forest = Forest::<Terms>::form(list.ordered.borrow().into_index_iter());
                                     print!("Layer sizes: {:?}", list.len());
                                     for layer in forest.layers.iter().rev() {
                                         use columnar::Len;
@@ -78,7 +84,7 @@ fn main() {
                                     let mut explain = String::default();
                                     forest.layers
                                           .iter()
-                                          .for_each(|layer| <<List<List<u8>> as columnar::Columnar>::Container as Container<List<List<u8>>>>::borrow(&layer.list)
+                                          .for_each(|layer| layer.list.borrow()
                                                 .as_bytes()
                                                 .for_each(|(_,s)| { write!(&mut explain, " {:?}", s.len()).unwrap(); total += s.len()}));
                                     println!("\tnew bytes: {:?}:\t{}", total, explain);
@@ -95,7 +101,7 @@ fn main() {
                                 temp.sort();
                                 for item in temp.iter().take(10) {
                                     print!("\t(");
-                                    for coord in item.iter() {
+                                    for coord in item.into_iter() {
                                         print!("{:?},", str::from_utf8(coord.as_slice()).unwrap());
                                     }
                                     println!(")");

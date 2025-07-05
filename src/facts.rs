@@ -1,11 +1,17 @@
 //! Methods and types to support building and maintaining ordered sets of facts.
 
 use std::collections::BTreeMap;
-use columnar::{Columnar, Container, Index, Len, Push};
+use columnar::{Container, Index, Len, Push};
+use columnar::Vecs;
+
+/// A `Vecs` using strided offsets.
+pub type Lists<C> = Vecs<C, Strides>;
 
 /// Use the `List` type to access an alternate columnar container.
-pub type Fact = List<List<u8>>;
-pub type Facts = BTreeMap<String, FactSet>;
+pub type Fact = Vec<Vec<u8>>;
+pub type Terms = Lists<Vec<u8>>;
+pub type Facts = Lists<Terms>;
+pub type Relations = BTreeMap<String, FactSet>;
 
 #[derive(Default)]
 pub struct FactSet {
@@ -45,7 +51,7 @@ impl FactSet {
             let stable = &self.stable;
             self.recent = to_add.filter(move |x| {
                 starts.iter_mut().zip(&stable.layers).all(|(start, layer)| {
-                    crate::join::gallop::<Fact>(layer.borrow(), start, |y| y < x);
+                    crate::join::gallop::<Facts>(layer.borrow(), start, |y| y < x);
                     *start >= layer.len() || layer.borrow().get(*start) != x
                 })
             });
@@ -53,124 +59,16 @@ impl FactSet {
     }
 }
 
-pub type InternalContainer = Lists<Lists<Vec<u8>>>;
-
-pub use lists::{List, Lists};
+pub use stride::Strides;
 /// An internal container implementation that optimizes offsets when strided.
 ///
 /// This module exists mostly because of limitations in `columnar`, and how
 /// containers require an owned type that they are a container of. In this
 /// case there is no good type that isn't already taken, or that seems to be.
-mod lists {
+mod stride {
 
     use std::ops::Deref;
-    use columnar::{Columnar, Container, Index, Len, AsBytes, FromBytes};
-
-    #[derive(Clone, Debug, Default)]
-    pub struct List<T> { pub items: Vec<T> }
-    impl<T> Deref for List<T> { type Target = Vec<T>; fn deref(&self) -> &Self::Target { &self.items } }
-
-    impl<T: Columnar> Columnar for List<T> {
-        type Ref<'a> = ListRef<<<T as Columnar>::Container as Container<T>>::Borrowed<'a>>;
-        #[inline(always)]
-        fn copy_from<'a>(&mut self, other: Self::Ref<'a>) {
-            self.items.truncate(other.len());
-            for i in 0 .. self.items.len() {
-                T::copy_from(&mut self.items[i], other.get(i));
-            }
-            for i in self.items.len() .. other.len() {
-                self.items.push(T::into_owned(other.get(i)));
-            }
-        }
-        #[inline(always)]
-        fn into_owned<'a>(other: Self::Ref<'a>) -> Self {
-            let mut list = List { items: Vec::with_capacity(other.len()) };
-            Self::copy_from(&mut list, other);
-            list
-        }
-        type Container = Lists<T::Container>;
-        #[inline(always)]
-        fn reborrow<'b, 'a: 'b>(thing: Self::Ref<'a>) -> Self::Ref<'b> where Self: 'a {
-            ListRef {
-                lower: thing.lower,
-                upper: thing.upper,
-                items: <T::Container as Container<T>>::reborrow(thing.items),
-            }
-        }
-    }
-
-    #[derive(Copy, Clone, Default)]
-    pub struct Lists<VC, BC = Vec<u64>> {
-        pub bounds: Strides<BC>,
-        pub values: VC,
-    }
-
-    impl<T: Columnar> Container<List<T>> for Lists<T::Container> {
-        type Borrowed<'a> = Lists<<T::Container as Container<T>>::Borrowed<'a> , &'a [u64]>;
-        #[inline(always)]
-        fn borrow<'a>(&'a self) -> Self::Borrowed<'a> {
-            Lists {
-                bounds: Strides { bounds: &self.bounds.bounds[..] },
-                values: self.values.borrow(),
-            }
-        }
-        #[inline(always)]
-        fn reborrow<'b, 'a: 'b>(thing: Self::Borrowed<'a>) -> Self::Borrowed<'b> {
-            Lists {
-                bounds: Strides { bounds: thing.bounds.bounds },
-                values: T::Container::reborrow(thing.values),
-            }
-        }
-    }
-
-    impl<VC: Copy> Index for Lists<VC, &[u64]> {
-        type Ref = ListRef<VC>;
-        #[inline(always)]
-        fn get(&self, index: usize) -> Self::Ref {
-            let (lower, upper) = self.bounds.bounds(index);
-            ListRef { lower, upper, items: self.values }
-        }
-    }
-
-    #[derive(Copy, Clone, Debug)]
-    pub struct ListRef<VC> {
-        lower: usize,
-        upper: usize,
-        items: VC,
-    }
-
-    impl<'a, T> ListRef<&'a [T]> {
-        pub fn as_slice(&self) -> &'a [T] {
-            &self.items[self.lower .. self.upper]
-        }
-    }
-
-    impl<VC: Index> ListRef<VC> {
-        #[inline(always)]
-        pub fn len(&self) -> usize { self.upper - self.lower }
-        #[inline(always)]
-        pub fn get(&self, index: usize) -> <VC as Index>::Ref {
-            self.items.get(index + self.lower)
-        }
-        #[inline(always)]
-        pub fn iter(&self) -> impl Iterator<Item=<VC as Index>::Ref> {
-            (0 .. self.len()).map(|i| self.get(i))
-        }
-    }
-
-    impl<VC: Index<Ref: PartialEq>> PartialEq for ListRef<VC> {
-        #[inline(always)]
-        fn eq(&self, other: &Self) -> bool { self.iter().eq(other.iter()) }
-    }
-    impl<VC: Index<Ref: Eq>> Eq for ListRef<VC> { }
-    impl<VC: Index<Ref: PartialOrd>> PartialOrd for ListRef<VC> {
-        #[inline(always)]
-        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { self.iter().partial_cmp(other.iter()) }
-    }
-    impl<VC: Index<Ref: Ord>> Ord for ListRef<VC> {
-        #[inline(always)]
-        fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.iter().cmp(other.iter()) }
-    }
+    use columnar::{Container, Index, Len, Push, Clear, AsBytes, FromBytes};
 
     /// The first two integers describe a stride pattern, [stride, length].
     ///
@@ -179,11 +77,9 @@ mod lists {
     /// items at position `i` whose value is `item * (i+1)`. After this comes
     /// the remaining entries in the bounds container.
     #[derive(Copy, Clone, Default)]
-    pub struct Strides<BC = Vec<u64>> { bounds: BC }
+    pub struct Strides<BC = Vec<u64>> { pub bounds: BC }
 
     impl<BC: Deref<Target=[u64]>> Strides<BC> {
-        #[inline(always)]
-        fn len(&self) -> usize { if self.bounds.len() < 2 { 0 } else { self.bounds[1] as usize + self.bounds[2..].len() } }
         #[inline(always)]
         pub fn bounds(&self, index: usize) -> (usize, usize) {
             let stride = self.bounds[0];
@@ -195,6 +91,53 @@ mod lists {
             } as usize;
             let upper = if index < length { (index+1) * stride } else { self.bounds[(index - length + 2) as usize] } as usize;
             (lower, upper)
+        }
+        pub fn strided(&self) -> Option<usize> {
+            if self.bounds.len() == 2 {
+                Some(self.bounds[0] as usize)
+            }
+            else { None }
+        }
+    }
+
+    impl Container for Strides {
+        type Ref<'a> = u64;
+        type Borrowed<'a> = Strides<&'a [u64]>;
+
+        fn borrow<'a>(&'a self) -> Self::Borrowed<'a> { Strides { bounds: &self.bounds[..] } }
+        /// Reborrows the borrowed type to a shorter lifetime. See [`Columnar::reborrow`] for details.
+        fn reborrow<'b, 'a: 'b>(item: Self::Borrowed<'a>) -> Self::Borrowed<'b> where Self: 'a {
+            Strides { bounds: item.bounds }
+        }
+        /// Reborrows the borrowed type to a shorter lifetime. See [`Columnar::reborrow`] for details.
+        fn reborrow_ref<'b, 'a: 'b>(item: Self::Ref<'a>) -> Self::Ref<'b> where Self: 'a { item }
+    }
+
+    impl<'a> Push<&'a u64> for Strides { fn push(&mut self, item: &'a u64) { self.push(*item) } }
+    impl Push<u64> for Strides { fn push(&mut self, item: u64) { self.push(item) } }
+    impl Clear for Strides { fn clear(&mut self) { self.clear() } }
+
+    impl<C: Len + Deref<Target=[u64]>> Len for Strides<C> { fn len(&self) -> usize { if self.bounds.len() < 2 { 0 } else { self.bounds[1] as usize + self.bounds.len() - 2 } } }
+    impl<'a> Index for Strides<&'a [u64]> {
+        type Ref = u64;
+        fn get(&self, index: usize) -> Self::Ref {
+            let stride = self.bounds[0];
+            let length = self.bounds[1];
+            let index = index as u64;
+            if index < length { (index+1) * stride } else { self.bounds[(index - length + 2) as usize] }
+        }
+    }
+
+    impl<'a, C: AsBytes<'a>> AsBytes<'a> for Strides<C> {
+        #[inline(always)]
+        fn as_bytes(&self) -> impl Iterator<Item=(u64, &'a [u8])> {
+            self.bounds.as_bytes()
+        }
+    }
+    impl<'a, C: FromBytes<'a>> FromBytes<'a> for Strides<C> {
+        #[inline(always)]
+        fn from_bytes(bytes: &mut impl Iterator<Item=&'a [u8]>) -> Self {
+            Self { bounds: C::from_bytes(bytes) }
         }
     }
 
@@ -217,66 +160,10 @@ mod lists {
             }
         }
         #[inline(always)]
-        fn clear(&mut self) {
+        pub fn clear(&mut self) {
             self.bounds.clear();
             self.bounds.push(0);
             self.bounds.push(0);
-        }
-    }
-
-    use columnar::Push;
-    impl<VC1: Index, VC2: Len + Push<<VC1 as Index>::Ref>> Push<ListRef<VC1>> for Lists<VC2> {
-        #[inline(always)]
-        fn push(&mut self, item: ListRef<VC1>) {
-            for index in 0 .. item.len() {
-                self.values.push(item.get(index));
-            }
-            self.bounds.push(self.values.len() as u64);
-        }
-    }
-    impl<'a, T: Columnar, VC: Len + Push<&'a T>> Push<&'a List<T>> for Lists<VC> {
-        #[inline(always)]
-        fn push(&mut self, list: &'a List<T>) {
-            self.values.extend(list.items.iter());
-            self.bounds.push(self.values.len() as u64);
-        }
-    }
-    impl<I: IntoIterator, VC: Len + Push<I::Item>> Push<I> for Lists<VC> {
-        #[inline(always)]
-        fn push(&mut self, item: I) {
-            self.values.extend(item);
-            self.bounds.push(self.values.len() as u64);
-        }
-    }
-
-    impl<VC, BC: Deref<Target=[u64]>> Len for Lists<VC, BC> {
-        #[inline(always)]
-        fn len(&self) -> usize { self.bounds.len() }
-    }
-
-    use columnar::Clear;
-    impl<VC: Clear> Clear for Lists<VC> {
-        #[inline(always)]
-        fn clear(&mut self) {
-            self.bounds.clear();
-            self.values.clear();
-        }
-    }
-
-    impl<'a, VC: AsBytes<'a>, BC: AsBytes<'a>> AsBytes<'a> for Lists<VC, BC> {
-        #[inline(always)]
-        fn as_bytes(&self) -> impl Iterator<Item=(u64, &'a [u8])> {
-            self.bounds.bounds.as_bytes().chain(self.values.as_bytes())
-        }
-    }
-
-    impl<'a, VC: FromBytes<'a>, BC: FromBytes<'a>> FromBytes<'a> for Lists<VC, BC> {
-        #[inline(always)]
-        fn from_bytes(bytes: &mut impl Iterator<Item=&'a [u8]>) -> Self {
-            Self {
-                bounds: Strides { bounds: BC::from_bytes(bytes) },
-                values: VC::from_bytes(bytes),
-            }
         }
     }
 }
@@ -284,20 +171,18 @@ mod lists {
 /// A sorted list of distinct facts.
 #[derive(Clone, Default)]
 pub struct FactContainer {
-    pub ordered: InternalContainer,
+    pub ordered: Facts,
 }
 
 impl FactContainer {
 
-    pub fn borrow(&self) -> <InternalContainer as Container<Fact>>::Borrowed<'_> {
-        <InternalContainer as Container<Fact>>::borrow(&self.ordered)
-    }
+    pub fn borrow(&self) -> <Facts as Container>::Borrowed<'_> { self.ordered.borrow() }
 
     pub fn len(&self) -> usize { self.borrow().len() }
     pub fn is_empty(&self) -> bool { self.borrow().is_empty() }
 
-    fn filter(mut self, mut p: impl FnMut(<Fact as Columnar>::Ref<'_>) -> bool) -> FactContainer {
-        let mut ordered = InternalContainer::default();
+    fn filter(mut self, mut p: impl FnMut(<Facts as Container>::Ref<'_>) -> bool) -> FactContainer {
+        let mut ordered = Facts::default();
         ordered.extend(self.borrow().into_index_iter().filter(|x| p(*x)));
         use columnar::Clear;
         self.ordered.clear();
@@ -305,7 +190,7 @@ impl FactContainer {
     }
 
     /// Merges two sorted deduplicated lists into one sorted deduplicated list.
-    fn merge(self, other: Self) -> Self {
+    fn merge(mut self, mut other: Self) -> Self {
     
         if self.is_empty() { return other; }
         if other.is_empty() { return self; }
@@ -314,91 +199,90 @@ impl FactContainer {
         // if self.borrow().last() < Some(other.borrow().get(0)) { println!("prepend"); }
         // if other.borrow().last() < Some(self.borrow().get(0)) { println!("postpend"); }
 
-        // TODO: Have columnar learn to extend from ranges of containers with memcpy.
-    
-        let mut ordered = InternalContainer::default();
+        // Attempt to sniff out a known pattern of fact and term sizes.
+        // Clearly needs to be generalized, or something.
+        if let (Some(2), Some(4)) = (self.ordered.bounds.strided(), self.ordered.values.bounds.strided()) {
+            if let (Some(2), Some(4)) = (other.ordered.bounds.strided(), other.ordered.values.bounds.strided()) {
 
-        let mut iter1 = self.borrow().into_index_iter().peekable();
-        let mut iter2 = other.borrow().into_index_iter().peekable();
-    
-        while let (Some(fact1), Some(fact2)) = (iter1.peek(), iter2.peek()) {
-            match fact1.cmp(fact2) {
-                std::cmp::Ordering::Less => {
-                    ordered.push(*fact1);
-                    iter1.next();
-                }
-                std::cmp::Ordering::Equal => {
-                    ordered.push(*fact1);
-                    iter1.next();
-                    iter2.next();
-                }
-                std::cmp::Ordering::Greater => {
-                    ordered.push(*fact2);
-                    iter2.next();
-                }
-            }
-        }
-        ordered.extend(iter1);
-        ordered.extend(iter2);
-    
-        Self { ordered }
-    }
+                if self.len() < other.len() { std::mem::swap(&mut self, &mut other); }
 
-    /// Merges many sorted deduplicated lists into one sorted deduplicated list.
-    fn _multiway_merge<const K: usize>(many: &[Self; K]) -> Self {
-    
-        let mut ordered = InternalContainer::default();
+                self.ordered.bounds.bounds[1] += other.ordered.bounds.bounds[1];
+                self.ordered.values.bounds.bounds[1] += other.ordered.values.bounds.bounds[1];
+                Extend::extend(&mut self.ordered.values.values, other.ordered.values.values);
 
-        let mut iters: [_; K] =
-        many.iter()
-            .map(|x| x.borrow().into_index_iter().peekable())
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap_or_else(|_| panic!());
-
-        while let Some((_min, idx)) = iters.iter_mut().enumerate().filter_map(|(i,x)| x.peek().map(|x| (x,i))).min() {
-            let min = iters[idx].next().unwrap();
-            ordered.push(min);
-            for iter in iters.iter_mut() {
-                if iter.peek() == Some(&min) {
-                    iter.next();
+                let (more, less) = self.ordered.values.values.as_chunks_mut::<8>();
+                assert!(less.is_empty());
+                more.sort();
+                let mut finger = 0;
+                for i in 1 .. more.len() {
+                    if more[i] != more[finger] {
+                        finger += 1;
+                        more[finger] = more[i];
+                    }
                 }
+                finger += 1;
+                self.ordered.values.values.truncate(8 * finger);
+
+                self.ordered.bounds.clear();
+                self.ordered.bounds.bounds[0] = 2;
+                self.ordered.bounds.bounds[1] = finger as u64;
+                self.ordered.values.bounds.clear();
+                self.ordered.values.bounds.bounds[0] = 4;
+                self.ordered.values.bounds.bounds[1] = 2 * finger as u64;
+
+                return self;
             }
         }
 
+        let ordered = Facts::merge::<true>(self.borrow(), other.borrow());
         Self { ordered }
     }
 
-    fn from(facts: &InternalContainer) -> Self {
-        let mut ordered = InternalContainer::default();
-        let borrowed = <InternalContainer as Container<Fact>>::borrow(facts);
+    fn from(facts: &mut Facts) -> Self {
 
-        let mut items = borrowed.into_index_iter().collect::<Vec<_>>();
-        items.sort();
-        items.dedup();
-        ordered.extend(items);
+        // Attempt to sniff out a known pattern of fact and term sizes.
+        // Clearly needs to be generalized, or something.
+        if let (Some(2), Some(4)) = (facts.bounds.strided(), facts.values.bounds.strided()) {
+            let (more, less) = facts.values.values.as_chunks_mut::<8>();
+            assert!(less.is_empty());
+            more.sort_unstable();
+            let mut finger = 0;
+            for i in 1 .. more.len() {
+                if more[i] != more[finger] {
+                    finger += 1;
+                    more[finger] = more[i];
+                }
+            }
+            finger += 1;
+            facts.values.values.truncate(8 * finger);
+            facts.bounds.bounds[1] = finger as u64;
+            facts.values.bounds.bounds[1] = 2 * finger as u64;
 
-        Self { ordered }
+            return Self { ordered: std::mem::take(facts) }
+        }
+
+        facts.sort::<true>();
+        Self { ordered: std::mem::take(facts) }
     }
 }
 
 #[derive(Clone, Default)]
 pub struct FactBuilder {
-    active: InternalContainer,
+    active: Facts,
     layers: FactLSM,
 }
 
 impl FactBuilder {
-    pub fn push<I>(&mut self, item: I) where InternalContainer: Push<I> {
+    pub fn push<I>(&mut self, item: I) where Facts: Push<I> {
         self.active.push(item);
         if self.active.len() > 1_000_000 {
             use columnar::Clear;
-            self.layers.push(FactContainer::from(&self.active));
+            self.layers.push(FactContainer::from(&mut self.active));
             self.active.clear();
         }
     }
     fn finish(mut self) -> FactLSM {
-        self.layers.push(FactContainer::from(&self.active));
+        self.layers.push(FactContainer::from(&mut self.active));
         self.layers
     }
 }
@@ -473,20 +357,20 @@ impl FactLSM {
 /// A layered trie representation in columns.
 pub mod forests {
 
-    use columnar::{Columnar, Index, Len, Push};
-    use crate::facts::List;
+    use columnar::{Container, Index};
+    use crate::facts::Lists;
 
     /// A sequence of `[T]` ordered lists, each acting as a map.
     ///
     /// For each integer input, corresponding to a path to a tree node,
     /// the node forks by way of the associated list of `T`, where each
     /// child has an index that can be used in a next layer (or not!).
-    pub struct Layer<T: Columnar> { pub list: <List<T> as Columnar>::Container }
+    pub struct Layer<C: Container> { pub list: Lists<C> }
 
     /// A sequence of layers, where the outputs in one match the inputs in the next.
     ///
     /// Represents a layered trie, where each layer introduces a new "symbol".
-    pub struct Forest<T: Columnar> { pub layers: Vec<Layer<T>> }
+    pub struct Forest<C: Container> { pub layers: Vec<Layer<C>> }
 
     /// A report we would expect to see in a sequence about two layers.
     ///
@@ -503,15 +387,14 @@ pub mod forests {
         Both(usize, usize),
     }
 
-    impl<T: for<'a> Columnar<Ref<'a>: Ord>> Forest<T> {
+    impl<C: for<'a> Container<Ref<'a>: Ord>> Forest<C> {
 
-        /// Create a forest from an ordered list of `[T]` of a common length.
-        pub fn form(sorted: &<List<T> as Columnar>::Container) -> Self {
-            use columnar::Container;
-            let mut sorted = <<List<T> as Columnar>::Container as Container<List<T>>>::borrow(sorted).into_index_iter().peekable();
+        /// Create a forest from an ordered list of `[C::Ref]` of a common length.
+        pub fn form<'a>(sorted: impl Iterator<Item = <Lists<C> as Container>::Ref<'a>>) -> Self {
+            let mut sorted = sorted.peekable();
             if let Some(prev) = sorted.next() {
                 let arity = prev.len();
-                let mut layers = (0 .. arity).map(|_| Layer { list: <List<T> as Columnar>::Container::default() }).collect::<Vec<_>>();
+                let mut layers = (0 .. arity).map(|_| Layer { list: Lists::<C>::default() }).collect::<Vec<_>>();
 
                 for (index, layer) in layers.iter_mut().enumerate() { layer.list.values.push(prev.get(index)); }
 
@@ -522,8 +405,8 @@ pub mod forests {
                     for (index, layer) in layers.iter_mut().enumerate().take(arity) {
                         let len = layer.list.values.len();
                         if differs {  layer.list.bounds.push(len as u64); }
-                        differs |= T::reborrow(item.get(index)) != layer.list.values.borrow().get(len-1);
-                        if differs { layer.list.values.push(T::reborrow(item.get(index))); }
+                        differs |= C::reborrow_ref(item.get(index)) != layer.list.values.borrow().get(len-1);
+                        if differs { layer.list.values.push(C::reborrow_ref(item.get(index))); }
                     }
                 }
                 // Seal the last lists with their bounds.
@@ -536,5 +419,193 @@ pub mod forests {
                 Self { layers: Vec::default() }
             }
         }
+
+        /// For each layer a map of its key dispositions for each output.
+        ///
+        /// Each element in the result spells out the key ordering in that layer.
+        /// The intent is that this map allows one to navigate directly to matching
+        /// records, and conduct further investigation without much more thinking.
+        pub fn survey(&self, other: &Self) -> Vec<Vec<Report>> {
+            let mut results = Vec::with_capacity(self.layers.len());
+            if let (Some(l0), Some(l1)) = (self.layers.first(), other.layers.first()) {
+                results.push(l0.survey(l1, &[Report::Both(0, 0)]));
+                for (layer0, layer1) in self.layers.iter().zip(other.layers.iter()).skip(1) {
+                    let last = results.last().unwrap();
+                    results.push(layer0.survey(layer1, last));
+                }
+            }
+            results
+        }
+
+    }
+
+    impl<C: for<'a> Container<Ref<'a>: Ord>> Layer<C> {
+        /// Given an input map, enrich the contended areas with further detail.
+        ///
+        /// Produces an output map fit for consumption by a next layer.
+        pub fn survey(&self, other: &Self, inbound: &[Report]) -> Vec<Report> {
+
+            use columnar::Container;
+            let list0 = self.list.borrow();
+            let list1 = other.list.borrow();
+
+            let mut result = Vec::default();
+            for report in inbound.iter() {
+
+                // We are only interested in contended areas.
+                if let Report::Both(index0, index1) = report {
+
+                    // Fetch the bounds from the layers.
+                    let (mut lower0, upper0) = list0.bounds.bounds(*index0);
+                    let (mut lower1, upper1) = list1.bounds.bounds(*index1);
+
+                    // Scour the intersecting range for matches.
+                    while lower0 < upper0 && lower1 < upper1 {
+                        let val0 = list0.values.get(lower0);
+                        let val1 = list1.values.get(lower1);
+                        match val0.cmp(&val1) {
+                            std::cmp::Ordering::Less => {
+                                let start = lower0;
+                                crate::join::gallop::<C>(list0.values, &mut lower0, |x| x < val1);
+                                result.push(Report::This(start, lower0));
+                            },
+                            std::cmp::Ordering::Equal => {
+                                result.push(Report::Both(lower0, lower1));
+                                lower0 += 1;
+                                lower1 += 1;
+                            },
+                            std::cmp::Ordering::Greater => {
+                                let start = lower1;
+                                crate::join::gallop::<C>(list1.values, &mut lower1, |x| x < val0);
+                                result.push(Report::That(start, lower1));
+                            },
+                        }
+                    }
+                    if lower0 < upper0 { result.push(Report::This(lower0, upper0))}
+                    if lower1 < upper1 { result.push(Report::This(lower1, upper1))}
+                }
+            }
+            result
+        }
+    }
+}
+
+/// Least-significant-digit radix sort, skipping identical bytes.
+fn _radix_sort<const K: usize>(slices: &mut [[u8; K]]) {
+
+    let mut histogram = [[0usize; 256]; K];
+    for slice in slices.iter() {
+        for (index, byte) in slice.iter().enumerate() {
+            histogram[index][*byte as usize] += 1;
+        }
+    }
+    let mut buffer = vec![[0u8; K]; slices.len()];
+    let mut borrow = &mut buffer[..];
+    let mut slices = &mut slices[..];
+
+    let indexes = histogram.iter_mut().enumerate().filter(|(_,h)| h.iter().filter(|c| **c > 0).count() > 1).collect::<Vec<_>>();
+    for (round, hist) in indexes.iter().rev() {
+        let mut counts = [0usize; 256];
+        for i in 1 .. 256 { counts[i] = counts[i-1] + hist[i-1]; }
+        for slice in slices.iter() {
+            let byte = slice[*round] as usize;
+            borrow[counts[byte]] = *slice;
+            counts[byte] += 1;
+        }
+        std::mem::swap(&mut slices, &mut borrow);
+    }
+    // TODO: we could dedup as part of this scan.
+    if indexes.len() % 2 == 1 { slices.copy_from_slice(borrow); }
+}
+
+impl <C: for<'a> Container<Ref<'a>: Ord>> Sorted for C { }
+
+/// Methods on containers with orderable items.
+///
+/// When specified, the `const DEDUP: usize` argument indicates that the inputs
+/// should be considered deduplicated, and the result should be deduplicated as
+/// well. Essentially, that repeats across collections should be suppressed.
+pub trait Sorted : for<'a> Container<Ref<'a>: Ord> {
+
+    /// Sort the container in place; optionally deduplicate.
+    fn sort<const DEDUP: bool>(&mut self) {
+        let mut result = Self::default();
+        let borrowed = self.borrow();
+        let mut items = borrowed.into_index_iter().collect::<Vec<_>>();
+        items.sort();
+        if DEDUP { items.dedup(); }
+        result.extend(items);
+        *self = result;
+    }
+
+    /// Merge two borrowed variants into an owned container.
+    fn merge<'a, const DEDUP: bool>(this: Self::Borrowed<'a>, that: Self::Borrowed<'a>) -> Self {
+
+        use crate::join::gallop;
+
+        let mut merged = Self::default();
+
+        let mut index0 = 0;
+        let mut index1 = 0;
+
+        while index0 < this.len() && index1 < that.len() {
+            let val0 = this.get(index0);
+            let val1 = that.get(index1);
+            match val0.cmp(&val1) {
+                std::cmp::Ordering::Less => {
+                    let lower = index0;
+                    // advance `index1` while strictly less than `pos2`.
+                    gallop::<Self>(this, &mut index0, |x| x < val1);
+                    merged.extend_from_self(this, lower .. index0);
+                }
+                std::cmp::Ordering::Equal => {
+                    merged.extend_from_self(this, index0 .. index0 + 1);
+                    if !DEDUP {
+                        // Use `that`, in case of some weird `Ord` impl.
+                        merged.extend_from_self(that, index1 .. index1 + 1);
+                    }
+                    index0 += 1;
+                    index1 += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    let lower = index1;
+                    // advance `index1` while strictly less than `pos2`.
+                    gallop::<Self>(that, &mut index1, |x| x < val0);
+                    merged.extend_from_self(that, lower .. index1);
+                }
+            }
+        }
+
+        merged.extend_from_self(this, index0 .. this.len());
+        merged.extend_from_self(that, index1 .. that.len());
+
+        merged
+    }
+
+    /// Merges many sorted deduplicated lists into one sorted deduplicated list.
+    fn multiway_merge<const K: usize, const DEDUP: bool>(many: &[Self; K]) -> Self {
+
+        let mut merged = Self::default();
+
+        let mut iters: [_; K] =
+        many.iter()
+            .map(|x| x.borrow().into_index_iter().peekable())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap_or_else(|_| panic!());
+
+        // TODO: Gallop a bit and see if there is an interval to `extend_from_self`.
+        while let Some((_min, idx)) = iters.iter_mut().enumerate().filter_map(|(i,x)| x.peek().map(|x| (x,i))).min() {
+            let min = iters[idx].next().unwrap();
+            if DEDUP { merged.push(min); }
+            for iter in iters.iter_mut() {
+                if iter.peek() == Some(&min) {
+                    if !DEDUP { merged.push(min); }
+                    iter.next();
+                }
+            }
+        }
+
+        merged
     }
 }

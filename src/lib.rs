@@ -27,7 +27,7 @@ pub mod types {
     #[derive(Default)]
     pub struct State {
         rules: Vec<Rule>,
-        pub facts: facts::Facts,
+        pub facts: facts::Relations,
     }
 
     impl State {

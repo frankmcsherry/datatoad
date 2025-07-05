@@ -5,6 +5,6 @@ edition = "2024"
 
 [dependencies]
 bytemuck = "1.20"
-columnar = "0.6"
+columnar = "0.8"
 eggsalad = { git = "https://github.com/frankmcsherry/eggsalad.git" }
 itertools = "0.14.0"
