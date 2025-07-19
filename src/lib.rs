@@ -2,9 +2,11 @@ pub mod parse;
 pub mod facts;
 pub mod join;
 
+pub mod plan;
+
 pub mod types {
 
-    use crate::{facts, join};
+    use crate::facts;
 
     #[derive(Clone, Debug)]
     pub struct Rule {
@@ -36,7 +38,7 @@ pub mod types {
             self.advance();
             while self.active() {
                 for (index, rule) in self.rules.iter().enumerate() {
-                    join::implement_plan(rule, index, false, &mut self.facts);
+                    crate::plan::implement_plan(rule, index, false, &mut self.facts);
                 }
                 self.advance();
             }
@@ -78,7 +80,7 @@ pub mod types {
                 }
             }
             else {
-                join::implement_plan(&rule, self.rules.len(), true, &mut self.facts);
+                crate::plan::implement_plan(&rule, self.rules.len(), true, &mut self.facts);
                 self.rules.push(rule);
             }
         }

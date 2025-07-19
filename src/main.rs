@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use datatoad::{facts, parse, types};
-use datatoad::facts::Terms;
+use datatoad::facts::FactList;
 
 fn main() {
 
@@ -12,7 +12,7 @@ fn main() {
         // Read input data from a handy file.
         use std::fs::File;
         use std::io::{BufRead, BufReader};
-        let mut dict: BTreeMap<String, facts::FactBuilder> = BTreeMap::default();
+        let mut dict: BTreeMap<String, facts::FactBuilder<FactList>> = BTreeMap::default();
         let file = BufReader::new(File::open(filename).unwrap());
         for readline in file.lines() {
             let line = readline.expect("read error");
@@ -59,59 +59,76 @@ fn main() {
                             println!("\t{}:\t{:?}", name, facts.len());
                         }
                     }
-                    ".test" => {
-                        for name in words {
-                            if let Some(found) = state.facts.get(name) {
-                                println!("Found {:?}", name);
-                                for list in found.stable.contents() {
-                                    use datatoad::facts::forests::Forest;
-                                    use columnar::Index;
-                                    let forest = Forest::<Terms>::form(list.ordered.borrow().into_index_iter());
-                                    print!("Layer sizes: {:?}", list.len());
-                                    for layer in forest.layers.iter().rev() {
-                                        use columnar::Len;
-                                        print!(" -> {:?}", layer.list.len());
-                                    }
-                                    println!();
-                                    use std::fmt::Write;
-                                    use columnar::AsBytes;
-                                    use columnar::Container;
-                                    let mut total = 0;
-                                    let mut explain = String::default();
-                                    list.borrow().as_bytes().for_each(|(_,s)| { write!(&mut explain, " {:?}", s.len()).unwrap(); total += s.len() });
-                                    println!("\told bytes: {:?}:\t{}", total, explain);
-                                    let mut total = 0;
-                                    let mut explain = String::default();
-                                    forest.layers
-                                          .iter()
-                                          .for_each(|layer| layer.list.borrow()
-                                                .as_bytes()
-                                                .for_each(|(_,s)| { write!(&mut explain, " {:?}", s.len()).unwrap(); total += s.len()}));
-                                    println!("\tnew bytes: {:?}:\t{}", total, explain);
-                                }
-                            }
-                        }
-                    }
-                    ".show" => {
-                        use columnar::Index;
-                        for name in words {
-                            if let Some(found) = state.facts.get(name) {
-                                println!();
-                                let mut temp = found.stable.contents().flat_map(|i| i.borrow().into_index_iter().take(10)).collect::<Vec<_>>();
-                                temp.sort();
-                                for item in temp.iter().take(10) {
-                                    print!("\t(");
-                                    for coord in item.into_iter() {
-                                        print!("{:?},", str::from_utf8(coord.as_slice()).unwrap());
-                                    }
-                                    println!(")");
-                                }
-                                if found.len() > 10 {
-                                    println!("\t .. ({:?} more)", found.len() - 10);
-                                }
-                            }
-                        }
-                    }
+                    // ".test" => {
+                    //     for name in words {
+                    //         if let Some(found) = state.facts.get(name) {
+                    //             println!("Found {:?}", name);
+                    //             for list in found.stable.contents() {
+                    //                 use std::fmt::Write;
+                    //                 use columnar::{Container, Index, Len, AsBytes};
+                    //                 use datatoad::facts::forests::Forest;
+                    //                 use datatoad::facts::{Facts, Sorted};
+
+                    //                 let timer = std::time::Instant::now();
+                    //                 let mut text = String::default();
+
+                    //                 let list = list.borrow();
+
+                    //                 let _test = <Facts as Sorted>::merge::<true>(list, list);
+                    //                 println!("{:?}\tmerged (old)", timer.elapsed());
+
+                    //                 let forest = Forest::<Terms>::form(list.into_index_iter());
+                    //                 write!(&mut text, "Layer sizes: {:?}", list.len()).unwrap();
+                    //                 for layer in forest.layers.iter().rev() {
+                    //                     use columnar::Len;
+                    //                     write!(&mut text, " -> {:?}", layer.list.len()).unwrap();
+                    //                 }
+                    //                 println!("{:?}\t{}", timer.elapsed(), text);
+                    //                 text.clear();
+
+                    //                 let mut total = 0;
+                    //                 list.as_bytes().for_each(|(_,s)| { write!(&mut text, " {:?}", s.len()).unwrap(); total += s.len() });
+                    //                 println!("{:?}\told bytes: {:?}:\t{}", timer.elapsed(), total, text);
+                    //                 text.clear();
+
+                    //                 let mut total = 0;
+                    //                 forest.layers
+                    //                       .iter()
+                    //                       .for_each(|layer| layer.list.borrow()
+                    //                             .as_bytes()
+                    //                             .for_each(|(_,s)| { write!(&mut text, " {:?}", s.len()).unwrap(); total += s.len()}));
+                    //                 println!("{:?}\tnew bytes: {:?}:\t{}", timer.elapsed(), total, text);
+                    //                 text.clear();
+
+                    //                 let forest2 = forest.union(&forest);
+                    //                 println!("{:?}\tmerged (new) {} -> {}", timer.elapsed(), forest.len(), forest2.len());
+
+                    //                 let forest3 = forest.minus(&forest);
+                    //                 println!("{:?}\texcept (new) {} -> {}", timer.elapsed(), forest.len(), forest3.len());
+                    //             }
+                    //         }
+                    //     }
+                    // }
+                    // ".show" => {
+                    //     use columnar::Index;
+                    //     for name in words {
+                    //         if let Some(found) = state.facts.get(name) {
+                    //             println!();
+                    //             let mut temp = found.stable.contents().flat_map(|i| i.borrow().into_index_iter().take(10)).collect::<Vec<_>>();
+                    //             temp.sort();
+                    //             for item in temp.iter().take(10) {
+                    //                 print!("\t(");
+                    //                 for coord in item.into_iter() {
+                    //                     print!("{:?},", str::from_utf8(coord.as_slice()).unwrap());
+                    //                 }
+                    //                 println!(")");
+                    //             }
+                    //             if found.len() > 10 {
+                    //                 println!("\t .. ({:?} more)", found.len() - 10);
+                    //             }
+                    //         }
+                    //     }
+                    // }
                     ".load" => { println!("unimplemnted: {:?}", word); }
                     ".save" => { println!("unimplemnted: {:?}", word); }
                     _ => {
