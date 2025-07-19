@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use columnar::{Container, Index, Len, Push};
 use crate::facts::{Facts, FactBuilder, FactContainer, Sorted, Terms};
 
@@ -36,14 +37,48 @@ impl FactContainer for FactList {
             }
         };
 
-        if arity == 1 {
-            crate::join::join::<Facts>(self.borrow(), other.borrow(), |x,y| x.get(0).cmp(&y.get(0)), &mut action);
-        }
-        else {
-            let order = |x: <Facts as Container>::Ref<'_>, y: <Facts as Container>::Ref<'_>| {
-                (0 .. arity).map(|i| x.get(i)).cmp((0 .. arity).map(|i| y.get(i)))
-            };
-            crate::join::join::<Facts>(self.borrow(), other.borrow(), order, &mut action);
+        let order = |x: <Facts as Container>::Ref<'_>, y: <Facts as Container>::Ref<'_>| {
+            (0 .. arity).map(|i| x.get(i)).cmp((0 .. arity).map(|i| y.get(i)))
+        };
+
+        let input1 = self.borrow();
+        let input2 = other.borrow();
+
+        let mut index1 = 0;
+        let mut index2 = 0;
+
+        // continue until either input is exhausted.
+        while index1 < input1.len() && index2 < input2.len() {
+            // compare the keys at this location.
+            let pos1 = input1.get(index1);
+            let pos2 = input2.get(index2);
+            match order(pos1, pos2) {
+                Ordering::Less => {
+                    // advance `index1` while strictly less than `pos2`.
+                    crate::join::gallop::<Facts>(input1, &mut index1, input1.len(), |x| order(x, pos2) == Ordering::Less);
+                },
+                Ordering::Equal => {
+                    // Find *all* matches and increment indexes.
+                    let count1 = (index1..input1.len()).take_while(|i| order(input1.get(*i), pos1) == Ordering::Equal).count();
+                    let count2 = (index2..input2.len()).take_while(|i| order(input2.get(*i), pos2) == Ordering::Equal).count();
+
+                    // TODO: Pivot logic to be builder, then column, then row.
+                    for i1 in 0 .. count1 {
+                        let row1 = input1.get(index1 + i1);
+                        for i2 in 0 .. count2 {
+                            let row2 = input2.get(index2 + i2);
+                            action(row1, row2);
+                        }
+                    }
+
+                    index1 += count1;
+                    index2 += count2;
+                },
+                std::cmp::Ordering::Greater => {
+                    // advance `index2` while strictly less than `pos1`.
+                    crate::join::gallop::<Facts>(input2, &mut index2, input2.len(), |x| order(x, pos1) == Ordering::Less);
+                },
+            }
         }
     }
 
