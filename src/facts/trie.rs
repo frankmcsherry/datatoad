@@ -1,7 +1,7 @@
 //! A layered trie representation in columns.
 
 use columnar::{Columnar, Container, Index, Len, Push, Vecs};
-use crate::facts::{Facts, FactBuilder, FactContainer, Lists, Terms};
+use crate::facts::{Facts, FactBuilder, FactContainer, FactLSM, Lists, Terms};
 
 /// A sequence of `[T]` ordered lists, each acting as a map.
 ///
@@ -258,13 +258,14 @@ impl FactContainer for Forest<Terms> {
 
     fn apply<'a>(&'a self, action: impl FnMut(&[<Terms as Container>::Ref<'a>])) {
         // Todo: only go to depth - 1, and submit an action that blasts through the last values.
-        let this = self.borrow();
-        apply(&this[..], 0, action)
+        apply(&self.borrow()[..], 0, action)
     }
 
-    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]], builders: &mut [FactBuilder<Self>]) {
+    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> {
 
-        if self.layers.len() < arity || other.layers.len() < arity { return; }
+        if self.layers.len() < arity || other.layers.len() < arity { return Vec::default(); }
+
+        let mut builders = vec![FactBuilder::default(); projections.len()];
 
         let shared0 = self.layers.iter().take(arity).map(|x| x.list.borrow()).collect::<Vec<_>>();
         let shared1 = other.layers.iter().take(arity).map(|x| x.list.borrow()).collect::<Vec<_>>();
@@ -276,14 +277,15 @@ impl FactContainer for Forest<Terms> {
         let mut extensions0: Vec<<Terms as Container>::Ref<'a>> = Vec::with_capacity(unique0.len());
         let mut extensions1: Vec<<Terms as Container>::Ref<'a>> = Vec::with_capacity(unique1.len());
 
+        // Unclear how large this will need to be.
+        let mut product: Vec<&[u8]> = Vec::new();
+
         align(&shared0[..], &shared1[..], |prefix, order, (index0, index1)| {
             if let std::cmp::Ordering::Equal = order {
 
                 // TODO: Project away columns not referenced by any projection.
                 apply(&unique0[..], index0, |list| Extend::extend(&mut extensions0, list.into_iter().cloned()));
                 apply(&unique1[..], index1, |list| Extend::extend(&mut extensions1, list.into_iter().cloned()));
-                extensions0.sort(); extensions0.dedup();
-                extensions1.sort(); extensions1.dedup();
 
                 let width0 = unique0.len();
                 let width1 = unique1.len();
@@ -291,21 +293,71 @@ impl FactContainer for Forest<Terms> {
                 assert!(extensions0.len() / width0 > 0);
                 assert!(extensions1.len() / width1 > 0);
 
-                // TODO: Pivot the logic to be builders first, then columns, then rows.
-                for idx0 in 0 .. (extensions0.len() / width0) {
-                    let ext0 = &extensions0[idx0 * width0 ..][.. width0];
-                    for idx1 in 0 .. (extensions1.len() / width1) {
-                        let ext1 = &extensions1[idx1 * width1 ..][.. width1];
-                        for (projection, builder) in projections.iter().zip(builders.iter_mut()) {
-                            builder.push(projection.iter().map(|i| match i {
-                                Ok(col) => {
-                                    if *col < arity { prefix[*col].as_slice() }
-                                    else if *col < arity + ext0.len() { ext0[col - arity].as_slice() }
-                                    else { ext1[col - ext0.len() - arity - arity].as_slice() }
+                let count0 = extensions0.len() / width0;
+                let count1 = extensions1.len() / width1;
+
+                // // TODO: Pivot the logic to be builders first, then columns, then rows.
+                // for idx0 in 0 .. count0 {
+                //     let ext0 = &extensions0[idx0 * width0 ..][.. width0];
+                //     for idx1 in 0 .. count1 {
+                //         let ext1 = &extensions1[idx1 * width1 ..][.. width1];
+                //         for (projection, builder) in projections.iter().zip(builders.iter_mut()) {
+                //             builder.push(projection.iter().map(|i| match i {
+                //                 Ok(col) => {
+                //                     if *col < arity { prefix[*col].as_slice() }
+                //                     else if *col < arity + width0 { ext0[col - arity].as_slice() }
+                //                     else { ext1[col - width0 - arity - arity].as_slice() }
+                //                 }
+                //                 Err(lit) => lit.as_bytes()
+                //             }));
+                //         }
+                //     }
+                // }
+
+                // TODO: Alternate implementation not obviously better than above!
+                // Intent is to go builders, columns, rows, in order to reduce the branches in loops.
+                // Could be streamlined further, e.g. by only maintaining `projection.len() * count1`
+                // values, and iterating through the `count0` extensions and slotting their values in.
+                let outputs = count0 * count1;
+                for (projection, builder) in projections.iter().zip(builders.iter_mut()) {
+                    product.resize(projection.len() * outputs, &[]);
+                    for (index, column) in projection.iter().enumerate() {
+                        match column {
+                            Ok(col) => {
+                                if *col < arity {
+                                    let slice = prefix[*col].as_slice();
+                                    for idx in 0 .. outputs {
+                                        product[index + idx * projection.len()] = slice;
+                                    }
                                 }
-                                Err(lit) => lit.as_bytes()
-                            }));
+                                else if *col < arity + width0 {
+                                    for idx0 in 0 .. count0 {
+                                        let ext0 = &extensions0[idx0 * width0 ..][.. width0];
+                                        let slice = ext0[col - arity].as_slice();
+                                        for idx1 in 0 .. count1 {
+                                            product[index + (idx0 * count1 + idx1) * projection.len()] = slice;
+                                        }
+                                    }
+                                }
+                                else {
+                                    for idx1 in 0 .. count1 {
+                                        let ext1 = &extensions1[idx1 * width1 ..][.. width1];
+                                        let slice = ext1[col - width0 - arity - arity].as_slice();
+                                        for idx0 in 0 .. count0 {
+                                            product[index + (idx0 * count1 + idx1) * projection.len()] = slice;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(lit) => {
+                                for idx in 0 .. outputs {
+                                    product[index + idx * projection.len()] = lit.as_bytes();
+                                }
+                            }
                         }
+                    }
+                    for chunk in product.chunks(projection.len()) {
+                        builder.push(chunk.iter().cloned());
                     }
                 }
 
@@ -314,6 +366,8 @@ impl FactContainer for Forest<Terms> {
                 extensions1.clear();
             }
         });
+
+        builders.into_iter().map(|b| b.finish()).collect::<Vec<_>>()
     }
 
     fn except<'a>(mut self, others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a {
@@ -423,83 +477,90 @@ impl FactContainer for Forest<Terms> {
     }
 }
 
-pub struct ForestBuilder<C> { pub layers: Vec<Layer<C>> }
+pub use forest_builder::ForestBuilder;
+mod forest_builder {
 
-impl<C: for<'a> Container<Ref<'a>: PartialEq>> ForestBuilder<C> {
+    use columnar::{Container, Index};
+    use crate::facts::{Lists, trie::{Forest, Layer}};
 
-    fn with_layers(layers: usize) -> Self {
-        let layers = (0 .. layers).map(|_| Layer { list: Lists::<C>::default() }).collect::<Vec<_>>();
-        Self { layers }
-    }
+    pub struct ForestBuilder<C> { pub layers: Vec<Layer<C>> }
 
-    /// Grafts a branch that is `prefix` followed by the remaining branch.
-    fn graft(&mut self, prefix: &[C::Ref<'_>], mut lower: usize, mut upper: usize, splice: &[<Lists<C> as Container>::Borrowed<'_>]) {
+    impl<C: for<'a> Container<Ref<'a>: PartialEq>> ForestBuilder<C> {
 
-        assert_eq!(self.layers.len(), prefix.len() + splice.len());
+        pub fn with_layers(layers: usize) -> Self {
+            let layers = (0 .. layers).map(|_| Layer { list: Lists::<C>::default() }).collect::<Vec<_>>();
+            Self { layers }
+        }
 
-        // Handle the prefix
-        let mut differs = false;
-        for (value, layer) in prefix.iter().zip(self.layers.iter_mut()) {
-            let len = layer.list.values.len();
-            if len > 0 {
-                if differs && len as u64 > layer.list.bounds.borrow().last().unwrap_or(0) {
-                    // assert!(len as u64 > layer.list.bounds.borrow().last().unwrap_or(0));
-                    layer.list.bounds.push(len as u64);
+        /// Grafts a branch that is `prefix` followed by the remaining branch.
+        pub fn graft(&mut self, prefix: &[C::Ref<'_>], mut lower: usize, mut upper: usize, splice: &[<Lists<C> as Container>::Borrowed<'_>]) {
+
+            assert_eq!(self.layers.len(), prefix.len() + splice.len());
+
+            // Handle the prefix
+            let mut differs = false;
+            for (value, layer) in prefix.iter().zip(self.layers.iter_mut()) {
+                let len = layer.list.values.len();
+                if len > 0 {
+                    if differs && len as u64 > layer.list.bounds.borrow().last().unwrap_or(0) {
+                        // assert!(len as u64 > layer.list.bounds.borrow().last().unwrap_or(0));
+                        layer.list.bounds.push(len as u64);
+                    }
+                    differs |= C::reborrow_ref(*value) != layer.list.values.borrow().get(len-1);
+                    if differs { layer.list.values.push(C::reborrow_ref(*value)); }
                 }
-                differs |= C::reborrow_ref(*value) != layer.list.values.borrow().get(len-1);
-                if differs { layer.list.values.push(C::reborrow_ref(*value)); }
+                else {
+                    layer.list.values.push(C::reborrow_ref(*value));
+                }
             }
-            else {
-                layer.list.values.push(C::reborrow_ref(*value));
+
+            // The `lower .. upper` range of *values* in the first splice correspond to the prefix,
+            // but they aren't necessarily mutually exclusive with prior calls. We could be called
+            // with
+            //          prefix, [a, b, c]
+            //          prefix, [f, g]
+            //          prefix, [z]
+            //
+            // We should copy in the range of values, and then completely copy all subsequent layers.
+
+            if !splice.is_empty() {
+
+                let len = self.layers[prefix.len()].list.values.len() as u64;
+                if differs {
+                    if len as u64 > self.layers[prefix.len()].list.bounds.borrow().last().unwrap_or(0) {
+                        self.layers[prefix.len()].list.bounds.push(len);
+                    }
+                }
+
+                self.layers[prefix.len()].list.values.extend_from_self(splice[0].values, lower .. upper);
+
+                // Seal and copy all subsequent layers.
+                for (layer, splice) in self.layers.iter_mut().skip(prefix.len()).zip(splice.iter()).skip(1) {
+
+                    let len = layer.list.values.len() as u64;
+                    if len > layer.list.bounds.borrow().last().unwrap_or(0) {
+                        layer.list.bounds.push(len);
+                    }
+
+                    layer.list.extend_from_self(*splice, lower .. upper);
+                    let (next_lower, _) = splice.bounds.bounds(lower);
+                    let (_, next_upper) = splice.bounds.bounds(upper-1);
+                    lower = next_lower;
+                    upper = next_upper;
+                }
             }
         }
 
-        // The `lower .. upper` range of *values* in the first splice correspond to the prefix,
-        // but they aren't necessarily mutually exclusive with prior calls. We could be called
-        // with
-        //          prefix, [a, b, c]
-        //          prefix, [f, g]
-        //          prefix, [z]
-        //
-        // We should copy in the range of values, and then completely copy all subsequent layers.
-
-        if !splice.is_empty() {
-
-            let len = self.layers[prefix.len()].list.values.len() as u64;
-            if differs {
-                if len as u64 > self.layers[prefix.len()].list.bounds.borrow().last().unwrap_or(0) {
-                    self.layers[prefix.len()].list.bounds.push(len);
-                }
-            }
-
-            self.layers[prefix.len()].list.values.extend_from_self(splice[0].values, lower .. upper);
-
-            // Seal and copy all subsequent layers.
-            for (layer, splice) in self.layers.iter_mut().skip(prefix.len()).zip(splice.iter()).skip(1) {
-
+        pub fn done(mut self) -> Forest<C> {
+            for layer in self.layers.iter_mut() {
                 let len = layer.list.values.len() as u64;
                 if len > layer.list.bounds.borrow().last().unwrap_or(0) {
                     layer.list.bounds.push(len);
                 }
-
-                layer.list.extend_from_self(*splice, lower .. upper);
-                let (next_lower, _) = splice.bounds.bounds(lower);
-                let (_, next_upper) = splice.bounds.bounds(upper-1);
-                lower = next_lower;
-                upper = next_upper;
             }
-        }
-    }
 
-    fn done(mut self) -> Forest<C> {
-        for layer in self.layers.iter_mut() {
-            let len = layer.list.values.len() as u64;
-            if len > layer.list.bounds.borrow().last().unwrap_or(0) {
-                layer.list.bounds.push(len);
-            }
+            Forest { layers: self.layers }
         }
-
-        Forest { layers: self.layers }
     }
 }
 

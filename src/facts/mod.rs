@@ -36,7 +36,7 @@ pub trait FactContainer : Default + Sized {
     /// Applies an action to each contained fact.
     fn apply<'a>(&'a self, action: impl FnMut(&[<Terms as Container>::Ref<'a>]));
     /// Joins `self` and `other` on the first `arity` columns, putting projected results in `builders`.
-    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]], builders: &mut [FactBuilder<Self>]);
+    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> ;
     /// Builds a container of facts present in `self` but not in any of `others`.
     fn except<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a;
     /// Builds a container of facts present in `self` or `other`.
@@ -59,8 +59,7 @@ impl<F: FactContainer> FactSet<F> {
         !self.recent.is_empty() || !self.to_add.layers.is_empty()
     }
 
-    pub fn add_set(&mut self, facts: FactBuilder<F>) {
-        let mut facts = facts.finish();
+    pub fn add_set(&mut self, mut facts: FactLSM<F>) {
         if !facts.layers.is_empty() {
             self.to_add.extend(&mut facts);
         }
@@ -97,7 +96,7 @@ impl<F: FactContainer> FactBuilder<F> {
             self.active.clear();
         }
     }
-    fn finish(mut self) -> FactLSM<F> {
+    pub fn finish(mut self) -> FactLSM<F> {
         self.layers.push(FactContainer::form(&mut self.active));
         self.layers
     }
@@ -117,7 +116,7 @@ impl<F: FactContainer> FactLSM<F> {
         }
     }
 
-    fn extend(&mut self, other: &mut FactLSM<F>) {
+    pub fn extend(&mut self, other: &mut FactLSM<F>) {
         Extend::extend(&mut self.layers, other.layers.drain(..));
         self.tidy();
     }

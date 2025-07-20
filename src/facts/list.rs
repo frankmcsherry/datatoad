@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use columnar::{Container, Index, Len, Push};
-use crate::facts::{Facts, FactBuilder, FactContainer, Sorted, Terms};
+use crate::facts::{Facts, FactBuilder, FactContainer, FactLSM, Sorted, Terms};
 
 /// A sorted list of distinct facts.
 #[derive(Clone, Default)]
@@ -27,7 +27,9 @@ impl FactContainer for FactList {
         }
     }
 
-    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]], builders: &mut [FactBuilder<Self>]) {
+    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> {
+
+        let mut builders: Vec<FactBuilder<Self>> = vec![FactBuilder::default(); projections.len()];
 
         let mut action = |v1: <Facts as Container>::Ref<'_>, v2: <Facts as Container>::Ref<'_>| {
             for (projection, builder) in projections.iter().zip(builders.iter_mut()) {
@@ -80,6 +82,8 @@ impl FactContainer for FactList {
                 },
             }
         }
+
+        builders.into_iter().map(|b| b.finish()).collect::<Vec<_>>()
     }
 
     fn except<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self {

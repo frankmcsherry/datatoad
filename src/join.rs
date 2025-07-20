@@ -1,37 +1,43 @@
 use columnar::Index;
-use crate::facts::{FactBuilder, FactContainer, FactSet};
+use crate::facts::{FactContainer, FactLSM, FactSet};
 
 /// Joins `body1` and `body2` using the first `arity` columns.
 ///
 /// Matching elements are subjected to `action`.
 /// When `stable` is set, we join the stable plus recent elements of each input;
 /// when it is unset we exclude pairs of terms that are both stable.
-pub fn join_with<F: FactContainer>(
+pub fn join_with<F: FactContainer + Clone>(
     body1: &FactSet<F>,
     body2: &FactSet<F>,
     stable: bool,
     arity: usize,
     projections: &[&[Result<usize, String>]],
-    builders: &mut [FactBuilder<F>],
-)
+) -> Vec<FactLSM<F>>
 {
+    let mut lsms = vec![FactLSM::default(); projections.len()];
+
     if stable {
         for layer1 in body1.stable.contents() {
             for layer2 in body2.stable.contents() {
-                layer1.join(layer2, arity, projections, builders);
+                let built = layer1.join(layer2, arity, projections);
+                lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
             }
         }
     }
 
     for stable2 in body2.stable.contents() {
-        body1.recent.join(stable2, arity, projections, builders);
+        let built = body1.recent.join(stable2, arity, projections);
+        lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
     }
 
     for stable1 in body1.stable.contents() {
-        stable1.join(&body2.recent, arity, projections, builders);
+        let built = stable1.join(&body2.recent, arity, projections);
+        lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
     }
 
-    body1.recent.join(&body2.recent, arity, projections, builders);
+    let built = body1.recent.join(&body2.recent, arity, projections);
+    lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
+    lsms
 }
 
 /// Increments `index` until just after the last element of `input` to satisfy `cmp`.

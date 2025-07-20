@@ -151,7 +151,7 @@ impl<'a> Plan<'a> {
 
                         for ((id, _action), builder) in todos.iter().zip(builders.into_iter()) {
                             let new_name = names.get(id).unwrap();
-                            facts.entry(new_name.clone()).or_default().add_set(builder);
+                            facts.entry(new_name.clone()).or_default().add_set(builder.finish());
                         }
                     }
 
@@ -168,15 +168,13 @@ impl<'a> Plan<'a> {
                     let facts0 = facts.get(names.get(&node.args[0]).unwrap()).unwrap();
                     let facts1 = facts.get(names.get(&node.args[1]).unwrap()).unwrap();
 
-                    let mut builders = vec![FactBuilder::default(); actions.len()];
-
                     let projections = actions.iter().map(|(_,a)| &a.projection[..]).collect::<Vec<_>>();
 
-                    join_with(facts0, facts1, stable, arity, &projections[..], &mut builders[..]);
+                    let built = join_with(facts0, facts1, stable, arity, &projections[..]);
 
-                    for ((id, _action), builder) in actions.iter().zip(builders.into_iter()) {
+                    for ((id, _action), built) in actions.iter().zip(built.into_iter()) {
                         let name = if *id >= body.len() { self.rule.head[id-body.len()].name.clone() } else { format!(".temp-{}-{}", pos, id) };
-                        facts.entry(name.clone()).or_default().add_set(builder);
+                        facts.entry(name.clone()).or_default().add_set(built);
                         names.insert(*id, name);
                     }
 

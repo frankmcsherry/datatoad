@@ -76,7 +76,7 @@ pub mod types {
                     self.facts
                         .entry(atom.name.to_owned())
                         .or_default()
-                        .add_set(builder);
+                        .add_set(builder.finish());
                 }
             }
             else {

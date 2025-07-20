@@ -31,7 +31,7 @@ fn main() {
                 }
             }
         }
-        for (name, facts) in dict { state.facts.entry(name).or_default().add_set(facts); }
+        for (name, facts) in dict { state.facts.entry(name).or_default().add_set(facts.finish()); }
     }
     state.update();
 
