@@ -6,6 +6,7 @@ use columnar::Vecs;
 use columnar::primitive::offsets::Strides;
 
 pub mod list;
+pub mod trie;
 
 /// A `Vecs` using strided offsets.
 pub type Lists<C> = Vecs<C, Strides>;
@@ -14,12 +15,20 @@ pub type Lists<C> = Vecs<C, Strides>;
 pub type Fact = Vec<Vec<u8>>;
 pub type Terms = Lists<Vec<u8>>;
 pub type Facts = Lists<Terms>;
-pub type Relations = BTreeMap<String, FactSet<FactList>>;
+pub type Relations = BTreeMap<String, FactSet<FactCollection>>;
 
-pub use list::FactList;
+// pub use list::FactList as FactCollection;
+pub use trie::Forest;
+pub type FactCollection = Forest<Terms>;
 
 /// A type that can contain and work with facts.
 pub trait FactContainer : Default + Sized {
+    /// Forms a container from a list of facts.
+    ///
+    /// The mutable reference allows us to efficiently sort `facts` if it has the right shape.
+    /// The method is not expected to consume or remove `facts`, and the caller should expect
+    /// to be able to reuse the resources after the call, without needing to reallocat.
+    fn form(facts: &mut Facts) -> Self;
     /// Number of facts in the container.
     fn len(&self) -> usize;
     /// True when the number of facts is zero.
@@ -32,12 +41,6 @@ pub trait FactContainer : Default + Sized {
     fn except<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a;
     /// Builds a container of facts present in `self` or `other`.
     fn merge(self, other: Self) -> Self;
-    /// Forms a container from a list of facts.
-    ///
-    /// The mutable reference allows us to efficiently sort `facts` if it has the right shape.
-    /// The method is not expected to consume or remove `facts`, and the caller should expect
-    /// to be able to reuse the resources after the call, without needing to reallocat.
-    fn form(facts: &mut Facts) -> Self;
 }
 
 /// An evolving set of facts.
@@ -70,7 +73,6 @@ impl<F: FactContainer> FactSet<F> {
         }
 
         if let Some(to_add) = self.to_add.flatten() {
-
             // Tidy stable by an amount proportional to the work we are about to do.
             self.stable.tidy_through(2 * to_add.len());
             // Remove from to_add any facts already in stable.
@@ -234,7 +236,7 @@ pub trait Sorted : for<'a> Container<Ref<'a>: Ord> {
                 std::cmp::Ordering::Less => {
                     let lower = index0;
                     // advance `index1` while strictly less than `pos2`.
-                    gallop::<Self>(this, &mut index0, this.len(), |x| x < val1);
+                    gallop(this, &mut index0, this.len(), |x| x < val1);
                     merged.extend_from_self(this, lower .. index0);
                 }
                 std::cmp::Ordering::Equal => {
@@ -249,7 +251,7 @@ pub trait Sorted : for<'a> Container<Ref<'a>: Ord> {
                 std::cmp::Ordering::Greater => {
                     let lower = index1;
                     // advance `index1` while strictly less than `pos2`.
-                    gallop::<Self>(that, &mut index1, that.len(), |x| x < val0);
+                    gallop(that, &mut index1, that.len(), |x| x < val0);
                     merged.extend_from_self(that, lower .. index1);
                 }
             }

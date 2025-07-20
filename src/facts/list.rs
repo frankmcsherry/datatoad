@@ -55,7 +55,7 @@ impl FactContainer for FactList {
             match order(pos1, pos2) {
                 Ordering::Less => {
                     // advance `index1` while strictly less than `pos2`.
-                    crate::join::gallop::<Facts>(input1, &mut index1, input1.len(), |x| order(x, pos2) == Ordering::Less);
+                    crate::join::gallop(input1, &mut index1, input1.len(), |x| order(x, pos2) == Ordering::Less);
                 },
                 Ordering::Equal => {
                     // Find *all* matches and increment indexes.
@@ -76,7 +76,7 @@ impl FactContainer for FactList {
                 },
                 std::cmp::Ordering::Greater => {
                     // advance `index2` while strictly less than `pos1`.
-                    crate::join::gallop::<Facts>(input2, &mut index2, input2.len(), |x| order(x, pos1) == Ordering::Less);
+                    crate::join::gallop(input2, &mut index2, input2.len(), |x| order(x, pos1) == Ordering::Less);
                 },
             }
         }
@@ -88,7 +88,7 @@ impl FactContainer for FactList {
         let mut ordered = Facts::default();
         let mut predicate = move |x| {
             starts.iter_mut().zip(others.iter()).all(|(start, other)| {
-                crate::join::gallop::<Facts>(*other, start, other.len(), |y| y < x);
+                crate::join::gallop(*other, start, other.len(), |y| y < x);
                 *start >= other.len() || other.get(*start) != x
             })
         };
@@ -163,11 +163,9 @@ impl FactContainer for FactList {
             facts.values.values.truncate(8 * finger);
             facts.bounds.length = finger as u64;
             facts.values.bounds.length = 2 * finger as u64;
-
-            return Self { ordered: std::mem::take(facts) }
         }
+        else { facts.sort::<true>(); }
 
-        facts.sort::<true>();
         Self { ordered: std::mem::take(facts) }
     }
 }
