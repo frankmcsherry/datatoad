@@ -42,6 +42,7 @@ impl Forest<Terms> {
                     values: most,
                 });
             }
+            else { return None; }
         }
         Some(output)
     }
