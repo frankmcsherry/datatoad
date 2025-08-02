@@ -1,39 +1,9 @@
-use std::collections::BTreeMap;
-
 use datatoad::{facts, parse, types};
 use datatoad::facts::FactCollection;
 
 fn main() {
 
     let mut state = types::State::default();
-
-    for filename in std::env::args().skip(1) {
-
-        // Read input data from a handy file.
-        use std::fs::File;
-        use std::io::{BufRead, BufReader};
-        let mut dict: BTreeMap<String, facts::FactBuilder<FactCollection>> = BTreeMap::default();
-        let file = BufReader::new(File::open(filename).unwrap());
-        for readline in file.lines() {
-            let line = readline.expect("read error");
-            if !line.is_empty() && !line.starts_with('#') {
-                let mut elts = line.split_whitespace().rev();
-                if let Some(name) = elts.next() {
-                    let items = elts.rev().map(|x| x.parse::<u32>().unwrap()).map(|u| { vec![
-                        (u >> 24) as u8,
-                        (u >> 16) as u8,
-                        (u >>  8) as u8,
-                        (u >>  0) as u8,
-                    ] }).collect::<Vec<_>>();
-                    dict.entry(name.to_string())
-                        .or_default()
-                        .push(&items);
-                }
-            }
-        }
-        for (name, facts) in dict { state.facts.entry(name).or_default().add_set(facts.finish()); }
-    }
-    state.update();
 
     use std::io::Write;
     println!();
@@ -59,56 +29,6 @@ fn main() {
                             println!("\t{}:\t{:?}", name, facts.len());
                         }
                     }
-                    // ".test" => {
-                    //     for name in words {
-                    //         if let Some(found) = state.facts.get(name) {
-                    //             println!("Found {:?}", name);
-                    //             for list in found.stable.contents() {
-                    //                 use std::fmt::Write;
-                    //                 use columnar::{Container, Index, Len, AsBytes};
-                    //                 use datatoad::facts::forests::Forest;
-                    //                 use datatoad::facts::{Facts, Sorted};
-
-                    //                 let timer = std::time::Instant::now();
-                    //                 let mut text = String::default();
-
-                    //                 let list = list.borrow();
-
-                    //                 let _test = <Facts as Sorted>::merge::<true>(list, list);
-                    //                 println!("{:?}\tmerged (old)", timer.elapsed());
-
-                    //                 let forest = Forest::<Terms>::form(list.into_index_iter());
-                    //                 write!(&mut text, "Layer sizes: {:?}", list.len()).unwrap();
-                    //                 for layer in forest.layers.iter().rev() {
-                    //                     use columnar::Len;
-                    //                     write!(&mut text, " -> {:?}", layer.list.len()).unwrap();
-                    //                 }
-                    //                 println!("{:?}\t{}", timer.elapsed(), text);
-                    //                 text.clear();
-
-                    //                 let mut total = 0;
-                    //                 list.as_bytes().for_each(|(_,s)| { write!(&mut text, " {:?}", s.len()).unwrap(); total += s.len() });
-                    //                 println!("{:?}\told bytes: {:?}:\t{}", timer.elapsed(), total, text);
-                    //                 text.clear();
-
-                    //                 let mut total = 0;
-                    //                 forest.layers
-                    //                       .iter()
-                    //                       .for_each(|layer| layer.list.borrow()
-                    //                             .as_bytes()
-                    //                             .for_each(|(_,s)| { write!(&mut text, " {:?}", s.len()).unwrap(); total += s.len()}));
-                    //                 println!("{:?}\tnew bytes: {:?}:\t{}", timer.elapsed(), total, text);
-                    //                 text.clear();
-
-                    //                 let forest2 = forest.union(&forest);
-                    //                 println!("{:?}\tmerged (new) {} -> {}", timer.elapsed(), forest.len(), forest2.len());
-
-                    //                 let forest3 = forest.minus(&forest);
-                    //                 println!("{:?}\texcept (new) {} -> {}", timer.elapsed(), forest.len(), forest3.len());
-                    //             }
-                    //         }
-                    //     }
-                    // }
                     // ".show" => {
                     //     use columnar::Index;
                     //     for name in words {
@@ -129,7 +49,56 @@ fn main() {
                     //         }
                     //     }
                     // }
-                    ".load" => { println!("unimplemnted: {:?}", word); }
+                    ".load" => {
+
+                        use std::io::{BufRead, BufReader};
+                        use std::fs::File;
+
+                        let args: Result<[_;3],_> = words.take(3).collect::<Vec<_>>().try_into();
+                        if let Ok(args) = args {
+                            let name = args[0].to_string();
+                            let pattern = args[1];
+                            let filename = args[2];
+
+                            if let Ok(regex) = regex::Regex::new(pattern) {
+                                let names = regex.capture_names().map(|x| x.to_owned()).collect::<Vec<_>>();
+                                let mut builder = facts::FactBuilder::<FactCollection>::default();
+                                if let Ok(file) = File::open(filename) {
+                                    let file = BufReader::new(file);
+                                    let mut terms = datatoad::facts::Terms::default();
+                                    for readline in file.lines() {
+                                        let line = readline.expect("read error");
+                                        if let Some(captures) = regex.captures(&line) {
+                                            use columnar::{Container, Index, Push, Clear};
+                                            terms.clear();
+                                            for (term, name) in captures.iter().zip(names.iter()).skip(1) {
+                                                let term = term.unwrap().as_str();
+                                                if name.map(|x| x.starts_with("u32")).unwrap_or(false) {
+                                                    let u = term.parse::<u32>().unwrap();
+                                                    let bytes = [
+                                                        (u >> 24) as u8,
+                                                        (u >> 16) as u8,
+                                                        (u >>  8) as u8,
+                                                        (u >>  0) as u8,
+                                                    ];
+                                                    terms.push(&bytes);
+                                                }
+                                                else {
+                                                    terms.push(term.as_bytes());
+                                                }
+                                            }
+                                            builder.push(terms.borrow().into_index_iter());
+                                        }
+                                    }
+                                    state.facts.entry(name).or_default().add_set(builder.finish());
+                                    state.update();
+                                }
+                                else { println!("file not found: {:?}", filename); }
+                            }
+                            else { println!("invalid regex: {:?}", pattern); }
+                        }
+                        else { println!(".load command requires arguments: <name> <patt> <file>"); }
+                    }
                     ".save" => { println!("unimplemnted: {:?}", word); }
                     _ => {
                         println!("Parse failure: {:?}", text);
