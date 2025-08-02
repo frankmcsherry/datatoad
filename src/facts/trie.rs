@@ -82,8 +82,7 @@ impl<C: Container> Forest<C> {
 impl<C: for<'a> Container<Ref<'a>: PartialEq>> Forest<C> {
 
     /// Create a forest from an ordered list of `[C::Ref]` of a common length.
-    pub fn form<'a>(sorted: impl Iterator<Item = <Lists<C> as Container>::Ref<'a>>) -> Self {
-        let mut sorted = sorted.peekable();
+    pub fn form_inner<'a>(mut sorted: impl Iterator<Item = <Lists<C> as Container>::Ref<'a>>) -> Self {
         if let Some(prev) = sorted.next() {
             let arity = prev.len();
             let mut layers = (0 .. arity).map(|_| Layer { list: Lists::<C>::default() }).collect::<Vec<_>>();
@@ -201,7 +200,7 @@ where
     // Peer into the void and decide to process all initial values.
     // TODO: generalize to lists of lists in the outer layer.
     ranges.push(((0, this[0].values.len()),
-                    (0, that[0].values.len())));
+                 (0, that[0].values.len())));
 
     // We repeatedly progress the work atop `ranges`.
     while let Some(((l0, u0), (l1, u1))) = ranges.last_mut() {
@@ -259,7 +258,9 @@ impl FactContainer for Forest<Terms> {
 
     fn apply<'a>(&'a self, action: impl FnMut(&[<Terms as Container>::Ref<'a>])) {
         // Todo: only go to depth - 1, and submit an action that blasts through the last values.
-        apply(&self.borrow()[..], 0, action)
+        if self.len() > 0 {
+            apply(&self.borrow()[..], 0, action);
+        }
     }
 
     fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> {
@@ -278,9 +279,6 @@ impl FactContainer for Forest<Terms> {
         let mut extensions0: Vec<<Terms as Container>::Ref<'a>> = Vec::with_capacity(unique0.len());
         let mut extensions1: Vec<<Terms as Container>::Ref<'a>> = Vec::with_capacity(unique1.len());
 
-        // Unclear how large this will need to be.
-        let mut product: Vec<&[u8]> = Vec::new();
-
         align(&shared0[..], &shared1[..], |prefix, order, (index0, index1)| {
             if let std::cmp::Ordering::Equal = order {
 
@@ -291,74 +289,26 @@ impl FactContainer for Forest<Terms> {
                 let width0 = unique0.len();
                 let width1 = unique1.len();
 
-                assert!(extensions0.len() / width0 > 0);
-                assert!(extensions1.len() / width1 > 0);
+                // Width 0 moments still have a unit `[]` to engage with.
+                let count0 = if width0 > 0 { extensions0.len() / width0 } else { 1 };
+                let count1 = if width1 > 0 { extensions1.len() / width1 } else { 1 };
 
-                let count0 = extensions0.len() / width0;
-                let count1 = extensions1.len() / width1;
-
-                // // TODO: Pivot the logic to be builders first, then columns, then rows.
-                // for idx0 in 0 .. count0 {
-                //     let ext0 = &extensions0[idx0 * width0 ..][.. width0];
-                //     for idx1 in 0 .. count1 {
-                //         let ext1 = &extensions1[idx1 * width1 ..][.. width1];
-                //         for (projection, builder) in projections.iter().zip(builders.iter_mut()) {
-                //             builder.push(projection.iter().map(|i| match i {
-                //                 Ok(col) => {
-                //                     if *col < arity { prefix[*col].as_slice() }
-                //                     else if *col < arity + width0 { ext0[col - arity].as_slice() }
-                //                     else { ext1[col - width0 - arity - arity].as_slice() }
-                //                 }
-                //                 Err(lit) => lit.as_bytes()
-                //             }));
-                //         }
-                //     }
-                // }
-
-                // TODO: Alternate implementation not obviously better than above!
-                // Intent is to go builders, columns, rows, in order to reduce the branches in loops.
-                // Could be streamlined further, e.g. by only maintaining `projection.len() * count1`
-                // values, and iterating through the `count0` extensions and slotting their values in.
-                let outputs = count0 * count1;
-                for (projection, builder) in projections.iter().zip(builders.iter_mut()) {
-                    product.resize(projection.len() * outputs, &[]);
-                    for (index, column) in projection.iter().enumerate() {
-                        match column {
-                            Ok(col) => {
-                                if *col < arity {
-                                    let slice = prefix[*col].as_slice();
-                                    for idx in 0 .. outputs {
-                                        product[index + idx * projection.len()] = slice;
-                                    }
+                // TODO: Pivot the logic to be builders first, then columns, then rows.
+                for idx0 in 0 .. count0 {
+                    let ext0 = &extensions0[idx0 * width0 ..][.. width0];
+                    for idx1 in 0 .. count1 {
+                        let ext1 = &extensions1[idx1 * width1 ..][.. width1];
+                        for (projection, builder) in projections.iter().zip(builders.iter_mut()) {
+                            builder.push(projection.iter().map(|i| match i {
+                                Ok(col) => {
+                                    if *col < arity { prefix[*col].as_slice() }
+                                    else if *col < arity + width0 { ext0[col - arity].as_slice() }
+                                    else if *col < arity + width0 + arity { prefix[*col - arity - width0].as_slice() }
+                                    else { ext1[col - width0 - arity - arity].as_slice() }
                                 }
-                                else if *col < arity + width0 {
-                                    for idx0 in 0 .. count0 {
-                                        let ext0 = &extensions0[idx0 * width0 ..][.. width0];
-                                        let slice = ext0[col - arity].as_slice();
-                                        for idx1 in 0 .. count1 {
-                                            product[index + (idx0 * count1 + idx1) * projection.len()] = slice;
-                                        }
-                                    }
-                                }
-                                else {
-                                    for idx1 in 0 .. count1 {
-                                        let ext1 = &extensions1[idx1 * width1 ..][.. width1];
-                                        let slice = ext1[col - width0 - arity - arity].as_slice();
-                                        for idx0 in 0 .. count0 {
-                                            product[index + (idx0 * count1 + idx1) * projection.len()] = slice;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(lit) => {
-                                for idx in 0 .. outputs {
-                                    product[index + idx * projection.len()] = lit.as_bytes();
-                                }
-                            }
+                                Err(lit) => lit.as_bytes()
+                            }));
                         }
-                    }
-                    for chunk in product.chunks(projection.len()) {
-                        builder.push(chunk.iter().cloned());
                     }
                 }
 
@@ -451,6 +401,10 @@ impl FactContainer for Forest<Terms> {
 
     fn form(facts: &mut Facts) -> Self {
 
+        if facts.len() == 0 {
+            return Self::form_inner(facts.borrow().into_index_iter());
+        }
+
         // Attempt to sniff out a known pattern of fact and term sizes.
         // Clearly needs to be generalized, or something.
         if let (Some(2), Some(4)) = (facts.bounds.strided(), facts.values.bounds.strided()) {
@@ -468,13 +422,76 @@ impl FactContainer for Forest<Terms> {
             facts.values.values.truncate(8 * finger);
             facts.bounds.length = finger as u64;
             facts.values.bounds.length = 2 * finger as u64;
+
+            let borrow = facts.borrow();
+            let arrays: Vecs<&[[u8;4]],_> = Vecs {
+                bounds: borrow.bounds,
+                values: borrow.values.values.as_chunks::<4>().0,
+            };
+
+            let formed: Forest<Vec<[u8; 4]>> = Forest::form_inner(arrays.into_index_iter());
+            Self::downgrade(formed)
+        }
+        else
+        // Clearly needs to be generalized, or something.
+        if let (Some(3), Some(4)) = (facts.bounds.strided(), facts.values.bounds.strided()) {
+            let (more, less) = facts.values.values.as_chunks_mut::<12>();
+            assert!(less.is_empty());
+            more.sort_unstable();
+            let mut finger = 0;
+            for i in 1 .. more.len() {
+                if more[i] != more[finger] {
+                    finger += 1;
+                    more[finger] = more[i];
+                }
+            }
+            finger += 1;
+            facts.values.values.truncate(12 * finger);
+            facts.bounds.length = finger as u64;
+            facts.values.bounds.length = 3 * finger as u64;
+
+            let borrow = facts.borrow();
+            let arrays: Vecs<&[[u8;4]],_> = Vecs {
+                bounds: borrow.bounds,
+                values: borrow.values.values.as_chunks::<4>().0,
+            };
+
+            let formed: Forest<Vec<[u8; 4]>> = Forest::form_inner(arrays.into_index_iter());
+            Self::downgrade(formed)
+        }
+        else
+        // Clearly needs to be generalized, or something.
+        if let (Some(4), Some(4)) = (facts.bounds.strided(), facts.values.bounds.strided()) {
+            let (more, less) = facts.values.values.as_chunks_mut::<16>();
+            assert!(less.is_empty());
+            more.sort_unstable();
+            let mut finger = 0;
+            for i in 1 .. more.len() {
+                if more[i] != more[finger] {
+                    finger += 1;
+                    more[finger] = more[i];
+                }
+            }
+            finger += 1;
+            facts.values.values.truncate(16 * finger);
+            facts.bounds.length = finger as u64;
+            facts.values.bounds.length = 4 * finger as u64;
+
+            let borrow = facts.borrow();
+            let arrays: Vecs<&[[u8;4]],_> = Vecs {
+                bounds: borrow.bounds,
+                values: borrow.values.values.as_chunks::<4>().0,
+            };
+
+            let formed: Forest<Vec<[u8; 4]>> = Forest::form_inner(arrays.into_index_iter());
+            Self::downgrade(formed)
         }
         else {
+            println!("Sorting! ({:?})", (facts.bounds.strided(), facts.values.bounds.strided()));
             use crate::facts::Sorted;
             facts.sort::<true>();
+            Self::form_inner(facts.borrow().into_index_iter())
         }
-
-        Self::form(facts.borrow().into_index_iter())
     }
 }
 

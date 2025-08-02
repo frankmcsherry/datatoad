@@ -27,7 +27,7 @@ pub trait FactContainer : Default + Sized {
     ///
     /// The mutable reference allows us to efficiently sort `facts` if it has the right shape.
     /// The method is not expected to consume or remove `facts`, and the caller should expect
-    /// to be able to reuse the resources after the call, without needing to reallocat.
+    /// to be able to reuse the resources after the call, without needing to reallocate.
     fn form(facts: &mut Facts) -> Self;
     /// Number of facts in the container.
     fn len(&self) -> usize;

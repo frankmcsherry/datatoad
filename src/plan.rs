@@ -274,7 +274,9 @@ pub fn rule_to_ir(rule: &Rule) -> Vec<ENode<Op>> {
             Op::Var(_) => true,
             Op::Map(a) => {
                 // Maps will do work proportional to their projection length.
-                a.projection.len() <= thresh
+                a.projection.len() <= thresh &&
+                // All filters should be empty, or this should have a Var input.
+                ((a.lit_filter.is_empty() && a.var_filter.is_empty()) || graph.members[&node.args[0]].iter().all(|x| if let Op::Var(_) = x.op { true } else { false }) )
             },
             Op::Mul(_) => {
                 // Muls will do work proportional to the input key length
