@@ -21,26 +21,116 @@ pub type Relations = BTreeMap<String, FactSet<FactCollection>>;
 pub use trie::Forest;
 pub type FactCollection = Forest<Terms>;
 
-/// A type that can contain and work with facts.
-pub trait FactContainer : Default + Sized {
+/// A constant integer to which the facts could be upgraded.
+///
+/// The upgraded form is a distinct type, and this method cannot produce it alone.
+/// It requires help to observe the possibility, and invoke the specialized code.
+pub fn upgrade_hint(terms: <Lists<Terms> as Container>::Borrowed<'_>) -> Option<u64> {
+    terms.values.bounds.strided()
+}
+
+/// Attempts to recast a general term list as one of fixed width byte slices.
+pub fn upgrade<'a, const K: usize>(terms: <Lists<Terms> as Container>::Borrowed<'a>) -> Option<<Lists<Vec<[u8; K]>> as Container>::Borrowed<'a>> {
+    if upgrade_hint(terms)? as usize == K {
+        let (most, rest) = terms.values.values.as_chunks::<K>();
+        assert!(rest.is_empty());
+        Some(Vecs {
+            bounds: terms.bounds,
+            values: most,
+        })
+    }
+    else { None }
+}
+
+/// Converts a term list of fixed width byte slices to a general term list.
+pub fn downgrade<const K: usize>(terms: Lists<Vec<[u8; K]>>) -> Lists<Terms> {
+    let strides: Strides = Strides {
+        stride: (K as u64),
+        length: terms.values.len() as u64,
+        bounds: Vec::default(),
+    };
+    Vecs {
+        bounds: terms.bounds,
+        values: Vecs {
+            bounds: strides,
+            values: terms.values.into_flattened(),
+        }
+    }
+}
+
+/// Sorts and deduplicates
+pub fn sort<const DEDUP: bool>(facts: &mut Facts) {
+    // Attempt to sniff out a known pattern of fact and term sizes.
+    // Clearly needs to be generalized, or something.
+
+    let terms = facts.bounds.strided();
+    let bytes = facts.values.bounds.strided();
+
+    let width = terms.and_then(|w0| bytes.map(|w1| w0 * w1));
+    match width {
+        Some(8)  => sort_help::<DEDUP,  8>(facts, terms.unwrap()),
+        Some(12) => sort_help::<DEDUP, 12>(facts, terms.unwrap()),
+        Some(16) => sort_help::<DEDUP, 16>(facts, terms.unwrap()),
+        _ => {
+            use crate::facts::Sorted;
+            facts.sort::<DEDUP>();
+        }
+    }
+}
+
+#[inline(never)]
+fn sort_help<const DEDUP: bool, const W: usize>(facts: &mut Facts, terms: u64) {
+    let (more, less) = facts.values.values.as_chunks_mut::<W>();
+    assert!(less.is_empty());
+    // more.sort();
+    // more.sort_unstable();
+    radix_sort::lsb(more);
+    // radix_sort::msb(more);
+    if DEDUP {
+        let mut finger = 0;
+        for i in 1 .. more.len() {
+            if more[i] != more[finger] {
+                finger += 1;
+                more[finger] = more[i];
+            }
+        }
+        finger += 1;
+        // Popping back out to referencing bytes.
+        facts.values.values.truncate(W * finger);
+        facts.bounds.length = finger as u64;
+        facts.values.bounds.length = terms * finger as u64;
+    }
+}
+
+pub trait Form {
     /// Forms a container from a list of facts.
     ///
     /// The mutable reference allows us to efficiently sort `facts` if it has the right shape.
     /// The method is not expected to consume or remove `facts`, and the caller should expect
     /// to be able to reuse the resources after the call, without needing to reallocate.
     fn form(facts: &mut Facts) -> Self;
+}
+
+pub trait Length {
     /// Number of facts in the container.
     fn len(&self) -> usize;
     /// True when the number of facts is zero.
     fn is_empty(&self) -> bool { self.len() == 0 }
+}
+
+pub trait Merge {
+    /// Builds a container of facts present in `self` or `other`.
+    fn merge(self, other: Self) -> Self;
+}
+
+/// A type that can contain and work with facts.
+pub trait FactContainer : Form + Length + Merge + Default + Sized {
     /// Applies an action to each contained fact.
     fn apply<'a>(&'a self, action: impl FnMut(&[<Terms as Container>::Ref<'a>]));
     /// Joins `self` and `other` on the first `arity` columns, putting projected results in `builders`.
     fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> ;
     /// Builds a container of facts present in `self` but not in any of `others`.
     fn except<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a;
-    /// Builds a container of facts present in `self` or `other`.
-    fn merge(self, other: Self) -> Self;
 }
 
 /// An evolving set of facts.
@@ -82,33 +172,33 @@ impl<F: FactContainer> FactSet<F> {
 
 /// A staging ground for developing facts.
 #[derive(Clone, Default)]
-pub struct FactBuilder<F: FactContainer> {
+pub struct FactBuilder<F: Merge> {
     active: Facts,
     layers: FactLSM<F>,
 }
 
-impl<F: FactContainer> FactBuilder<F> {
+impl<F: Form + Merge + Length> FactBuilder<F> {
     pub fn push<I>(&mut self, item: I) where Facts: Push<I> {
         self.active.push(item);
-        if self.active.len() > 1_000_000 {
+        if self.active.len() > 10_000_000 {
             use columnar::Clear;
-            self.layers.push(FactContainer::form(&mut self.active));
+            self.layers.push(Form::form(&mut self.active));
             self.active.clear();
         }
     }
     pub fn finish(mut self) -> FactLSM<F> {
-        self.layers.push(FactContainer::form(&mut self.active));
+        self.layers.push(Form::form(&mut self.active));
         self.layers
     }
 }
 
 /// A list of fact lists that double in length, each sorted and distinct.
 #[derive(Clone, Default)]
-pub struct FactLSM<F: FactContainer> {
-    layers: Vec<F>,
+pub struct FactLSM<F> {
+    pub layers: Vec<F>,
 }
 
-impl<F: FactContainer> FactLSM<F> {
+impl<F: Merge + Length> FactLSM<F> {
     fn push(&mut self, layer: F) {
         if !layer.is_empty() {
             self.layers.push(layer);
@@ -169,33 +259,149 @@ impl<F: FactContainer> FactLSM<F> {
     }
 }
 
+pub mod radix_sort {
 
-/// Least-significant-digit radix sort, skipping identical bytes.
-fn _radix_sort<const K: usize>(slices: &mut [[u8; K]]) {
+    /// Least-significant-byte radix sort, skipping identical bytes.
+    #[inline(never)]
+    pub fn lsb<R: Radixable>(data: &mut [R]) {
 
-    let mut histogram = [[0usize; 256]; K];
-    for slice in slices.iter() {
-        for (index, byte) in slice.iter().enumerate() {
-            histogram[index][*byte as usize] += 1;
+        let mut histogram = vec![[0usize; 256]; R::WIDTH];
+        for item in data.iter() {
+            for index in 0 .. R::WIDTH {
+                histogram[index][item.byte(index) as usize] += 1;
+            }
+        }
+        let mut temp = data.to_vec();
+        let mut temp = &mut temp[..];
+        let mut data = &mut data[..];
+
+        let indexes = histogram.iter_mut().enumerate().filter(|(_,h)| h.iter().filter(|c| **c > 0).count() > 1).collect::<Vec<_>>();
+        for (round, hist) in indexes.iter().rev() {
+            let mut counts = [0usize; 256];
+            for i in 1 .. 256 { counts[i] = counts[i-1] + hist[i-1]; }
+            for item in data.iter() {
+                let byte = item.byte(*round) as usize;
+                temp[counts[byte]] = *item;
+                counts[byte] += 1;
+            }
+            std::mem::swap(&mut data, &mut temp);
+        }
+        // TODO: we could dedup as part of this scan.
+        if indexes.len() % 2 == 1 { temp.copy_from_slice(data); }
+    }
+
+    pub trait Radixable : Copy + std::fmt::Debug {
+        const WIDTH: usize;
+        fn byte(&self, index: usize) -> u8;
+    }
+
+    impl Radixable for u8 {
+        const WIDTH: usize = 1;
+        #[inline(always)] fn byte(&self, _index: usize) -> u8 { *self }
+    }
+
+    impl<const K: usize, R: Radixable> Radixable for [R; K] {
+        const WIDTH: usize = K * R::WIDTH;
+        #[inline(always)] fn byte(&self, index: usize) -> u8 {
+            self[index/R::WIDTH].byte(index % R::WIDTH)
         }
     }
-    let mut buffer = vec![[0u8; K]; slices.len()];
-    let mut borrow = &mut buffer[..];
-    let mut slices = &mut slices[..];
 
-    let indexes = histogram.iter_mut().enumerate().filter(|(_,h)| h.iter().filter(|c| **c > 0).count() > 1).collect::<Vec<_>>();
-    for (round, hist) in indexes.iter().rev() {
-        let mut counts = [0usize; 256];
-        for i in 1 .. 256 { counts[i] = counts[i-1] + hist[i-1]; }
-        for slice in slices.iter() {
-            let byte = slice[*round] as usize;
-            borrow[counts[byte]] = *slice;
-            counts[byte] += 1;
-        }
-        std::mem::swap(&mut slices, &mut borrow);
+    pub fn msb2<R: Radixable + Ord>(data: &mut [R]) {
+        msb_inner(data, 0);
     }
-    // TODO: we could dedup as part of this scan.
-    if indexes.len() % 2 == 1 { slices.copy_from_slice(borrow); }
+
+    /// MSB radix sort counts leading bytes, establishes offsets, and then repeatedly
+    /// swaps elements from their current range to their target range. The swap moves
+    /// elements to where they want to be, and collects elements that likely need the
+    /// process repeated on their behalf.
+    ///
+    /// We can go one element at a time, or perform batches of swaps from one range.
+    /// Batches of swaps out of multiple ranges has the potential to be confusing.
+    pub fn msb_inner<R: Radixable + Ord>(data: &mut [R], digit: usize) {
+        // Divert and return if the data are not long enough.
+        // TODO: Don't accidentally sort by an associated payload.
+        if data.len() <= 512 { data.sort_unstable() }
+        // Only continue if bytes remain (TODO: non-constant widths).
+        else if digit < R::WIDTH {
+            let mut counts = vec![0usize; 256];
+            for item in data.iter() { counts[item.byte(digit) as usize] += 1; }
+            // If we have a byte common to everyone, just continue recursively.
+            if counts.iter().filter(|c| **c > 0).count() == 1 { msb_inner(data, digit + 1); return; }
+            let mut offsets = vec![0usize; 256];
+            for index in 1 .. 256 { offsets[index] = offsets[index-1] + counts[index-1]; }
+            // move forward through `data`, swapping elements to intended ranges.
+            let mut cursors = offsets.clone();
+            for byte in 0 .. 255 {      // Skip the last byte, as it ends up fine.
+                while cursors[byte] < offsets[byte + 1] {
+                    let bound = std::cmp::min(offsets[byte + 1], cursors[byte] + 32);
+                    for index in cursors[byte] .. bound {
+                        let data_byte = data[index].byte(digit) as usize;
+                        data.swap(index, cursors[data_byte]);
+                        cursors[data_byte] += 1;
+                    }
+                }
+            }
+            for byte in 0 .. 256 {
+                let lower = offsets[byte];
+                let upper = offsets.get(byte + 1).copied().unwrap_or(data.len());
+                if upper - lower > 512 { msb_inner(&mut data[lower .. upper], digit + 1); }
+                else { data[lower .. upper].sort_unstable(); }
+            }
+        }
+    }
+
+
+    pub fn msb<R: Radixable + Ord>(data: &mut [R]) {
+
+        let size_thresh = 512;
+
+        if data.len() <= size_thresh { data.sort_unstable(); return; }
+
+        // Pre-allocate the buffers we'll want to use.
+        let mut counts = vec![0usize; 256];
+        let mut bounds = vec![0usize; 256];
+
+        // Prepare our "stack" of recursive calls.
+        let mut todo = vec![((0, data.len()), 0)];
+
+        while let Some(((lower, upper), digit)) = todo.pop() {
+            counts.fill(0);
+            for item in data[lower .. upper].iter() { counts[item.byte(digit) as usize] += 1; }
+            if counts.iter().filter(|c| **c > 0).count() == 1 {
+                if digit + 1 < R::WIDTH { todo.push(((lower, upper), digit + 1)); }
+            }
+            else {
+                bounds[0] = lower;
+                for index in 0 .. 255 {
+                    bounds[index + 1] = bounds[index] + counts[index];
+                    counts[index] = bounds[index];
+                }
+                counts[255] = bounds[255];
+                let mut writes = counts;
+
+                for byte in 0 .. 255 {      // Skip the last byte, as it ends up fine.
+                    while writes[byte] < bounds[byte + 1] {
+                        for index in writes[byte] .. bounds[byte + 1] {
+                            let data_byte = data[index].byte(digit) as usize;
+                            data.swap(index, writes[data_byte]);
+                            writes[data_byte] += 1;
+                        }
+                    }
+                }
+                if digit + 1 < R::WIDTH {
+                    for byte in (0 .. 256).rev() {  // enqueue in reverse order.
+                        let lower = bounds[byte];
+                        let upper = bounds.get(byte + 1).copied().unwrap_or(upper);
+                        if upper - lower < size_thresh { data[lower .. upper].sort_unstable() }
+                        else { todo.push(((lower, upper), digit+1)); }
+                    }
+                }
+
+                counts = writes;
+            }
+        }
+    }
 }
 
 impl <C: for<'a> Container<Ref<'a>: Ord>> Sorted for C { }

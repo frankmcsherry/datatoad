@@ -2,6 +2,8 @@ use std::cmp::Ordering;
 use columnar::{Container, Index, Len, Push};
 use crate::facts::{Facts, FactBuilder, FactContainer, FactLSM, Sorted, Terms};
 
+use crate::facts::{Form, Length, Merge};
+
 /// A sorted list of distinct facts.
 #[derive(Clone, Default)]
 pub struct FactList {
@@ -13,10 +15,12 @@ impl FactList {
     pub fn borrow(&self) -> <Facts as Container>::Borrowed<'_> { self.ordered.borrow() }
 }
 
-impl FactContainer for FactList {
-
+impl Length for FactList {
     fn len(&self) -> usize { self.borrow().len() }
     fn is_empty(&self) -> bool { self.borrow().is_empty() }
+}
+
+impl FactContainer for FactList {
 
     fn apply<'a>(&'a self, mut action: impl FnMut(&[<Terms as Container>::Ref<'a>])) {
         let mut attrs = Vec::new();
@@ -99,7 +103,16 @@ impl FactContainer for FactList {
         ordered.extend(self.borrow().into_index_iter().filter(|x| predicate(*x)));
         Self { ordered }
     }
+}
 
+impl Form for FactList {
+    fn form(facts: &mut Facts) -> Self {
+        crate::facts::sort::<true>(facts);
+        Self { ordered: std::mem::take(facts) }
+    }
+}
+
+impl Merge for FactList {
     fn merge(mut self, mut other: Self) -> Self {
 
         if self.is_empty() { return other; }
@@ -146,30 +159,5 @@ impl FactContainer for FactList {
 
         let ordered = Facts::merge::<true>(self.borrow(), other.borrow());
         Self { ordered }
-    }
-
-    fn form(facts: &mut Facts) -> Self {
-
-        // Attempt to sniff out a known pattern of fact and term sizes.
-        // Clearly needs to be generalized, or something.
-        if let (Some(2), Some(4)) = (facts.bounds.strided(), facts.values.bounds.strided()) {
-            let (more, less) = facts.values.values.as_chunks_mut::<8>();
-            assert!(less.is_empty());
-            more.sort_unstable();
-            let mut finger = 0;
-            for i in 1 .. more.len() {
-                if more[i] != more[finger] {
-                    finger += 1;
-                    more[finger] = more[i];
-                }
-            }
-            finger += 1;
-            facts.values.values.truncate(8 * finger);
-            facts.bounds.length = finger as u64;
-            facts.values.bounds.length = 2 * finger as u64;
-        }
-        else { facts.sort::<true>(); }
-
-        Self { ordered: std::mem::take(facts) }
     }
 }
