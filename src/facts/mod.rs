@@ -5,6 +5,8 @@ use columnar::{Container, Index, Len, Push};
 use columnar::Vecs;
 use columnar::primitive::offsets::Strides;
 
+use crate::types::Action;
+
 pub mod list;
 pub mod trie;
 
@@ -15,7 +17,90 @@ pub type Lists<C> = Vecs<C, Strides>;
 pub type Fact = Vec<Vec<u8>>;
 pub type Terms = Lists<Vec<u8>>;
 pub type Facts = Lists<Terms>;
-pub type Relations = BTreeMap<String, FactSet<FactCollection>>;
+
+/// A map from text name to collection of facts.
+///
+/// In addition to their default representation (columns in order as defined),
+/// we also maintain collections that result from the application of various
+/// `Action`s to the fact collection. They are meant to be read not written,
+/// and their `stable` and `recent` members track those of the base collection,
+/// with the caveat that the `recent` will be deduplicated against `stable`,
+/// as any projection in the action may cause distinct input facts to result
+/// in duplicate output facts.
+///
+/// Although some names may be equivalent to actions on other names, this store
+/// is oblivious to this information, and leaves it up to the planner to decide
+/// whether it should use atoms as named or substitute other atoms and actions.
+#[derive(Default)]
+pub struct Relations {
+    /// Map from name to raw data, and various linear transforms thereof.
+    relations: BTreeMap<String, (FactSet<FactCollection>, BTreeMap<Action<String>, FactSet<FactCollection>>)>,
+}
+
+impl Relations {
+    pub fn get(&self, name: &str) -> Option<&FactSet<FactCollection>> {
+        self.relations.get(name).map(|(base, _)| base)
+    }
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut FactSet<FactCollection>> {
+        self.relations.get_mut (name).map(|(base, _)| base)
+    }
+    pub fn entry(&mut self, name: String) -> &mut FactSet<FactCollection> {
+        &mut self.relations.entry(name).or_default().0
+    }
+    pub fn advance(&mut self) {
+        for (facts, transforms) in self.relations.values_mut() {
+            facts.advance();
+            for (action, transform) in transforms.iter_mut() {
+                if !transform.recent.is_empty() {
+                    transform.stable.push(std::mem::take(&mut transform.recent));
+                }
+                if let Some(recent) = facts.recent.act_on(action).flatten() {
+                    transform.recent = recent.except(transform.stable.contents());
+                }
+            }
+        }
+    }
+    pub fn active(&self) -> bool {
+        self.relations.values().any(|x| x.0.active())
+    }
+    pub fn list(&self) {
+        for (name, facts) in self.relations.iter() {
+            println!("\t{}:\t{:?}\tIdentity", name, facts.0.len());
+            for (_action, facts) in facts.1.iter() {
+                println!("\t\t{:?}\t{:?}", facts.len(), _action);
+            }
+        }
+    }
+
+    /// Ensures that we have an entry for this name and the associated action.
+    pub fn ensure_action(&mut self, name: &str, action: &Action<String>){
+        let (base, transforms) = self.relations.entry(name.to_string()).or_default();
+        if !action.is_identity() && !transforms.contains_key(action) {
+            let mut fact_set = FactSet::default();
+            // TODO: Can be more elegant if we see all columns retained, as it means no duplication.
+            for layer in base.stable.contents() {
+                fact_set.stable.extend(&mut layer.act_on(action));
+            }
+            // Flattening deduplicates, which may be necessary as `action` may introduce collisions
+            // across LSM layers.
+            if let Some(stable) = fact_set.stable.flatten() {
+                fact_set.stable.push(stable);
+            }
+            if let Some(recent) = base.recent.act_on(action).flatten() {
+                fact_set.recent = recent.except(fact_set.stable.contents());
+            }
+            transforms.insert(action.clone(), fact_set);
+        }
+    }
+
+    /// Gets a fact set by name, and by an action that is applied to them.
+    ///
+    /// This will only be non-`None` once `ensure_action` has been called with this name and action.
+    pub fn get_action(&self, name: &str, action: &Action<String>) -> Option<&FactSet<FactCollection>> {
+        if action.is_identity() { self.relations.get(name).map(|(base,_)| base) }
+        else { self.relations.get(name).and_then(|(_base, transforms)| transforms.get(action)) }
+    }
+}
 
 // pub use list::FactList as FactCollection;
 pub use trie::Forest;
@@ -58,7 +143,7 @@ pub fn downgrade<const K: usize>(terms: Lists<Vec<[u8; K]>>) -> Lists<Terms> {
     }
 }
 
-/// Sorts and deduplicates
+/// Sorts and potentially deduplicates
 pub fn sort<const DEDUP: bool>(facts: &mut Facts) {
     // Attempt to sniff out a known pattern of fact and term sizes.
     // Clearly needs to be generalized, or something.
@@ -131,11 +216,36 @@ pub trait FactContainer : Form + Length + Merge + Default + Sized {
     fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> ;
     /// Builds a container of facts present in `self` but not in any of `others`.
     fn except<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a;
+
+    /// The subset of `self` whose facts do not start with any prefix in `others`.
+    fn antijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a { unimplemented!() }
+    /// The subset of `self` whose facts start with some prefix in `others`.
+    fn semijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a { unimplemented!() }
+    /// Applies an action to the set of facts, building the corresponding output.
+    fn act_on(&self, action: &Action<String>) -> FactLSM<Self> {
+        // This has the potential to be efficiently implemented, by capturing and unfolding the corresponding columns,
+        // filtering and sorting as appropriate, and then rebuilding. Much more structured than `apply`, who is only
+        // provided a closure.
+        let mut builder = FactBuilder::default();
+        self.apply(|row| {
+            let lit_filtered = action.lit_filter.iter().all(|(index, value)| row[*index].as_slice() == value.as_bytes());
+            let var_filtered = action.var_filter.iter().all(|columns| columns[1..].iter().all(|c| row[*c] == row[columns[0]]));
+            if lit_filtered && var_filtered {
+                builder.push(action.projection.iter().map(|c| {
+                    match c {
+                        Ok(col) => row[*col].as_slice(),
+                        Err(lit) => lit.as_bytes(),
+                    }
+                }))
+            }
+        });
+        builder.finish()
+    }
 }
 
 /// An evolving set of facts.
 #[derive(Default)]
-pub struct FactSet<F: FactContainer> {
+pub struct FactSet<F: FactContainer = FactCollection> {
     pub stable: FactLSM<F>,
     pub recent: F,
     pub to_add: FactLSM<F>,
@@ -180,7 +290,7 @@ pub struct FactBuilder<F: Merge> {
 impl<F: Form + Merge + Length> FactBuilder<F> {
     pub fn push<I>(&mut self, item: I) where Facts: Push<I> {
         self.active.push(item);
-        if self.active.len() > 10_000_000 {
+        if self.active.len() > 1_000_000 {
             use columnar::Clear;
             self.layers.push(Form::form(&mut self.active));
             self.active.clear();
@@ -216,7 +326,7 @@ impl<F: Merge + Length> FactLSM<F> {
     }
 
     /// Flattens the layers into one layer, and takes it.
-    fn flatten(&mut self) -> Option<F> {
+    pub fn flatten(&mut self) -> Option<F> {
         self.layers.sort_by_key(|x| x.len());
         self.layers.reverse();
         while self.layers.len() > 1 {

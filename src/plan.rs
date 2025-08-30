@@ -151,7 +151,7 @@ impl<'a> Plan<'a> {
 
                         for ((id, _action), builder) in todos.iter().zip(builders.into_iter()) {
                             let new_name = names.get(id).unwrap();
-                            facts.entry(new_name.clone()).or_default().add_set(builder.finish());
+                            facts.entry(new_name.clone()).add_set(builder.finish());
                         }
                     }
 
@@ -161,8 +161,8 @@ impl<'a> Plan<'a> {
                     let arity = if let Op::Map(action) = &self.plan[node.args[0]].op { action.key_arity } else { panic!("malformed plan") };
 
                     // Ensure entries exist, tidy each by the length of the other, then get shared borrows.
-                    let len0 = facts.entry(names.get(&node.args[0]).unwrap().clone()).or_default().recent.len();
-                    let len1 = facts.entry(names.get(&node.args[1]).unwrap().clone()).or_default().recent.len();
+                    let len0 = facts.entry(names.get(&node.args[0]).unwrap().clone()).recent.len();
+                    let len1 = facts.entry(names.get(&node.args[1]).unwrap().clone()).recent.len();
                     facts.get_mut(names.get(&node.args[0]).unwrap()).unwrap().stable.tidy_through(2 * len1);
                     facts.get_mut(names.get(&node.args[1]).unwrap()).unwrap().stable.tidy_through(2 * len0);
                     let facts0 = facts.get(names.get(&node.args[0]).unwrap()).unwrap();
@@ -174,7 +174,7 @@ impl<'a> Plan<'a> {
 
                     for ((id, _action), built) in actions.iter().zip(built.into_iter()) {
                         let name = if *id >= body.len() { self.rule.head[id-body.len()].name.clone() } else { format!(".temp-{}-{}", pos, id) };
-                        facts.entry(name.clone()).or_default().add_set(built);
+                        facts.entry(name.clone()).add_set(built);
                         names.insert(*id, name);
                     }
 

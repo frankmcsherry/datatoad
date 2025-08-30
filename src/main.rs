@@ -24,11 +24,7 @@ fn main() {
             let mut words = text.split_whitespace();
             if let Some(word) = words.next() {
                 match word {
-                    ".list" => {
-                        for (name, facts) in state.facts.iter() {
-                            println!("\t{}:\t{:?}", name, facts.len());
-                        }
-                    }
+                    ".list" => { state.facts.list() }
                     // ".show" => {
                     //     use columnar::Index;
                     //     for name in words {
@@ -90,7 +86,7 @@ fn main() {
                                             builder.push(terms.borrow().into_index_iter());
                                         }
                                     }
-                                    state.facts.entry(name).or_default().add_set(builder.finish());
+                                    state.facts.entry(name).add_set(builder.finish());
                                     state.update();
                                 }
                                 else { println!("file not found: {:?}", filename); }

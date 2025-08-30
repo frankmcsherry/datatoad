@@ -3,6 +3,7 @@ pub mod facts;
 pub mod join;
 
 pub mod plan;
+pub mod wcoj;
 
 pub mod types {
 
@@ -26,6 +27,11 @@ pub mod types {
         Lit(String),
     }
 
+    impl Term {
+        /// If the term is `Term::Var(name)` return `Some(name)`.
+        pub fn as_var(&self) -> Option<&String> { if let Term::Var(name) = self { Some(name) } else { None }}
+    }
+
     #[derive(Default)]
     pub struct State {
         rules: Vec<Rule>,
@@ -45,13 +51,11 @@ pub mod types {
         }
 
         pub fn advance(&mut self) {
-            for facts in self.facts.values_mut() {
-                facts.advance();
-            }
+            self.facts.advance();
         }
 
         fn active(&self) -> bool {
-            self.facts.values().any(|x| x.active())
+            self.facts.active()
         }
 
         pub fn extend(&mut self, rules: impl IntoIterator<Item=Rule>) {
@@ -75,13 +79,78 @@ pub mod types {
                     builder.push(lits.iter().map(|x| &x[..]));
                     self.facts
                         .entry(atom.name.to_owned())
-                        .or_default()
                         .add_set(builder.finish());
                 }
             }
             else {
                 crate::plan::implement_plan(&rule, self.rules.len(), true, &mut self.facts);
                 self.rules.push(rule);
+            }
+        }
+    }
+
+    /// Filters rows, re-orders columns, and groups by a prefix.
+    #[derive(Clone, Default, Eq, Ord, PartialEq, PartialOrd)]
+    pub struct Action<L> {
+        /// Columns that must equal some literal.
+        pub lit_filter: Vec<(usize, L)>,
+        /// Lists of columns that must all be equal.
+        pub var_filter: Vec<Vec<usize>>,
+        /// The order of input columns or literals presented as output.
+        pub projection: Vec<Result<usize, L>>,
+        /// Number of input columns; important for testing identity.
+        pub input_arity: usize,
+    }
+
+    impl Action<String> {
+        /// Converts a body `Atom` to an `Action`.
+        ///
+        /// The names of the output columns can be read from `atom.terms`
+        /// by way of the returned `Action::projection`.
+        pub fn from_body(atom: &Atom) -> Self {
+            let mut output = Action::default();
+            let mut terms = std::collections::BTreeMap::default();
+            for (index, term) in atom.terms.iter().enumerate() {
+                match term {
+                    Term::Var(name) => {
+                        if !terms.contains_key(name) {
+                            terms.insert(name, terms.len());
+                            output.var_filter.push(Vec::default());
+                            output.projection.push(Ok(index));
+                        }
+                        output.var_filter[terms[name]].push(index);
+                    }
+                    Term::Lit(data) => { output.lit_filter.push((index, data.to_owned())) }
+                }
+            }
+            output.var_filter.retain(|list| list.len() > 1);
+            output.input_arity = atom.terms.len();
+            output
+        }
+    }
+
+    impl<T> Action<T> {
+        pub fn is_identity(&self) -> bool {
+            self.lit_filter.is_empty() && self.var_filter.is_empty() && self.projection.len() == self.input_arity && self.projection.iter().enumerate().all(|(index, proj)| proj.as_ref().ok() == Some(&index))
+        }
+    }
+
+    impl<T: std::fmt::Debug> std::fmt::Debug for Action<T> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if self.is_identity() {
+                write!(f, "Identity")
+            }
+            else {
+                let mut x = f.debug_struct("Action");
+                if !self.lit_filter.is_empty() {
+                    x.field("lit_filter", &self.lit_filter);
+                }
+                if !self.var_filter.is_empty() {
+                    x.field("var_filter", &self.var_filter);
+                }
+
+                x.field("proj", &self.projection)
+                .finish()
             }
         }
     }

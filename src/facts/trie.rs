@@ -179,6 +179,7 @@ where
             match item0.cmp(&item1) {
                 std::cmp::Ordering::Less => {
                     let lower = *l0;
+                    *l0 += 1;
                     crate::join::gallop(borrow0, l0, *u0, |x| x < item1);
                     action(&values[..], std::cmp::Ordering::Less, (lower, *l0));
                 },
@@ -201,6 +202,7 @@ where
                 },
                 std::cmp::Ordering::Greater => {
                     let lower = *l1;
+                    *l1 += 1;
                     crate::join::gallop(borrow1, l1, *u1, |x| x < item0);
                     action(&values[..], std::cmp::Ordering::Greater, (lower, *l1));
                 },
@@ -217,6 +219,15 @@ where
     }
 }
 
+/// Support method for binary joins on arrays of bytes.
+///
+/// Matches are found by comparing the first `arity` columns of `this` and `that`, and for each match,
+/// enumerating the cross join of all remaining columns, and subjecting it to various projections.
+/// The projections are either literals or column references, where
+///     columns in `[0, arity)` are from the matched columns,
+///     columns in `[arity, this_arity)` are from the additional columns of `this`,
+///     columns in `[this_arity, this_arity + arity)` are again the matched columns,
+///     columns in `[this_arity + arity, this_arity + that_arity + arity)` are from the additional columns of `that`.
 #[inline(never)]
 fn join_help<'a, const K: usize>(
     this: Vec<<Lists<Vec<[u8; K]>> as Container>::Borrowed<'a>>,
@@ -414,36 +425,9 @@ impl FactContainer for Forest<Terms> {
         builders.into_iter().map(|b| b.finish()).collect::<Vec<_>>()
     }
 
-    fn except<'a>(mut self, others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a {
-        for other in others {
-            let old_len = self.len();
-            assert_eq!(self.layers.len(), other.layers.len());
-
-            // It's possible we can upgrade to `[u8; 4]` terms, and speed along faster.
-            if let (Some(this), Some(that)) = (self.upgrade::<4>(), other.upgrade::<4>()) {
-                let mut builder = ForestBuilder::with_layers(this.len());
-                align(&this[..], &that[..], |prefix, order, (lower, upper)| {
-                    if let std::cmp::Ordering::Less = order {
-                        builder.graft(prefix, lower, upper, &this[prefix.len()..]);
-                    }
-                });
-                self = Self::downgrade(builder.done());
-            }
-            else {
-                let this = self.borrow();
-                let that = other.borrow();
-
-                let mut builder = ForestBuilder::with_layers(this.len());
-                align(&this[..], &that[..], |prefix, order, (lower, upper)| {
-                    if let std::cmp::Ordering::Less = order {
-                        builder.graft(prefix, lower, upper, &this[prefix.len()..]);
-                    }
-                });
-                self = builder.done();
-            }
-            assert!(old_len >= self.len());
-        }
-        self
+    #[inline(never)]
+    fn except<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a {
+        self.antijoin(others)
     }
 }
 
@@ -603,7 +587,7 @@ pub mod survey {
     //! but we should ack that we need to keep things as tight as the computation we perform to find
     //! these ranges.
 
-    use columnar::{Columnar, Container, Index, Len, Push, Vecs};
+    use columnar::{Columnar, Container, Index, Len};
 
     use crate::facts::{Lists, Terms, upgrade_hint, upgrade, downgrade};
     use super::{Forest, Layer};
@@ -623,38 +607,7 @@ pub mod survey {
         Both(usize, usize),
     }
 
-    type Reports = ::columnar::ContainerOf<Report>;
-
     impl Forest<Terms> {
-
-        /// For each layer a map of its key dispositions for each output.
-        ///
-        /// Each element in the result spells out the key ordering in that layer.
-        /// The intent is that this map allows one to navigate directly to matching
-        /// records, and conduct further investigation without much more thinking.
-        pub fn survey<const FULL: bool>(&self, other: &Self) -> Vec<Vecs<Reports>> {
-
-            let mut results = Vec::with_capacity(self.layers.len() + 1);
-
-            let mut init = Vecs::<Reports>::default();
-            init.values.push(Report::Both(0,0));
-            init.bounds.push(init.values.len() as u64);
-            results.push(init);
-
-            for (layer0, layer1) in self.layers.iter().zip(other.layers.iter()) {
-                let prior_map = results.last().unwrap().values.borrow();
-                let lists0: <Lists<Terms> as Container>::Borrowed<'_> = layer0.list.borrow();
-                let lists1: <Lists<Terms> as Container>::Borrowed<'_> = layer1.list.borrow();
-                let map = match (upgrade_hint(lists0), upgrade_hint(lists1)) {
-                    // TODO: Add other recognized sizes
-                    (Some(4), Some(4)) => { survey::<FULL,Vec<[u8;4]>>(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), prior_map) },
-                    _                  => { survey::<FULL,Terms>(lists0, lists1, prior_map) },
-                };
-                results.push(map)
-            }
-
-            results
-        }
 
         /// Produces a forest describing the union of the input forests.
         ///
@@ -688,176 +641,145 @@ pub mod survey {
             Self { layers }
         }
 
-        /// Produces a forest of elements in `self` but not in `other`.
-        pub fn minus(&self, other: &Self) -> Self {
+        /// Produces elements in `self` that are also present in any of `others`.
+        pub fn semijoin<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self { self.retain_join::<'a, true>(others) }
+        /// Produces elements in `self` that are not present in any of `others`.
+        pub fn antijoin<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self { self.retain_join::<'a, false>(others) }
 
-            assert_eq!(self.layers.len(), other.layers.len());
-            let mut layers = Vec::with_capacity(self.layers.len());
+        /// Produces elements in `self` based on their presence in any of `others`.
+        ///
+        /// The `SEMI` argument controls whether this performs a semijoin or an antijoin,
+        /// where a semijoin retains elements that are in common with `others`, whereas
+        /// an antijoin retains elements not in common with `others`.
+        #[inline(never)]
+        pub fn retain_join<'a, const SEMI: bool>(mut self, others: impl Iterator<Item = &'a Self>) -> Self {
 
-            // We'll proceed through layers "bottom-up", from the lowest layers to the highest,
-            // once we've constructed a map of the intesection of the layers. This is not helpful
-            // for merging facts, but will be useful for consolidation, and other merge rules in
-            // which cancelation may occur, and the presence of paths at higher levels depends on
-            // the outcome of the merges at the lower levels.
+            use std::collections::VecDeque;
 
-            let map = self.survey::<true>(other);
+            let others = others.collect::<Vec<_>>();
+            others.iter().for_each(|other| { assert_eq!(self.layers.len(), other.layers.len()); });
 
-            // Except wants to track across each layer whether a write happened, specifically for
-            // `Both` variants that are unclear about whether they will or will not produce items
-            // in the next layer. If we have positive evidence that they did so, then the `Both`
-            // should push its items and indicate that it did so for the benefit of the next layer.
-            //
-            // If we populate a `Bools` at each level, we are most of the way towards a `Options`
-            // container, which more clearly spells out whether a collection exists or not. If we
-            // instead have folks build a layer of `Option<Vec<T>>` rather than of `Vec<T>`, it
-            // would be rather clear what it means to `filter_map` the result through, retaining
-            // only the non-`None` instances. Should we do so explicitly, though? We could start
-            // by building `Options<Empties>` and see where that leads us.
-
-            // We may only need to populate these for `Both` variants, which we'll check in order.
-            use columnar::primitive::Bools;
-            let mut roots:Bools  = Bools::default();
-            let mut leaves:Bools = Bools::default();
-
-            // Go from last layer to first; not for Datalog merges, but to prep for consolidation.
-            for (index, layer0) in self.layers.iter().enumerate().rev() {
-
-                // What happens in each layer is determined by a combination of the map in
-                // this layer and the map in the higher layer. The map of the higher layer
-                // speaks about the *lists* of this layer, and the map of this layer speaks
-                // about the *elements* of this layer.
-
-                let mut list = Lists::<Terms>::default();
-
-                let layer0 = layer0.borrow();
-                let mut both_counter = 0;
-
-                // We'll need access to the map of the incoming (higher) layer, to inform us about ranges
-                // of lists we may want to simply copy in. We'll also need the map of the current layer to
-                // reveal how to resolve incoming paths present in both layers.
-                let prev_map = &map[index].values;
-                let next_map = &map[index+1];
-
-                // TODO: We can consolidate the extensions we perform, both within inbound `Both` variants,
-                // and across them when they turn out to amount to `This` or `That` (or even both). This is
-                // specific to merging, and different logic would be needed for e.g. `EXCEPT`.
-                for (prev_report, next_reports) in prev_map.into_index_iter().zip(next_map.into_index_iter()) {
-                    match prev_report {
-                        ReportReference::This((lower0, upper0)) => { list.extend_from_self(layer0, lower0 .. upper0); },
-                        ReportReference::Both((_idx0, _idx1)) => {
-                            // We have report of a contended element, and must proceed with care.
-                            // Any `Both` element may be empty in the next layer, and we'll want
-                            // to check this before extending any values into `list`. All `This`
-                            // values should be good to go, and all `That` values should be ignored.
-                            let prev_len = list.values.len();
-                            for next_report in next_reports.into_index_iter() {
-                                match next_report {
-                                    ReportReference::This((lower0, upper0)) => { list.values.extend_from_self(layer0.values, lower0 .. upper0); },
-                                    ReportReference::Both((index0, _index1)) => {
-                                        if both_counter < leaves.len() && leaves.get(both_counter) {
-                                            list.values.extend_from_self(layer0.values, index0 .. index0+1);
-                                        }
-                                        both_counter += 1;
-                                    },
-                                    ReportReference::That(_) => { /* nothing to do here */ },
-                                }
-                            }
-                            roots.push(prev_len < list.values.len());
-                            list.bounds.push(list.values.len() as u64);
+            // First, collect reports to determine paths to retain to `self`.
+            let mut include = std::iter::repeat(!SEMI).take(self.len()).collect::<VecDeque<_>>();
+            let mut reports = VecDeque::default();
+            for other in others.iter() {
+                reports.push_back((0, 0));
+                for (layer0, layer1) in self.layers.iter().zip(other.layers.iter()) {
+                    // Borrow the layers for read-only access.
+                    let lists0 = layer0.borrow();
+                    let lists1 = layer1.borrow();
+                    // Update reports for the next layer, or output.
+                    match (upgrade_hint(lists0), upgrade_hint(lists1)) {
+                        (Some(4), Some(4)) => {
+                            let lists0 = upgrade::<4>(lists0).unwrap();
+                            let lists1 = upgrade::<4>(lists1).unwrap();
+                            intersection::<Vec<[u8; 4]>>(lists0, lists1, &mut reports);
                         }
-                        ReportReference::That(_) => { /* nothing to do here */ },
-                    }
+                        __________________ => {
+                            intersection::<Terms>(lists0, lists1, &mut reports);
+                        }
+                    };
                 }
-
-                use columnar::Clear;
-                leaves.clear();
-                std::mem::swap(&mut roots, &mut leaves);
-
-                layers.push(Layer { list });
+                // Mark shared paths appropriately.
+                for (index,_) in reports.drain(..) {
+                    include[index] = SEMI;
+                }
             }
 
-            layers.reverse();
-            Self { layers }
+            // Revisit `self` from the bottom up, starting from `include`.
+            for layer in self.layers.iter_mut().rev() {
+                if include.iter().all(|x| *x) { return self; }
+                let lists = layer.borrow();
+                let list = match upgrade_hint(lists) {
+                    Some(4) => { downgrade(restrict(upgrade::<4>(lists).unwrap(), &mut include)) }
+                    _______ => { restrict(lists, &mut include) }
+                };
+                layer.list = list;
+            }
+            self
         }
     }
 
-    /// Given the values of an input map, enrich the contended areas with further detail.
+    /// Intersects aligned lists from two inputs, recording common list items in `reports`.
     ///
-    /// Provided a sequence of reports, produce a sequence of report lists, which mirror
-    /// the input reports for disjoint regions, or provide additional detail for regions
-    /// that are contended.
-    ///
-    /// The `FULL` parameter controls whether reports are produced for uncontended regions
-    /// (true) or only for contended regions (false). In the latter case, the output has
-    /// as many elements as there are `Report::Both` variants in the input.
+    /// The `reports` input should contain pairs of list indices that should be intersected,
+    /// and it will be populated with pairs of item indices (not list indices) that reference
+    /// equal items in indicated lists.
     #[inline(never)]
-    pub fn survey<'a, const FULL: bool, C: Container<Ref<'a>: Ord>>(
+    pub fn intersection<'a, C: Container<Ref<'a>: Ord>>(
         list0: <Lists<C> as Container>::Borrowed<'a>,
         list1: <Lists<C> as Container>::Borrowed<'a>,
-        inbound: <Reports as Container>::Borrowed<'_>,
-    ) -> Vecs<Reports> {
+        reports: &mut std::collections::VecDeque<(usize, usize)>,
+    ) {
+        let report_count = reports.len();
+        for _ in 0 .. report_count {
+            let (index0, index1) = reports.pop_front().unwrap();
 
-        let mut result: Vecs<Reports> = Vecs::default();
-        for report in inbound.into_index_iter() {
-            match report {
-                // Exclusive ranges are communicated onward.
-                ReportReference::This((lower, upper)) => {
-                    if FULL {
-                        let (new_lower, _) = list0.bounds.bounds(lower);
-                        let (_, new_upper) = list0.bounds.bounds(upper-1);
-                        result.push(Some(Report::This(new_lower, new_upper)));
-                    }
-                }
-                // We are primarily interested in contended areas.
-                ReportReference::Both((index0, index1)) => {
+            // Fetch the bounds from the layers.
+            let (mut lower0, upper0) = list0.bounds.bounds(index0);
+            let (mut lower1, upper1) = list1.bounds.bounds(index1);
 
-                    // Fetch the bounds from the layers.
-                    let (mut lower0, upper0) = list0.bounds.bounds(index0);
-                    let (mut lower1, upper1) = list1.bounds.bounds(index1);
-
-                    // Scour the intersecting range for matches.
-                    while lower0 < upper0 && lower1 < upper1 {
-                        let val0 = list0.values.get(lower0);
-                        let val1 = list1.values.get(lower1);
-                        match val0.cmp(&val1) {
-                            std::cmp::Ordering::Less => {
-                                let start = lower0;
-                                crate::join::gallop(list0.values, &mut lower0, upper0, |x| x < val1);
-                                if FULL { result.values.push(Report::This(start, lower0)); }
-                            },
-                            std::cmp::Ordering::Equal => {
-                                result.values.push(Report::Both(lower0, lower1));
-                                lower0 += 1;
-                                lower1 += 1;
-                            },
-                            std::cmp::Ordering::Greater => {
-                                let start = lower1;
-                                crate::join::gallop(list1.values, &mut lower1, upper1, |x| x < val0);
-                                if FULL { result.values.push(Report::That(start, lower1)); }
-                            },
-                        }
-                    }
-                    if FULL {
-                        if lower0 < upper0 { result.values.push(Report::This(lower0, upper0))}
-                        if lower1 < upper1 { result.values.push(Report::That(lower1, upper1))}
-                    }
-                    result.bounds.push(result.values.len() as u64);
-                }
-                // Exclusive ranges are communicated onward.
-                ReportReference::That((lower, upper)) => {
-                    if FULL {
-                        let (new_lower, _) = list1.bounds.bounds(lower);
-                        let (_, new_upper) = list1.bounds.bounds(upper-1);
-                        result.push(Some(Report::That(new_lower, new_upper)));
-                    }
+            // Scour the intersecting range for matches.
+            while lower0 < upper0 && lower1 < upper1 {
+                let val0 = list0.values.get(lower0);
+                let val1 = list1.values.get(lower1);
+                match val0.cmp(&val1) {
+                    std::cmp::Ordering::Less => {
+                        lower0 += 1;
+                        crate::join::gallop(list0.values, &mut lower0, upper0, |x| x < val1);
+                    },
+                    std::cmp::Ordering::Equal => {
+                        reports.push_back((lower0, lower1));
+                        lower0 += 1;
+                        lower1 += 1;
+                    },
+                    std::cmp::Ordering::Greater => {
+                        lower1 += 1;
+                        crate::join::gallop(list1.values, &mut lower1, upper1, |x| x < val0);
+                    },
                 }
             }
         }
-
-        result
     }
 
-    /// Merges two sequences of lists using alignment information in outer and inner maps.
+    /// Restrict list items based on `items`, producing a new layer and updating `items`.
+    #[inline(never)]
+    pub fn restrict<'a, C: Container>(
+        lists: <Lists<C> as Container>::Borrowed<'a>,
+        items: &mut std::collections::VecDeque<bool>,
+    ) -> Lists<C> {
+
+        // In principle we can copy runs of items described in `items`, and figure out
+        // the bounds and updated items second, from `lists.bounds` and `items`.
+        // Likely best to lean in to this to get as much bulk copying as possible.
+        let mut output = <Lists::<C> as Container>::with_capacity_for([lists].into_iter());
+
+        assert_eq!(items.len(), lists.values.len());
+        for list_index in 0 .. lists.len() {
+            let (lower, upper) = lists.bounds.bounds(list_index);
+            for item_index in lower .. upper {
+                if items.pop_front().unwrap() {
+                    output.values.push(lists.values.get(item_index));
+                }
+            }
+            if output.values.len() > output.bounds.borrow().last().unwrap_or(0) as usize {
+                output.bounds.push(output.values.len() as u64);
+                items.push_back(true);
+            }
+            else {
+                items.push_back(false);
+            }
+        }
+
+        assert_eq!(items.len(), lists.len());
+        output
+    }
+
+    /// Merges two sequences of lists using alignment information in `reports`.
+    ///
+    /// The `NEXT` parameter indicates whether the next round of reports should be prepared,
+    /// which is for example not necessary in the last layer of a union, as there is no next
+    /// layer to prepare reports for, and the cost can be higher there than for prior layers.
     pub fn union<'a, const NEXT: bool, C: Container<Ref<'a>: Ord>>(
         lists0: <Lists<C> as Container>::Borrowed<'a>,
         lists1: <Lists<C> as Container>::Borrowed<'a>,
@@ -889,6 +811,7 @@ pub mod survey {
                         match val0.cmp(&val1) {
                             std::cmp::Ordering::Less => {
                                 let start = lower0;
+                                lower0 += 1;
                                 crate::join::gallop(lists0.values, &mut lower0, upper0, |x| x < val1);
                                 if NEXT { reports.push_back(Report::This(start, lower0)); }
                                 list.values.extend_from_self(lists0.values, start .. lower0);
@@ -901,6 +824,7 @@ pub mod survey {
                             },
                             std::cmp::Ordering::Greater => {
                                 let start = lower1;
+                                lower1 += 1;
                                 crate::join::gallop(lists1.values, &mut lower1, upper1, |x| x < val0);
                                 if NEXT { reports.push_back(Report::That(start, lower1)); }
                                 list.values.extend_from_self(lists1.values, start .. lower1);
@@ -928,5 +852,4 @@ pub mod survey {
 
         list
     }
-
 }
