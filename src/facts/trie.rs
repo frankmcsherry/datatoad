@@ -294,58 +294,35 @@ impl crate::facts::Merge for Forest<Terms> {
 
         assert_eq!(self.layers.len(), other.layers.len());
 
-        // // It's possible we can upgrade to `[u8; 4]` terms, and speed along faster.
-        // if let (Some(this), Some(that)) = (self.upgrade::<4>(), other.upgrade::<4>()) {
-        //     let mut builder = ForestBuilder::<Vec<[u8; 4]>>::with_layers(self.layers.len());
-        //     align(&this[..], &that[..], |prefix, order, (lower, upper)| {
-        //         match order {
-        //             std::cmp::Ordering::Less => { builder.graft(prefix, lower, upper, &this[prefix.len()..]); }
-        //             std::cmp::Ordering::Equal => { builder.graft(prefix, lower, lower+1, &this[prefix.len()..]); }
-        //             std::cmp::Ordering::Greater => { builder.graft(prefix, lower, upper, &that[prefix.len()..]); }
-        //         }
-        //     });
-        //     Self::downgrade(builder.done())
-        // }
-        // else
-        // {
-        //     let this = self.borrow();
-        //     let that = other.borrow();
-
-        //     let mut builder: ForestBuilder<Terms> = ForestBuilder::with_layers(self.layers.len());
-        //     align(&this[..], &that[..], |prefix, order, (lower, upper)| {
-        //         match order {
-        //             std::cmp::Ordering::Less => { builder.graft(prefix, lower, upper, &this[prefix.len()..]); }
-        //             std::cmp::Ordering::Equal => { builder.graft(prefix, lower, lower+1, &this[prefix.len()..]); }
-        //             std::cmp::Ordering::Greater => { builder.graft(prefix, lower, upper, &that[prefix.len()..]); }
-        //         }
-        //     });
-
-        //     builder.done()
-        // }
-
         self.union(&other)
     }
 }
 
 impl<const K: usize> crate::facts::Merge for Forest<Vec<[u8; K]>> {
     fn merge(self, other: Self) -> Self {
+
         if self.is_empty() { return other; }
         if other.is_empty() { return self; }
 
         assert_eq!(self.layers.len(), other.layers.len());
 
-        let this = self.borrow();
-        let that = other.borrow();
+        use crate::facts::trie::survey::{Report, union};
 
-        let mut builder = ForestBuilder::with_layers(self.layers.len());
-        align(&this[..], &that[..], |prefix, order, (lower, upper)| {
-            match order {
-                std::cmp::Ordering::Less => { builder.graft(prefix, lower, upper, &this[prefix.len()..]); }
-                std::cmp::Ordering::Equal => { builder.graft(prefix, lower, lower+1, &this[prefix.len()..]); }
-                std::cmp::Ordering::Greater => { builder.graft(prefix, lower, upper, &that[prefix.len()..]); }
+        let mut layers = Vec::with_capacity(self.layers.len());
+        let mut reports = std::collections::VecDeque::default();
+        reports.push_back(Report::Both(0, 0));
+        for (layer0, layer1) in self.layers.iter().zip(other.layers.iter()) {
+            let lists0 = layer0.list.borrow();
+            let lists1 = layer1.list.borrow();
+            let list = if layers.len() + 1 < self.layers.len() {
+                union::<true,_>(lists0, lists1, &mut reports)
             }
-        });
-        builder.done()
+            else { union::<false,_>(lists0, lists1, &mut reports) };
+
+            layers.push(Layer { list });
+        }
+
+        Self { layers }
     }
 }
 
@@ -476,94 +453,6 @@ impl<const K: usize> crate::facts::Form for Forest<Vec<[u8; K]>> {
         }
         else {
             panic!("Cannot form fixed width terms from variable width terms");
-        }
-    }
-}
-
-
-pub use forest_builder::ForestBuilder;
-mod forest_builder {
-
-    use columnar::{Container, Index};
-    use crate::facts::{Lists, trie::{Forest, Layer}};
-
-    pub struct ForestBuilder<C> { pub layers: Vec<Layer<C>> }
-
-    impl<C: for<'a> Container<Ref<'a>: PartialEq>> ForestBuilder<C> {
-
-        pub fn with_layers(layers: usize) -> Self {
-            let layers = (0 .. layers).map(|_| Layer { list: Lists::<C>::default() }).collect::<Vec<_>>();
-            Self { layers }
-        }
-
-        /// Grafts a branch that is `prefix` followed by the remaining branch.
-        pub fn graft(&mut self, prefix: &[C::Ref<'_>], mut lower: usize, mut upper: usize, splice: &[<Lists<C> as Container>::Borrowed<'_>]) {
-
-            assert_eq!(self.layers.len(), prefix.len() + splice.len());
-
-            // Handle the prefix
-            let mut differs = false;
-            for (value, layer) in prefix.iter().zip(self.layers.iter_mut()) {
-                let len = layer.list.values.len();
-                if len > 0 {
-                    if differs && len as u64 > layer.list.bounds.borrow().last().unwrap_or(0) {
-                        // assert!(len as u64 > layer.list.bounds.borrow().last().unwrap_or(0));
-                        layer.list.bounds.push(len as u64);
-                    }
-                    differs |= C::reborrow_ref(*value) != layer.list.values.borrow().get(len-1);
-                    if differs { layer.list.values.push(C::reborrow_ref(*value)); }
-                }
-                else {
-                    layer.list.values.push(C::reborrow_ref(*value));
-                }
-            }
-
-            // The `lower .. upper` range of *values* in the first splice correspond to the prefix,
-            // but they aren't necessarily mutually exclusive with prior calls. We could be called
-            // with
-            //          prefix, [a, b, c]
-            //          prefix, [f, g]
-            //          prefix, [z]
-            //
-            // We should copy in the range of values, and then completely copy all subsequent layers.
-
-            if !splice.is_empty() {
-
-                let len = self.layers[prefix.len()].list.values.len() as u64;
-                if differs {
-                    if len as u64 > self.layers[prefix.len()].list.bounds.borrow().last().unwrap_or(0) {
-                        self.layers[prefix.len()].list.bounds.push(len);
-                    }
-                }
-
-                self.layers[prefix.len()].list.values.extend_from_self(splice[0].values, lower .. upper);
-
-                // Seal and copy all subsequent layers.
-                for (layer, splice) in self.layers.iter_mut().skip(prefix.len()).zip(splice.iter()).skip(1) {
-
-                    let len = layer.list.values.len() as u64;
-                    if len > layer.list.bounds.borrow().last().unwrap_or(0) {
-                        layer.list.bounds.push(len);
-                    }
-
-                    layer.list.extend_from_self(*splice, lower .. upper);
-                    let (next_lower, _) = splice.bounds.bounds(lower);
-                    let (_, next_upper) = splice.bounds.bounds(upper-1);
-                    lower = next_lower;
-                    upper = next_upper;
-                }
-            }
-        }
-
-        pub fn done(mut self) -> Forest<C> {
-            for layer in self.layers.iter_mut() {
-                let len = layer.list.values.len() as u64;
-                if len > layer.list.bounds.borrow().last().unwrap_or(0) {
-                    layer.list.bounds.push(len);
-                }
-            }
-
-            Forest { layers: self.layers }
         }
     }
 }
