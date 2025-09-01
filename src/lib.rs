@@ -3,7 +3,6 @@ pub mod facts;
 pub mod join;
 
 pub mod plan;
-pub mod wcoj;
 
 pub mod types {
 
