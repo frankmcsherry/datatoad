@@ -342,7 +342,10 @@ impl FactContainer for Forest<Terms> {
 
     fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> {
 
-        if self.layers.len() < arity || other.layers.len() < arity { return Vec::default(); }
+        if self.layers.len() < arity || other.layers.len() < arity {
+            assert!(self.len() == 0 || other.len() == 0);
+            return vec![FactLSM::default(); projections.len()];
+        }
 
         if let (Some(this), Some(that)) = (self.upgrade::<4>(), other.upgrade::<4>()) {
             return join_help(this, that, arity, projections);
@@ -530,9 +533,13 @@ pub mod survey {
             Self { layers }
         }
 
-        /// Produces elements in `self` that are also present in any of `others`.
+        /// Produces elements in `self` that have an element of `others` as a prefix.
+        ///
+        /// All of `others` should have the same number of layers, at most the number of `self`.
         pub fn semijoin<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self { self.retain_join::<'a, true>(others) }
-        /// Produces elements in `self` that are not present in any of `others`.
+        /// Produces elements in `self` that do not have an element of `others` as a prefix.
+        ///
+        /// All of `others` should have the same number of layers, at most the number of `self`.
         pub fn antijoin<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self { self.retain_join::<'a, false>(others) }
 
         /// Produces elements in `self` based on their presence in any of `others`.
@@ -540,16 +547,23 @@ pub mod survey {
         /// The `SEMI` argument controls whether this performs a semijoin or an antijoin,
         /// where a semijoin retains elements that are in common with `others`, whereas
         /// an antijoin retains elements not in common with `others`.
-        #[inline(never)]
+        ///
+       /// All of `others` should have the same number of layers, at most the number of `self`.
+         #[inline(never)]
         pub fn retain_join<'a, const SEMI: bool>(mut self, others: impl Iterator<Item = &'a Self>) -> Self {
 
             use std::collections::VecDeque;
 
             let others = others.collect::<Vec<_>>();
-            others.iter().for_each(|other| { assert_eq!(self.layers.len(), other.layers.len()); });
+            if others.is_empty() { return self; }
+            let other_arity = others[0].layers.len();
+            others.iter().for_each(|other| {
+                assert!(self.layers.len() >= other.layers.len());
+                assert_eq!(other.layers.len(), other_arity);
+            });
 
             // First, collect reports to determine paths to retain to `self`.
-            let mut include = std::iter::repeat(!SEMI).take(self.len()).collect::<VecDeque<_>>();
+            let mut include = std::iter::repeat(!SEMI).take(self.layers[other_arity-1].list.values.len()).collect::<VecDeque<_>>();
             let mut reports = VecDeque::default();
             for other in others.iter() {
                 reports.push_back((0, 0));
@@ -575,15 +589,30 @@ pub mod survey {
                 }
             }
 
-            // Revisit `self` from the bottom up, starting from `include`.
-            for layer in self.layers.iter_mut().rev() {
-                if include.iter().all(|x| *x) { return self; }
-                let lists = layer.borrow();
-                let list = match upgrade_hint(lists) {
-                    Some(4) => { downgrade(restrict(upgrade::<4>(lists).unwrap(), &mut include)) }
-                    _______ => { restrict(lists, &mut include) }
-                };
-                layer.list = list;
+            // If not all items are included, restrict layers of `self`.
+            if include.iter().all(|x| *x) { return self; }
+            else {
+
+                // If there are additional layers, clone `include` and update unexplored layers.
+                if self.layers.len() > other_arity {
+                    let mut include = include.clone();
+                    for layer in self.layers[other_arity..].iter_mut() {
+                        let lists = layer.borrow();
+                        layer.list = match upgrade_hint(lists) {
+                            Some(4) => { downgrade(retain_lists(upgrade::<4>(lists).unwrap(), &mut include)) }
+                            _______ => { retain_lists(lists, &mut include) }
+                        };
+                    }
+                }
+                // In any case, update prior layers from `other_arity` back to the first.
+                for layer in self.layers[..other_arity].iter_mut().rev() {
+                    if include.iter().all(|x| *x) { return self; }  // TODO: make this test cheaper.
+                    let lists = layer.borrow();
+                    layer.list = match upgrade_hint(lists) {
+                        Some(4) => { downgrade(retain_items(upgrade::<4>(lists).unwrap(), &mut include)) }
+                        _______ => { retain_items(lists, &mut include) }
+                    };
+                }
             }
             self
         }
@@ -631,36 +660,55 @@ pub mod survey {
         }
     }
 
-    /// Restrict list items based on `items`, producing a new layer and updating `items`.
+    /// Restrict lists based on per-list bools, producing a new layer and updating `bools` for the items.
     #[inline(never)]
-    pub fn restrict<'a, C: Container>(
+    pub fn retain_lists<'a, C: Container>(
         lists: <Lists<C> as Container>::Borrowed<'a>,
-        items: &mut std::collections::VecDeque<bool>,
+        bools: &mut std::collections::VecDeque<bool>,
     ) -> Lists<C> {
 
-        // In principle we can copy runs of items described in `items`, and figure out
-        // the bounds and updated items second, from `lists.bounds` and `items`.
-        // Likely best to lean in to this to get as much bulk copying as possible.
+        // In principle we can copy runs described in `bools` for bulk copying.
         let mut output = <Lists::<C> as Container>::with_capacity_for([lists].into_iter());
 
-        assert_eq!(items.len(), lists.values.len());
+        assert_eq!(bools.len(), lists.len());
+        for list_index in 0 .. lists.len() {
+            let present = bools.pop_front().unwrap();
+            if present { use columnar::Push; output.push(lists.get(list_index)); }
+            bools.extend(std::iter::repeat(present).take(lists.get(list_index).len()));
+        }
+
+        assert_eq!(bools.len(), lists.values.len());
+        output
+    }
+
+    /// Restrict lists based on per-item bools, producing a new layer and updating `bools` for the lists.
+    #[inline(never)]
+    pub fn retain_items<'a, C: Container>(
+        lists: <Lists<C> as Container>::Borrowed<'a>,
+        bools: &mut std::collections::VecDeque<bool>,
+    ) -> Lists<C> {
+
+        // In principle we can copy runs described in `bools` for bulk copying.
+        let mut output = <Lists::<C> as Container>::with_capacity_for([lists].into_iter());
+
+        assert_eq!(bools.len(), lists.values.len());
         for list_index in 0 .. lists.len() {
             let (lower, upper) = lists.bounds.bounds(list_index);
             for item_index in lower .. upper {
-                if items.pop_front().unwrap() {
+                if bools.pop_front().unwrap() {
                     output.values.push(lists.values.get(item_index));
                 }
             }
             if output.values.len() > output.bounds.borrow().last().unwrap_or(0) as usize {
                 output.bounds.push(output.values.len() as u64);
-                items.push_back(true);
+                bools.push_back(true);
             }
             else {
-                items.push_back(false);
+                bools.push_back(false);
             }
         }
 
-        assert_eq!(items.len(), lists.len());
+        assert_eq!(bools.len(), lists.len());
         output
     }
 
