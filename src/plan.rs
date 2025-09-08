@@ -80,6 +80,24 @@ impl<'a> Plan<'a> {
                     }).collect(),
                 }
             }
+            /// Extracts from `projection` the sequence of distinct columns in order, minus literals.
+            ///
+            /// These columns are the minimal information needed for `join` to operate, and the columns
+            /// that are projected away can all be added back relatively cheaply, without complicating
+            /// the process of fact production (and e.g. gumming up sorting with duplicates or literals).
+            ///
+            /// The method leaves `self` as any necessary follow-up actions, and if it is not the identity
+            /// action then it should still be applied to the facts from the support.
+            fn extract_support(&mut self) -> Vec<usize> {
+                let mut result = Vec::default();
+                for column in self.projection.iter_mut() {
+                    if let Ok(col) = column {
+                        if !result.contains(col) { result.push(*col); }
+                        *col = result.iter().position(|c| c == col).unwrap();
+                    }
+                }
+                result
+            }
         }
 
         // The head needs planning assistance from its atoms, wrt literals and repeats.
@@ -106,7 +124,7 @@ impl<'a> Plan<'a> {
         }
 
         let mut names = BTreeMap::<Id, String>::default();
-        for (idx, actions) in steps {
+        for (idx, mut actions) in steps {
             let node = &self.plan[idx];
             match &node.op {
                 Op::Var(name) => {
@@ -168,13 +186,27 @@ impl<'a> Plan<'a> {
                     let facts0 = facts.get(names.get(&node.args[0]).unwrap()).unwrap();
                     let facts1 = facts.get(names.get(&node.args[1]).unwrap()).unwrap();
 
-                    let projections = actions.iter().map(|(_,a)| &a.projection[..]).collect::<Vec<_>>();
+                    // let projections = actions.iter().map(|(_,a)| &a.projection[..]).collect::<Vec<_>>();
+
+                    // Before invoking `join_with`, we'll need to convert the projections from potentially repeating
+                    // bindings interspersed with literals to distinct bindings, after which we post-process.
+                    let projections = actions.iter_mut().map(|(_, a)| a.extract_support()).collect::<Vec<_>>();
+                    let projections = projections.iter().map(|x| &x[..]).collect::<Vec<_>>();
 
                     let built = join_with(facts0, facts1, stable, arity, &projections[..]);
 
-                    for ((id, _action), built) in actions.iter().zip(built.into_iter()) {
+                    for ((id,action), built) in actions.iter().zip(built.into_iter()) {
                         let name = if *id >= body.len() { self.rule.head[id-body.len()].name.clone() } else { format!(".temp-{}-{}", pos, id) };
-                        facts.entry(name.clone()).extend(built);
+                        if action.is_ident(action.projection.len()) {
+                            facts.entry(name.clone()).extend(built);
+                        }
+                        else {
+                            // The action included repetitions or literals.
+                            // This is relatively easy to fix in a trie layout, and we should do that, but for the moment we go slow.
+                            let mut act = crate::types::Action::default();
+                            act.projection = action.projection.clone();
+                            facts.entry(name.clone()).extend(built.into_iter().flat_map(|b| b.act_on(&act)));
+                        }
                         names.insert(*id, name);
                     }
 

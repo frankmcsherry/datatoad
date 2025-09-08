@@ -31,15 +31,13 @@ impl FactContainer for FactList {
         }
     }
 
-    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> {
+    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[usize]]) -> Vec<FactLSM<Self>> {
 
         let mut builders: Vec<FactBuilder<Self>> = vec![FactBuilder::default(); projections.len()];
 
         let mut action = |v1: <Facts as Container>::Ref<'_>, v2: <Facts as Container>::Ref<'_>| {
             for (projection, builder) in projections.iter().zip(builders.iter_mut()) {
-                builder.push(projection.iter().map(|i| {
-                    match i { Ok(col) => if *col < v1.len() { v1.get(*col).as_slice() } else { v2.get(*col - v1.len()).as_slice() },
-                            Err(lit) => lit.as_bytes() }}));
+                builder.push(projection.iter().map(|col| if *col < v1.len() { v1.get(*col).as_slice() } else { v2.get(*col - v1.len()).as_slice() }));
             }
         };
 

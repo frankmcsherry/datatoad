@@ -233,7 +233,7 @@ fn join_help<'a, const K: usize>(
     this: Vec<<Lists<Vec<[u8; K]>> as Container>::Borrowed<'a>>,
     that: Vec<<Lists<Vec<[u8; K]>> as Container>::Borrowed<'a>>,
     arity: usize,
-    projections: &[&[Result<usize, String>]],
+    projections: &[&[usize]],
 ) -> Vec<FactLSM<Forest<Terms>>> {
 
     if projections.is_empty() { return Vec::default(); }
@@ -265,15 +265,12 @@ fn join_help<'a, const K: usize>(
                 for idx1 in 0 .. count1 {
                     let ext1 = &extensions1[idx1 * width1 ..][.. width1];
                     for (projection, builder) in projections.iter().zip(builders.iter_mut()) {
-                        builder.push(projection.iter().map(|i| match i {
-                            Ok(col) => {
-                                if *col < arity { prefix[*col] }
-                                else if *col < arity + width0 { ext0[col - arity] }
-                                else if *col < arity + width0 + arity { prefix[*col - arity - width0] }
-                                else { ext1[col - width0 - arity - arity] }
-                            }
-                            Err(lit) => lit.as_bytes()
-                        }));
+                        builder.push(projection.iter().map(|col|
+                            if *col < arity { prefix[*col] }
+                            else if *col < arity + width0 { ext0[col - arity] }
+                            else if *col < arity + width0 + arity { prefix[*col - arity - width0] }
+                            else { ext1[col - width0 - arity - arity] }
+                        ));
                     }
                 }
             }
@@ -340,7 +337,7 @@ impl FactContainer for Forest<Terms> {
         if self.len() > 0 { apply(&self.borrow()[..], 0, action); }
     }
 
-    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> {
+    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[usize]]) -> Vec<FactLSM<Self>> {
 
         if self.layers.len() < arity || other.layers.len() < arity {
             assert!(self.len() == 0 || other.len() == 0);
@@ -383,15 +380,12 @@ impl FactContainer for Forest<Terms> {
                     for idx1 in 0 .. count1 {
                         let ext1 = &extensions1[idx1 * width1 ..][.. width1];
                         for (projection, builder) in projections.iter().zip(builders.iter_mut()) {
-                            builder.push(projection.iter().map(|i| match i {
-                                Ok(col) => {
-                                    if *col < arity { prefix[*col].as_slice() }
-                                    else if *col < arity + width0 { ext0[col - arity].as_slice() }
-                                    else if *col < arity + width0 + arity { prefix[*col - arity - width0].as_slice() }
-                                    else { ext1[col - width0 - arity - arity].as_slice() }
-                                }
-                                Err(lit) => lit.as_bytes()
-                            }));
+                            builder.push(projection.iter().map(|col|
+                                if *col < arity { prefix[*col].as_slice() }
+                                else if *col < arity + width0 { ext0[col - arity].as_slice() }
+                                else if *col < arity + width0 + arity { prefix[*col - arity - width0].as_slice() }
+                                else { ext1[col - width0 - arity - arity].as_slice() }
+                            ));
                         }
                     }
                 }

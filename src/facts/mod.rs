@@ -213,11 +213,11 @@ pub trait FactContainer : Form + Length + Merge + Default + Sized {
     /// Applies an action to each contained fact.
     fn apply<'a>(&'a self, action: impl FnMut(&[<Terms as Container>::Ref<'a>]));
     /// Joins `self` and `other` on the first `arity` columns, putting projected results in `builders`.
-    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> ;
+    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[usize]]) -> Vec<FactLSM<Self>> ;
     /// Joins `self` and `others` on the first `arity` columns, putting projected results in `builders`.
     ///
     /// The default implementation processes `others` in order, but more thoughtful implementations exist.
-    fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> {
+    fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projections: &[&[usize]]) -> Vec<FactLSM<Self>> {
         let mut results = (0 .. projections.len()).map(|_| FactLSM::default()).collect::<Vec<_>>();
         for other in others {
             let builts = self.join(other, arity, projections);
