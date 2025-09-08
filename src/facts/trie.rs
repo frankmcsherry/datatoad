@@ -223,7 +223,7 @@ where
 ///
 /// Matches are found by comparing the first `arity` columns of `this` and `that`, and for each match,
 /// enumerating the cross join of all remaining columns, and subjecting it to various projections.
-/// The projections are either literals or column references, where
+/// The projections are column references, where
 ///     columns in `[0, arity)` are from the matched columns,
 ///     columns in `[arity, this_arity)` are from the additional columns of `this`,
 ///     columns in `[this_arity, this_arity + arity)` are again the matched columns,
@@ -237,7 +237,14 @@ fn join_help<'a, const K: usize>(
 ) -> Vec<FactLSM<Forest<Terms>>> {
 
     if projections.is_empty() { return Vec::default(); }
-    let mut builders: Vec<FactBuilder<Forest<Vec<[u8;K]>>>> = vec![FactBuilder::default(); projections.len()];
+
+    // We'll build into buffers of the specific type, without knowing the projection width.
+    // To commit the values, we'll need to reshape using `as_chunks()`.
+    // The intent is that we buffer up ~1M rows and form a `Forest<Vec<[u8;K]>>` from them,
+    // and commit each of these to an ongoing `FactLSM` for each projection.
+    let mut buffered = 0;
+    let mut buffers: Vec<Vec<[u8; K]>> = projections.iter().map(|p| Vec::with_capacity(1_000_000 * p.len())).collect();
+    let mut builders: Vec<FactLSM<Forest<Vec<[u8;K]>>>> = vec![FactLSM::default(); projections.len()];
 
     if this.len() < arity || that.len() < arity { return Vec::default(); }
 
@@ -259,13 +266,21 @@ fn join_help<'a, const K: usize>(
             let count0 = if width0 > 0 { extensions0.len() / width0 } else { 1 };
             let count1 = if width1 > 0 { extensions1.len() / width1 } else { 1 };
 
+            if buffered + count0 * count1 > 1_000_000 {
+                for index in 0 .. projections.len() {
+                    builders[index].push(Forest::from_bytes(&mut buffers[index], projections[index].len()));
+                    buffers[index].clear();
+                }
+                buffered = 0;
+            }
+
             // TODO: Pivot the logic to be builders first, then columns, then rows.
             for idx0 in 0 .. count0 {
                 let ext0 = &extensions0[idx0 * width0 ..][.. width0];
                 for idx1 in 0 .. count1 {
                     let ext1 = &extensions1[idx1 * width1 ..][.. width1];
-                    for (projection, builder) in projections.iter().zip(builders.iter_mut()) {
-                        builder.push(projection.iter().map(|col|
+                    for (projection, buffer) in projections.iter().zip(buffers.iter_mut()) {
+                        buffer.extend(projection.iter().map(|col|
                             if *col < arity { prefix[*col] }
                             else if *col < arity + width0 { ext0[col - arity] }
                             else if *col < arity + width0 + arity { prefix[*col - arity - width0] }
@@ -274,6 +289,7 @@ fn join_help<'a, const K: usize>(
                     }
                 }
             }
+            buffered += count0 * count1;
 
             // Tidy up after ourselves.
             extensions0.clear();
@@ -281,7 +297,11 @@ fn join_help<'a, const K: usize>(
         }
     });
 
-    builders.into_iter().map(|b| { FactLSM { layers: b.finish().layers.into_iter().map(|l| Forest::downgrade(l)).collect() } }).collect()
+    for index in 0 .. projections.len() {
+        builders[index].push(Forest::from_bytes(&mut buffers[index], projections[index].len()));
+    }
+
+    builders.into_iter().map(|b| { FactLSM { layers: b.layers.into_iter().map(|l| Forest::downgrade(l)).collect() } }).collect()
 }
 
 impl crate::facts::Merge for Forest<Terms> {
@@ -454,6 +474,43 @@ impl<const K: usize> crate::facts::Form for Forest<Vec<[u8; K]>> {
     }
 }
 
+impl<const K: usize> Forest<Vec<[u8; K]>> {
+    /// Produce a forest of `width` layers from byte arrays.
+    fn from_bytes(bytes: &mut [[u8; K]], width: usize) -> Self {
+        match width {
+            1 => Self::from_bytes_array::<1>(bytes),
+            2 => Self::from_bytes_array::<2>(bytes),
+            3 => Self::from_bytes_array::<3>(bytes),
+            4 => Self::from_bytes_array::<4>(bytes),
+            5 => Self::from_bytes_array::<5>(bytes),
+            x => unimplemented!("Bytes width {x} not yet implemented"),
+        }
+    }
+    /// Produce a forest of `W` layers from byte arrays.
+    fn from_bytes_array<const W: usize>(bytes: &mut [[u8; K]]) -> Self {
+        if bytes.is_empty() { return Self::default() }
+
+        let (facts, rest) = bytes.as_chunks_mut::<W>();
+        assert!(rest.is_empty());
+        crate::facts::radix_sort::lsb(facts);
+
+        let mut layers: [Layer<Vec<[u8; K]>>; W] = (0 .. W).map(|_| Default::default()).collect::<Vec<_>>().try_into().unwrap();
+        for i in 0 .. W { layers[i].list.values.push(facts[0][i]); }
+        for i in 1 .. facts.len() {
+            if facts[i] != facts[i-1] {
+                let common = facts[i].iter().zip(facts[i-1].iter()).position(|(i0, i1)| i0 != i1);
+                if let Some(pos) = common {
+                    for to_seal in pos+1 .. W { layers[to_seal].list.bounds.push(layers[to_seal].list.values.len() as u64); }
+                    for to_push in pos   .. W { layers[to_push].list.values.push(facts[i][to_push]); }
+                }
+            }
+        }
+
+        for to_seal in 0 .. W { layers[to_seal].list.bounds.push(layers[to_seal].list.values.len() as u64); }
+
+        Self { layers: layers.into_iter().collect() }
+    }
+}
 /// Types and logic for exploring and constructing forests layer-at-a-time.
 pub mod survey {
 
