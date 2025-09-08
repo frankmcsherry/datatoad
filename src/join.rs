@@ -11,7 +11,7 @@ pub fn join_with<F: FactContainer + Clone>(
     body2: &FactSet<F>,
     stable: bool,
     arity: usize,
-    projections: &[&[Result<usize, String>]],
+    projections: &[&[usize]],
 ) -> Vec<FactLSM<F>>
 {
     let mut lsms = vec![FactLSM::default(); projections.len()];
