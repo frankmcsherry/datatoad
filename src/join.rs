@@ -18,25 +18,19 @@ pub fn join_with<F: FactContainer + Clone>(
 
     if stable {
         for layer1 in body1.stable.contents() {
-            for layer2 in body2.stable.contents() {
-                let built = layer1.join(layer2, arity, projections);
-                lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
-            }
+            let built = layer1.join_many(body2.stable.contents(), arity, projections);
+            lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
         }
     }
 
-    for stable2 in body2.stable.contents() {
-        let built = body1.recent.join(stable2, arity, projections);
-        lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
-    }
+    let built = body1.recent.join_many(body2.stable.contents().chain([&body2.recent]), arity, projections);
+    lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
 
     for stable1 in body1.stable.contents() {
         let built = stable1.join(&body2.recent, arity, projections);
         lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
     }
 
-    let built = body1.recent.join(&body2.recent, arity, projections);
-    lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
     lsms
 }
 

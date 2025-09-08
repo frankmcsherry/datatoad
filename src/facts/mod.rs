@@ -214,6 +214,19 @@ pub trait FactContainer : Form + Length + Merge + Default + Sized {
     fn apply<'a>(&'a self, action: impl FnMut(&[<Terms as Container>::Ref<'a>]));
     /// Joins `self` and `other` on the first `arity` columns, putting projected results in `builders`.
     fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> ;
+    /// Joins `self` and `others` on the first `arity` columns, putting projected results in `builders`.
+    ///
+    /// The default implementation processes `others` in order, but more thoughtful implementations exist.
+    fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projections: &[&[Result<usize, String>]]) -> Vec<FactLSM<Self>> {
+        let mut results = (0 .. projections.len()).map(|_| FactLSM::default()).collect::<Vec<_>>();
+        for other in others {
+            let builts = self.join(other, arity, projections);
+            for (result, mut built) in results.iter_mut().zip(builts) {
+                result.extend(&mut built);
+            }
+        }
+        results
+    }
     /// Builds a container of facts present in `self` but not in any of `others`.
     fn except<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a;
 
@@ -241,6 +254,11 @@ pub trait FactContainer : Form + Length + Merge + Default + Sized {
         });
         builder.finish()
     }
+    /// Permutes the columns, putting them in the order of `columns`.
+    #[inline(never)]
+    fn permute(&self, columns: impl Iterator<Item = usize>) -> Self {
+        self.act_on(&Action::permutation(columns)).flatten().unwrap_or_default()
+    }
 }
 
 /// An evolving set of facts.
@@ -258,10 +276,10 @@ impl<F: FactContainer> FactSet<F> {
     pub fn active(&self) -> bool {
         !self.recent.is_empty() || !self.to_add.layers.is_empty()
     }
-
-    pub fn add_set(&mut self, mut facts: FactLSM<F>) {
-        if !facts.layers.is_empty() {
-            self.to_add.extend(&mut facts);
+    /// Moves `facts` into `self.to_add`, with no assumptions on `facts`.
+    pub fn extend(&mut self, facts: impl IntoIterator<Item = F>) {
+        for facts in facts.into_iter() {
+            if !facts.is_empty() { self.to_add.push(facts); }
         }
     }
 
@@ -367,6 +385,12 @@ impl<F: Merge + Length> FactLSM<F> {
         }
         self.tidy();
     }
+}
+
+impl<F> IntoIterator for FactLSM<F> {
+    type Item = F;
+    type IntoIter = std::vec::IntoIter<F>;
+    fn into_iter(self) -> Self::IntoIter { self.layers.into_iter() }
 }
 
 pub mod radix_sort {

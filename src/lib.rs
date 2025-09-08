@@ -78,7 +78,7 @@ pub mod types {
                     builder.push(lits.iter().map(|x| &x[..]));
                     self.facts
                         .entry(atom.name.to_owned())
-                        .add_set(builder.finish());
+                        .extend(builder.finish());
                 }
             }
             else {
@@ -129,8 +129,23 @@ pub mod types {
     }
 
     impl<T> Action<T> {
+        /// True when the action has no filters, and the projection is exactly `0 .. inner_arity`.
         pub fn is_identity(&self) -> bool {
             self.lit_filter.is_empty() && self.var_filter.is_empty() && self.projection.len() == self.input_arity && self.projection.iter().enumerate().all(|(index, proj)| proj.as_ref().ok() == Some(&index))
+        }
+        /// Produces a permuting action.
+        ///
+        /// It is important that `columns` is a permutation, in that it has exactly the values
+        /// `0 .. k` for some `k`, although in an arbitrary order. The length of `columns` is
+        /// used to infer the number of columns on which the permutation will act.
+        pub fn permutation(columns: impl Iterator<Item = usize>) -> Self {
+            let projection: Vec<Result<usize, T>> = columns.map(Ok).collect();
+            Action {
+                lit_filter: Vec::new(),
+                var_filter: Vec::new(),
+                input_arity: projection.len(),
+                projection,
+            }
         }
     }
 
