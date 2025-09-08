@@ -151,7 +151,7 @@ impl<'a> Plan<'a> {
 
                         for ((id, _action), builder) in todos.iter().zip(builders.into_iter()) {
                             let new_name = names.get(id).unwrap();
-                            facts.entry(new_name.clone()).add_set(builder.finish());
+                            facts.entry(new_name.clone()).extend(builder.finish());
                         }
                     }
 
@@ -174,7 +174,7 @@ impl<'a> Plan<'a> {
 
                     for ((id, _action), built) in actions.iter().zip(built.into_iter()) {
                         let name = if *id >= body.len() { self.rule.head[id-body.len()].name.clone() } else { format!(".temp-{}-{}", pos, id) };
-                        facts.entry(name.clone()).add_set(built);
+                        facts.entry(name.clone()).extend(built);
                         names.insert(*id, name);
                     }
 

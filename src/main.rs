@@ -86,7 +86,7 @@ fn main() {
                                             builder.push(terms.borrow().into_index_iter());
                                         }
                                     }
-                                    state.facts.entry(name).add_set(builder.finish());
+                                    state.facts.entry(name).extend(builder.finish());
                                     state.update();
                                 }
                                 else { println!("file not found: {:?}", filename); }
