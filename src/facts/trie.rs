@@ -498,11 +498,9 @@ impl<const K: usize> Forest<Vec<[u8; K]>> {
         for i in 0 .. W { layers[i].list.values.push(facts[0][i]); }
         for i in 1 .. facts.len() {
             if facts[i] != facts[i-1] {
-                let common = facts[i].iter().zip(facts[i-1].iter()).position(|(i0, i1)| i0 != i1);
-                if let Some(pos) = common {
-                    for to_seal in pos+1 .. W { layers[to_seal].list.bounds.push(layers[to_seal].list.values.len() as u64); }
-                    for to_push in pos   .. W { layers[to_push].list.values.push(facts[i][to_push]); }
-                }
+                let pos = facts[i].iter().zip(facts[i-1].iter()).position(|(i0, i1)| i0 != i1).unwrap();
+                for to_seal in pos+1 .. W { layers[to_seal].list.bounds.push(layers[to_seal].list.values.len() as u64); }
+                for to_push in pos   .. W { layers[to_push].list.values.push(facts[i][to_push]); }
             }
         }
 

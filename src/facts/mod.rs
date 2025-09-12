@@ -54,8 +54,10 @@ impl Relations {
                 if !transform.recent.is_empty() {
                     transform.stable.push(std::mem::take(&mut transform.recent));
                 }
-                if let Some(recent) = facts.recent.act_on(action).flatten() {
-                    transform.recent = recent.except(transform.stable.contents());
+                if let Some(mut recent) = facts.recent.act_on(action).flatten() {
+                    // Non-permutations need to be deduplicated against existing facts.
+                    if !action.is_permutation() { recent = recent.except(transform.stable.contents()); }
+                    transform.recent = recent;
                 }
             }
         }
@@ -209,7 +211,7 @@ pub trait Merge {
 }
 
 /// A type that can contain and work with facts.
-pub trait FactContainer : Form + Length + Merge + Default + Sized {
+pub trait FactContainer : Form + Length + Merge + Default + Sized + Clone {
     /// Applies an action to each contained fact.
     fn apply<'a>(&'a self, action: impl FnMut(&[<Terms as Container>::Ref<'a>]));
     /// Joins `self` and `other` on the first `arity` columns, putting projected results in `builders`.
@@ -239,6 +241,12 @@ pub trait FactContainer : Form + Length + Merge + Default + Sized {
         // This has the potential to be efficiently implemented, by capturing and unfolding the corresponding columns,
         // filtering and sorting as appropriate, and then rebuilding. Much more structured than `apply`, who is only
         // provided a closure.
+        if action.is_identity() {
+            let mut lsm = FactLSM::default();
+            lsm.push(self.clone());
+            return lsm;
+        }
+
         let mut builder = FactBuilder::default();
         self.apply(|row| {
             let lit_filtered = action.lit_filter.iter().all(|(index, value)| row[*index].as_slice() == value.as_bytes());
@@ -327,7 +335,8 @@ pub struct FactLSM<F> {
 }
 
 impl<F: Merge + Length> FactLSM<F> {
-    fn push(&mut self, layer: F) {
+    pub fn is_empty(&self) -> bool { self.layers.iter().all(|l| l.is_empty()) }
+    pub fn push(&mut self, layer: F) {
         if !layer.is_empty() {
             self.layers.push(layer);
             self.tidy();
@@ -335,7 +344,7 @@ impl<F: Merge + Length> FactLSM<F> {
     }
 
     pub fn extend(&mut self, other: &mut FactLSM<F>) {
-        Extend::extend(&mut self.layers, other.layers.drain(..));
+        Extend::extend(&mut self.layers, other.layers.drain(..).filter(|f| !f.is_empty()));
         self.tidy();
     }
 
