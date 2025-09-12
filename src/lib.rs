@@ -42,8 +42,8 @@ pub mod types {
         pub fn update(&mut self) {
             self.advance();
             while self.active() {
-                for (index, rule) in self.rules.iter().enumerate() {
-                    crate::plan::implement_plan(rule, index, false, &mut self.facts);
+                for rule in self.rules.iter() {
+                    crate::plan::implement(&rule, false, &mut self.facts);
                 }
                 self.advance();
             }
@@ -82,7 +82,7 @@ pub mod types {
                 }
             }
             else {
-                crate::plan::implement_plan(&rule, self.rules.len(), true, &mut self.facts);
+                crate::plan::implement(&rule, true, &mut self.facts);
                 self.rules.push(rule);
             }
         }
@@ -126,6 +126,7 @@ pub mod types {
             output.input_arity = atom.terms.len();
             output
         }
+        pub fn with_arity(arity: usize) -> Self { Self { input_arity: arity, ..Default::default() } }
     }
 
     impl<T> Action<T> {
@@ -146,6 +147,16 @@ pub mod types {
                 input_arity: projection.len(),
                 projection,
             }
+        }
+        /// True when filters are empty and each input column occurs exactly once, with no literals.
+        ///
+        /// Permutations are specifically helpful in that distinct fact sets that are permuted remain
+        /// distinct, and we can avoid antijoins at various moments.
+        pub fn is_permutation(&self) -> bool {
+            self.lit_filter.is_empty() &&
+            self.var_filter.is_empty() &&
+            self.projection.len() == self.input_arity &&
+            self.projection.iter().flatten().copied().collect::<std::collections::BTreeSet<_>>().into_iter().eq(0 .. self.input_arity)
         }
     }
 

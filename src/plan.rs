@@ -1,862 +1,390 @@
-use columnar::Len;
-use crate::types::{Rule, Term};
-use crate::facts::Relations;
+use crate::types::{Rule, Action, Atom, Term};
+use crate::facts::{FactContainer, FactLSM, FactSet, Relations};
 
-/// Implements a provided rule by way of a provided plan.
+/// Implements a provided rule in the context of various facts.
 ///
-/// Additionally, a rule-unique identifier allows the logic to create new relation names.
-/// The `stable` argument indicates whether we need to perform a full evaluation or only the changes.
-pub fn implement_plan(rule: &Rule, pos: usize, stable: bool, facts: &mut Relations) {
-    Plan::from(rule).implement(pos, stable, facts);
-}
-
-use std::fmt::Debug;
-use std::collections::{BTreeMap, BTreeSet};
-use eggsalad::{Function, egraph::{EGraph, ENode, Id}};
-
-pub struct Plan<'a> {
-    /// The original rule, used for finishing detail.
-    pub rule: &'a Rule,
-    /// The sequence of operations to apply, in order.
-    pub plan: Vec<ENode<Op>>,
-}
-
-impl<'a> From<&'a Rule> for Plan<'a> {
-    fn from(rule: &'a Rule) -> Self {
-        Self {
-            rule,
-            plan: rule_to_ir(rule),
-        }
+/// The `stable` argument indicates whether we should perform a join with all facts (true),
+/// or only a join that involves novel facts (false).
+pub fn implement(rule: &Rule, stable: bool, facts: &mut Relations) {
+    match (&rule.head[..], &rule.body[..]) {
+        (head, [body]) => { implement_action(head, body, stable, facts) },
+        (head, body) => { implement_joins(head, body, stable, facts) },
     }
 }
 
-impl<'a> Plan<'a> {
-    pub fn implement(&self, pos: usize, stable: bool, facts: &mut Relations) {
+/// Maps an action across a single atom in the body.
+fn implement_action(head: &[Atom], body: &Atom, stable: bool, facts: &mut Relations) {
 
-        use crate::{facts::FactBuilder, join::join_with, types::Atom};
-        use crate::facts::FactContainer;
-
-        // We'll need the input arities to judge identity-ness.
-        let arities =
-        self.rule.body.iter()
-            .map(|b| (&b.name, b.terms.len()))
-            .collect::<BTreeMap<_,_>>();
-
-        /// Like an `Action` but with the opportunity to produce literal output columns.
-        struct TempAction {
-            lit_filter: Vec<(usize, String)>,
-            var_filter: Vec<Vec<usize>>,
-            projection: Vec<Result<usize, String>>,
-        }
-
-        impl TempAction {
-            fn is_ident(&self, arity: usize) -> bool {
-                self.lit_filter.is_empty() &&
-                self.var_filter.is_empty() &&
-                self.projection.len() == arity &&
-                self.projection.iter().enumerate().all(|(i,c)| c == &Ok(i))
-            }
-            fn from_action(action: &Action) -> Self {
-                Self {
-                    lit_filter: action.lit_filter.clone(),
-                    var_filter: action.var_filter.clone(),
-                    projection: action.projection.iter().cloned().map(Ok).collect(),
-                }
-            }
-
-            fn from_head(atom: &Atom, action: &Action) -> Self {
-                let mut local_names = BTreeMap::<&str, usize>::default();
-                Self {
-                    lit_filter: action.lit_filter.clone(),
-                    var_filter: action.var_filter.clone(),
-                    projection: atom.terms.iter().map(|term| {
-                        match term {
-                            Term::Var(name) => {
-                                let new_pos = local_names.len();
-                                Ok(action.projection[*local_names.entry(name).or_insert(new_pos)])
-                            },
-                            Term::Lit(data) => Err(data.clone()),
-                        }
-                    }).collect(),
-                }
-            }
-            /// Extracts from `projection` the sequence of distinct columns in order, minus literals.
-            ///
-            /// These columns are the minimal information needed for `join` to operate, and the columns
-            /// that are projected away can all be added back relatively cheaply, without complicating
-            /// the process of fact production (and e.g. gumming up sorting with duplicates or literals).
-            ///
-            /// The method leaves `self` as any necessary follow-up actions, and if it is not the identity
-            /// action then it should still be applied to the facts from the support.
-            fn extract_support(&mut self) -> Vec<usize> {
-                let mut result = Vec::default();
-                for column in self.projection.iter_mut() {
-                    if let Ok(col) = column {
-                        if !result.contains(col) { result.push(*col); }
-                        *col = result.iter().position(|c| c == col).unwrap();
-                    }
-                }
-                result
-            }
-        }
-
-        // The head needs planning assistance from its atoms, wrt literals and repeats.
-        let (body, head) = self.plan.split_at(self.plan.len() - self.rule.head.len());
-
-        let mut steps = BTreeMap::<Id,Vec<(Id, TempAction)>>::default();
-
-        // For all map actions in the body, place in the step they derive from.
-        for (index, node) in body.iter().enumerate() {
-            if let Op::Map(action) = &node.op {
-                steps.entry(node.args[0])
-                        .or_insert_with(Vec::new)
-                        .push((index, TempAction::from_action(action)));
-            }
-        }
-        // For all map actions in the head, place in the step they derive from.
-        for ((index, node), atom) in head.iter().enumerate().zip(self.rule.head.iter()) {
-            if let Op::Map(action) = &node.op {
-                steps.entry(node.args[0])
-                        .or_insert_with(Vec::new)
-                        .push((body.len() + index, TempAction::from_head(atom, action)));
-            }
-            else { panic!("Malformed plan; head atom is not a map!"); }
-        }
-
-        let mut names = BTreeMap::<Id, String>::default();
-        for (idx, mut actions) in steps {
-            let node = &self.plan[idx];
-            match &node.op {
-                Op::Var(name) => {
-
-                    let mut todos = Vec::default();
-                    for (id, action) in actions.iter() {
-                        // Head productions should write at their own name.
-                        if *id >= body.len() {
-                            names.insert(*id, self.rule.head[id-body.len()].name.clone());
-                            todos.push((*id, action));
-                        }
-                        // Each action that is an identity can repeat the input name.
-                        else if action.is_ident(*arities.get(name).unwrap()) {
-                            names.insert(*id, name.clone());
-                        }
-                        // Each action that is not an identity will create a new name,
-                        // and deposit the loading results behind that name.
-                        else {
-                            let new_name = format!(".temp-{}-{}", pos, id);
-                            names.insert(*id, new_name);
-                            todos.push((*id, action));
-                        }
-                    }
-
-                    if !todos.is_empty() {
-                        let mut builders = vec![FactBuilder::default(); todos.len()];
-                        if let Some(found) = facts.get(name) {
-                            for layer in found.stable.contents().filter(|_| stable).chain(Some(&found.recent)) {
-                                for ((_id, action), builder) in todos.iter().zip(builders.iter_mut()) {
-                                    layer.apply(|fact| {
-                                        let lit_match = action.lit_filter.iter().all(|(i,l)| fact[*i].as_slice() == l.as_bytes());
-                                        let var_match = action.var_filter.iter().all(|idxs| idxs.iter().all(|i| fact[*i] == fact[idxs[0]]));
-                                        if lit_match && var_match {
-                                            builder.push(action.projection.iter().map(|i|
-                                                match i { Ok(col) => fact[*col].as_slice(),
-                                                            Err(lit) => lit.as_bytes() }));
-                                        }
-                                    });
-                                }
-                            }
-                        }
-
-                        for ((id, _action), builder) in todos.iter().zip(builders.into_iter()) {
-                            let new_name = names.get(id).unwrap();
-                            facts.entry(new_name.clone()).extend(builder.finish());
-                        }
-                    }
-
-                }
-                Op::Mul(2) => {
-
-                    let arity = if let Op::Map(action) = &self.plan[node.args[0]].op { action.key_arity } else { panic!("malformed plan") };
-
-                    // Ensure entries exist, tidy each by the length of the other, then get shared borrows.
-                    let len0 = facts.entry(names.get(&node.args[0]).unwrap().clone()).recent.len();
-                    let len1 = facts.entry(names.get(&node.args[1]).unwrap().clone()).recent.len();
-                    facts.get_mut(names.get(&node.args[0]).unwrap()).unwrap().stable.tidy_through(2 * len1);
-                    facts.get_mut(names.get(&node.args[1]).unwrap()).unwrap().stable.tidy_through(2 * len0);
-                    let facts0 = facts.get(names.get(&node.args[0]).unwrap()).unwrap();
-                    let facts1 = facts.get(names.get(&node.args[1]).unwrap()).unwrap();
-
-                    // let projections = actions.iter().map(|(_,a)| &a.projection[..]).collect::<Vec<_>>();
-
-                    // Before invoking `join_with`, we'll need to convert the projections from potentially repeating
-                    // bindings interspersed with literals to distinct bindings, after which we post-process.
-                    let projections = actions.iter_mut().map(|(_, a)| a.extract_support()).collect::<Vec<_>>();
-                    let projections = projections.iter().map(|x| &x[..]).collect::<Vec<_>>();
-
-                    let built = join_with(facts0, facts1, stable, arity, &projections[..]);
-
-                    for ((id,action), built) in actions.iter().zip(built.into_iter()) {
-                        let name = if *id >= body.len() { self.rule.head[id-body.len()].name.clone() } else { format!(".temp-{}-{}", pos, id) };
-                        if action.is_ident(action.projection.len()) {
-                            facts.entry(name.clone()).extend(built);
-                        }
-                        else {
-                            // The action included repetitions or literals.
-                            // This is relatively easy to fix in a trie layout, and we should do that, but for the moment we go slow.
-                            let mut act = crate::types::Action::default();
-                            act.projection = action.projection.clone();
-                            facts.entry(name.clone()).extend(built.into_iter().flat_map(|b| b.act_on(&act)));
-                        }
-                        names.insert(*id, name);
-                    }
-
-                }
-                x => { panic!("Invalid plan: {:?}", x); }
-            }
-        }
-
-    }
-}
-
-/// Converts a multi-head rule into assembly instructions.
-///
-/// The list of expressions should be built in order, and their identifiers
-/// reference the ordinal position in the list, i.e. in `0 .. list.len()`.
-///
-/// The last `rule.head.len()` expressions correspond directly to the heads.
-/// Their expressions only compute the support of the head atom, which means
-/// that someone will need to slot those values in the right place along with
-/// repetitions and literals.
-pub fn rule_to_ir(rule: &Rule) -> Vec<ENode<Op>> {
-
-    let mut head = Action::default();
-
-    // Columns introduced with the same names (equality constraints).
-    let mut bind = BTreeMap::<&str, Vec<usize>>::default();
-    let mut prog = vec![Op::Mul(rule.body.len())];
-
-    // Each atom is introduced with a no-op action.
-    // Head rules will introduce filters and projections.
-    for atom in rule.body.iter() {
-        prog.extend([
-            Op::nop(atom.terms.len()),
-            Op::Var(atom.name.clone()),
-        ]);
-        for term in atom.terms.iter() {
-            let column = head.projection.len();
-            head.projection.push(column);
+    // The body provides filters and an association between columns and names,
+    // which we expect to find in the atoms of the head. We'll need to form up
+    // actions for each head that perform the compound actions.
+    let load_action = Action::from_body(body);
+    let head_actions = head.iter().map(|atom| {
+        let mut action = load_action.clone();
+        action.projection = atom.terms.iter().map(|term| {
             match term {
-                Term::Var(name) => { bind.entry(name).or_default().push(column); },
-                Term::Lit(data) => { head.lit_filter.push((column, data.to_string())); },
+                Term::Var(____) => { action.projection[body.terms.iter().position(|t| t == term).unwrap()].clone() },
+                Term::Lit(data) => { Err(data.to_string()) },
             }
-        }
-    }
-    head.var_filter.extend(bind.values().filter(|l| l.len() > 1).cloned());
-
-    // Houses our options for the rule implementation.
-    let mut e_graph: EGraph<Op> = Default::default();
-
-    // We'll need `prog` for reference once we've saturated.
-    let join = e_graph.insert(prog.clone());
-
-    // Each head atom should personalize `act` and apply it to `join`.
-    // The personalization projects out only the distinct names
-    let heads = rule.head.iter().map(|atom| {
-        let mut head_names = BTreeSet::<&str>::default();
-        let mut head = head.clone();
-        head.projection.clear();
-        for term in atom.terms.iter() {
-            match term {
-                Term::Var(name) => {
-                    if head_names.insert(name) {
-                        head.projection
-                            .push(bind.get(name.as_str()).unwrap()[0]);
-                    }
-                }
-                Term::Lit(____) => { },
-            }
-        }
-
-        e_graph.ensure(ENode::new(Op::Map(head.clone()), [join]));
-        head
+        }).collect();
+        action
     }).collect::<Vec<_>>();
+    // TODO: perform all actions at the same time. Likely extend `FactContainer::act_on`.
+    for (head_atom, action) in head.iter().zip(head_actions.iter()) {
+        if let Some(found) = facts.get(body.name.as_str()) {
+            let mut derived = FactLSM::default();
+            for layer in found.stable.contents().filter(|_| stable).chain(Some(&found.recent)) {
+                derived.extend(&mut layer.act_on(action));
+            }
+            facts.entry(head_atom.name.clone()).extend(derived);
+        }
+    }
+}
 
-    // Time to optimize the e-graph!
-    // We could sequence these optimizations rather than saturate;
-    // this is based on all expressions starting as cross joins.
-    e_iterate(&mut e_graph, &[
-        &MulPermute,
-        &MulPartition,
-        &MulElimination,
-        &MapPushdown,
-    ]);
+/// The complicated implementation case where these is at least one join.
+fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relations) {
 
-    // The e-graph is now locked down, so we can grab e-class identifiers.
-    let body = e_graph.insert(prog);
-    let heads = heads.into_iter().map(|a| e_graph.ensure(ENode::new(Op::Map(a), [body]))).collect::<Vec<_>>();
+    let (plans, loads) = plan::plan_rule::<plan::ByAtom>(head, body);
+    for ((_, load_atom), (action, _)) in loads.iter().filter(|((p,l),_)| p != l) {
+        facts.ensure_action(body[*load_atom].name.as_str(), action);
+    }
 
-    // Establish a predicate for whether we consider an e-node or not.
-    //
-    // Naively, we imagine the cardinality as proportional to |vals|^cols,
-    // for `cols` the number of independent (unequated) columns. For `Map`
-    // this is its projected arity, and for `Mul` this is the sum of the
-    // input arities, minus the key arity for all but one of the inputs.
-    let filter = |node: &ENode<Op>, graph: &EGraph<Op>, thresh: usize| {
-        match &node.op {
-            Op::Var(_) => true,
-            Op::Map(a) => {
-                // Maps will do work proportional to their projection length.
-                a.projection.len() <= thresh &&
-                // All filters should be empty, or this should have a Var input.
-                ((a.lit_filter.is_empty() && a.var_filter.is_empty()) || graph.members[&node.args[0]].iter().all(|x| if let Op::Var(_) = x.op { true } else { false }) )
-            },
-            Op::Mul(_) => {
-                // Muls will do work proportional to the input key length
-                // plus the sum of non-key columns over all inputs.
-                let mut arity = 0;
-                let mut key_arity = None;
-                for a in node.args.iter() {
-                    if let Op::Map(act) = &graph.members.get(a).unwrap().first().unwrap().op {
-                        arity += act.projection.len() - act.key_arity;
-                        key_arity = Some(act.key_arity);
-                    }
-                    else { panic!("Mal-typed expression"); }
-                }
-                let key_arity = key_arity.unwrap();
-                arity + key_arity <= thresh
+    let plan_atoms = if stable { 1 } else { body.len() };
+
+    for (plan_atom, atom) in body[..plan_atoms].iter().enumerate() {
+
+        let plan = &plans[&plan_atom];
+
+        // Stage 0: Load the recently added facts.
+        let (action, terms) = &loads[&(plan_atom, plan_atom)];
+        let mut delta_terms = terms.clone();
+        let mut delta_lsm = FactLSM::default();
+        if stable {
+            let facts = &facts.get(atom.name.as_str()).unwrap();
+            for layer in facts.stable.contents().chain([&facts.recent]) {
+                delta_lsm.extend(&mut layer.act_on(&action));
             }
         }
-    };
+        else {
+            let facts = &facts.get(atom.name.as_str()).unwrap();
+            delta_lsm.extend(&mut facts.recent.act_on(&action));
+        };
 
-    // For increasing `k`, look for an extraction that supports all heads.
-    let (cost, need) = (0 .. ).filter_map(|k| {
-        let eggstraction = eggstract(&e_graph, |n, g| filter(n,g,k));
-        if heads.iter().all(|h| eggstraction.contains_key(h)) {
-            Some((k, eggstraction))
+        // Stage 1: Semijoin with other atoms that are subsumed by the initial terms.
+        let (init_atoms, _init_terms, init_order) = &plan[0];
+        for load_atom in init_atoms.iter().filter(|a| a != &&plan_atom) {
+            let (load_action, load_terms) = &loads[&(plan_atom, *load_atom)];
+            let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
+            let to_chain = if load_atom > &plan_atom { Some(&other.recent) } else { None };
+            let load_terms = load_terms.iter().take_while(|t| delta_terms.contains(t)).copied().collect::<Vec<_>>().into_iter();
+            permute_delta(&mut delta_lsm, &mut delta_terms, load_terms);
+            let delta = delta_lsm.flatten().unwrap_or_default();
+            delta_lsm.push(delta.semijoin(other.stable.contents().chain(to_chain)));
         }
-        else { None }
-    }).next().unwrap();
+        // We may need to produce the result in a different order.
+        permute_delta(&mut delta_lsm, &mut delta_terms, init_order.iter().copied());
 
-    // We want to consider all ways of producing all heads.
-    // Cross each list of support options, unioning the support.
-    let mut supported = BTreeSet::default();
-    supported.insert(BTreeSet::<Id>::default());
-    for head in heads.iter() {
-        supported = std::mem::take(&mut supported).into_iter().flat_map(|s| {
-            need.get(head).unwrap().iter().map(move |head_option| s.union(head_option).copied().collect::<BTreeSet<Id>>())
-        }).collect::<BTreeSet<_>>();
+        // Stage 2: Each other plan stage.
+        for (atoms, terms, order) in plan.iter().skip(1) {
+
+            // A single atom stage can just be a join.
+            if atoms.len() == 1 {
+                let load_atom = atoms.first().unwrap();
+                let (load_action, load_terms) = &loads[&(plan_atom, *load_atom)];
+                let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
+                let other_terms = load_terms.iter().take_while(|t| delta_terms.contains(t) || terms.contains(*t)).copied().collect::<Vec<_>>().into_iter();
+
+                join_delta(&mut delta_lsm, &mut delta_terms, other, other_terms, load_atom > &plan_atom, order);
+            }
+            // Multi-atom stages call for different logic.
+            else { unimplemented!("Multi-atom join stages not yet implemented") }
+        }
+
+        // Stage 3: We now need to form up the facts to commit back to `facts`.
+        // It is possible that with a single head we have the terms in the right order,
+        // and can simply commit `delta`. There could be multiple heads, and the action
+        // could be not the identity.
+        let exact_match = head.iter().position(|a| {
+            a.terms.len() == delta_terms.len() &&
+            a.terms.iter().zip(delta_terms.iter()).all(|(h,d)| h.as_var() == Some(d))
+        });
+
+        for (_, atom) in head.iter().enumerate().filter(|(pos,_)| Some(*pos) != exact_match) {
+            let mut action = Action::with_arity(delta_terms.len());
+            action.projection = atom.terms.iter().map(|t| match t {
+                Term::Var(name) => Ok(delta_terms.iter().position(|t2| t2 == &name).unwrap()),
+                Term::Lit(data) => Err(data.clone()),
+            }).collect();
+            let delta = delta_lsm.flatten().unwrap_or_default();
+            facts.entry(atom.name.clone()).extend(delta.act_on(&action));
+            delta_lsm.push(delta);
+        }
+        if let Some(pos) = exact_match {
+            facts.entry(head[pos].name.clone()).extend(delta_lsm);
+        }
+    }
+}
+
+
+pub mod plan {
+
+    use std::collections::{BTreeSet, BTreeMap};
+    use crate::types::{Atom, Action};
+
+    /// A plan is a sequence of sets of atoms and terms, and an output term order.
+    ///
+    /// Each plan stage uses the atoms to express their thoughts about the terms,
+    /// each either joining or semijoining, depending on which terms are present.
+    /// The term sets are disjoint, as each term can be *introduced* at most once,
+    /// but the atom sets may repeat atoms as their many terms are introduced.
+    ///
+    /// The output term order discards columns that are no longer needed, and in
+    /// the last plan stage ensures that the order matches that of the rule head.
+    pub type Plan<A, T> = Vec<(BTreeSet<A>, BTreeSet<T>, Vec<T>)>;
+    pub type Plans<A, T> = BTreeMap<A, Plan<A, T>>;
+    pub type Load<T> = (Action<String>, Vec<T>);
+    pub type Loads<A, T> = BTreeMap<(A, A), Load<T>>;
+
+    pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a [Atom]) -> (Plans<usize, &'a String>, Loads<usize, &'a String>) {
+
+        // We'll pick a target term order for the first head; other heads may require transforms.
+        // If we have multiple heads and one has no literals or repetitions, that would be best.
+        let head_terms = head_order(head);
+
+        // Distinct (atom, term) pairs of integers.
+        let atoms_terms =
+        body.iter()
+            .enumerate()
+            .flat_map(|(index, atom)| atom.terms.iter().map(move |term| (index, term)))
+            .filter_map(|(index, term)| term.as_var().map(|t| (index, t)))
+            .collect::<BTreeSet<_>>();
+
+        // Maps from atoms to terms and terms to atoms.
+        let mut atoms_to_terms: BTreeMap<_, BTreeSet<_>> = BTreeMap::default();
+        let mut terms_to_atoms: BTreeMap<_, BTreeSet<_>> = BTreeMap::default();
+        for (atom, term) in atoms_terms.iter() {
+            atoms_to_terms.entry(*atom).or_default().insert(*term);
+            terms_to_atoms.entry(*term).or_default().insert(*atom);
+        }
+
+        // We'll want to pre-plan the term orders for each atom update rule, so that we can
+        // pre-ensure that the necessary input shapes exist, with each atom in term order.
+        let plans = S::plan_rule(&atoms_to_terms, &terms_to_atoms, &head_terms);
+
+        // Actions for each atom that would produce the output in `terms` order.
+        // Their output columns should now be ordered as `atoms_to_terms[atom]`.
+        // We use these as reference points, and don't intend to load with them.
+        let base_actions = body.iter().enumerate().map(|(index, atom)| {
+            let mut action = Action::from_body(atom);
+            action.projection.sort_by_key(|p| atom.terms[*p.as_ref().unwrap()].as_var().unwrap());
+            (index, action)
+        }).collect::<BTreeMap<_,_>>();
+
+        let mut load_actions = load_actions(&plans, &atoms_to_terms, &base_actions);
+
+        // Insert loading actions for plan atoms themselves.
+        for (plan_atom, atom) in body.iter().enumerate() {
+            let action = Action::from_body(atom);
+            let terms = action.projection.iter().flatten().map(|c| atom.terms[*c].as_var().unwrap()).collect::<Vec<_>>();
+            load_actions.insert((plan_atom, plan_atom), (action, terms));
+        }
+
+        (plans, load_actions)
     }
 
-    // Optimize for memory then computation.
-    let mut best = supported.into_iter().min_by_key(|option| {
-        let mut muls = 0;
-        let mut maps = 0;
-        let mut vars = 0;
-        for class in option.iter() {
-            match &e_graph.members.get(class).unwrap().first().unwrap().op {
-                Op::Map(_) => { maps += 1; },
-                Op::Mul(_) => { muls += 1; },
-                Op::Var(_) => { vars += 1; },
+    /// From per-atom plans, per-atom loading action required to for the right term order.
+    ///
+    /// The loading instructions ensure that each occurrence of an atom in a plan has an
+    /// action that will load with all prior bound terms followed by newly bound terms.
+    /// In the simplest, this could just order the terms in order they are bound.
+    pub fn load_actions<A: Ord + Copy, T: Ord + Copy>(
+        plans: &BTreeMap<A, Plan<A, T>>,
+        atoms_to_terms: &BTreeMap<A, BTreeSet<T>>,
+        base_actions: &BTreeMap<A, Action<String>>,
+    ) -> BTreeMap<(A, A), (Action<String>, Vec<T>)> {
+
+        // This could be quite general, and use an arbitrary action for each atom in each stage.
+        // For example, it needn't even be the same action across uses of the same atom.
+        let mut result = BTreeMap::default();
+        for (plan_atom, plan) in plans.iter() {
+            let mut all_terms = BTreeSet::default();
+            let mut in_order = Vec::default();
+            for (_atoms, terms, _out_order) in plan.iter() {
+                let new_terms = terms.difference(&all_terms);
+                in_order.extend(new_terms);
+                all_terms.extend(terms.iter().copied());
+            }
+            for load_atom in atoms_to_terms.keys().filter(|a| *a != plan_atom) {
+
+                let load_terms = in_order.iter().filter(|t| atoms_to_terms[load_atom].contains(t)).copied().collect::<Vec<_>>();
+
+                let mut action = base_actions[load_atom].clone();
+                action.projection =
+                in_order.iter()
+                        .flat_map(|t1| atoms_to_terms[load_atom].iter().position(|t2| t1 == t2))
+                        .map(|p| base_actions[load_atom].projection[p].clone())
+                        .collect();
+
+                result.insert((*plan_atom, *load_atom), (action, load_terms));
             }
         }
-        (maps, muls, vars)
-    }).unwrap();
 
-    best.extend(heads.iter().copied());
-
-    // With `best` in hand, we can extract specific e-nodes from each e-class.
-    let mut order = Vec::with_capacity(best.len());
-    let mut e_nodes = BTreeMap::<Id, ENode<Op>>::default();
-    // TODO: This loops forever if you have two heads with the same e-class.
-    while e_nodes.len() < best.len() {
-        for id in best.iter() {
-            if !e_nodes.contains_key(id) {
-                let mut active_nodes =
-                e_graph.members.get(id).unwrap().iter()
-                                .filter(|n| filter(n, &e_graph, cost))
-                                .filter(|n| n.args.iter().all(|a| e_nodes.contains_key(a)));
-                if let Some(node) = active_nodes.next() {
-                    e_nodes.insert(*id, node.clone());
-                    order.push(*id);
-                }
-            }
-        }
-    }
-
-    //
-    order.retain(|x| !heads.contains(x));
-    order.extend(heads);
-    let remap = order.iter().enumerate().map(|(i,o)| (o, i)).collect::<BTreeMap<_,_>>();
-
-    e_nodes
-        .into_iter()
-        .map(|(c,n)| (remap[&c], ENode::new(n.op, n.args.into_iter().map(|a| remap[&a]))))
-        .collect::<BTreeMap<_,_>>()
-        .into_values()
-        .collect()
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum Op {
-    Var(String),    // Data by name
-    Map(Action),    // Linear action (filter, project)
-    Mul(usize),     // Join by key (variadic arity)
-}
-
-impl Op {
-    pub fn var(name: &str) -> Self { Op::Var(name.to_string()) }
-    pub fn map(p: impl IntoIterator<Item=usize>, a: usize) -> Self { Op::Map(Action::shuffle(p, a)) }
-    pub fn mul(a: usize) -> Self { Op::Mul(a) }
-    pub fn nop(a: usize) -> Self { Op::Map(Action::nop(a)) }
-}
-
-impl Function for Op {
-    fn inputs(&self) -> usize {
-        match self {
-            Op::Var(_) => 0,
-            Op::Map(_) => 1,
-            Op::Mul(k) => *k,
-        }
-    }
-}
-
-/// Filters rows, re-orders columns, and groups by a prefix.
-#[derive(Clone, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct Action {
-    /// Columns that must equal some literal.
-    lit_filter: Vec<(usize, String)>,
-    /// Lists of columns that must all be equal.
-    var_filter: Vec<Vec<usize>>,
-    /// The order of input columns presented as output.
-    projection: Vec<usize>,
-    /// The prefix length by which the rows are grouped.
-    key_arity:  usize,
-}
-
-impl Debug for Action {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut x = f.debug_struct("Action");
-        if !self.lit_filter.is_empty() {
-            x.field("lit_filter", &self.lit_filter);
-        }
-        if !self.var_filter.is_empty() {
-            x.field("var_filter", &self.var_filter);
-        }
-
-        x.field("proj", &self.projection)
-        .field("arity", &self.key_arity)
-        .finish()
-    }
-}
-
-impl Action {
-    /// Creates a no-op action on a specified number of columns.
-    pub fn nop(arity: usize) -> Self { Action::shuffle(0..arity, 0) }
-    /// Creates an action that permutes and keys, but does not filter.
-    pub fn shuffle<I>(projection: I, key_arity: usize) -> Self
-    where
-        I: IntoIterator<Item=usize>,
-    {
-        Action {
-            var_filter: Vec::default(),
-            lit_filter: Vec::default(),
-            projection: projection.into_iter().collect(),
-            key_arity,
-        }
-    }
-    /// Applies an action to each referenced column.
-    pub fn permute(&mut self, cols: impl Fn(&mut usize)) {
-        for (col, _) in self.lit_filter.iter_mut() { cols(col) }
-        for list in self.var_filter.iter_mut() {
-            for col in list.iter_mut() { cols(col); }
-            list.sort();
-            list.dedup();
-        }
-        for col in self.projection.iter_mut() { cols(col); }
-    }
-    pub fn compose(&self, other: &Self) -> Self {
-        let mut result = self.clone();
-        result.permute(|x| *x = other.projection[*x]);
-        result.lit_filter.extend(other.lit_filter.clone());
-        result.var_filter.extend(other.var_filter.clone());
         result
     }
-}
 
-use actions::{MulPermute, MulPartition, MulElimination, MapPushdown, e_iterate};
-mod actions {
-
-    use std::collections::BTreeMap;
-    use eggsalad::{Function, egraph::{EGraph, ENode}};
-    use super::{Op, Action};
-
-    pub trait ERule {
-        /// Act on the e-graph. No rules, despite the name.
-        fn act(&self, e_graph: &mut EGraph<Op>);
-    }
-
-    pub fn e_iterate(e_graph: &mut EGraph<Op>, e_rules: &[& dyn ERule]) {
-        let mut done = false;
-        while !done {
-            for rule in e_rules.iter() {
-                rule.act(e_graph);
-            }
-            done = !e_graph.refresh();
-            e_graph.validate();
-        }
-    }
-
-    /// Equates `[Map, Mul(k), A, B, .. K]` with all permutations of `[A .. K]`.
-    pub struct MulPermute;
-    impl ERule for MulPermute {
-        fn act(&self, e_graph: &mut EGraph<Op>) {
-            let mut equate = Vec::new();
-            for (class, nodes) in e_graph.members.iter() {
-                for node1 in nodes.iter() {
-                    if let Op::Map(act1) = &node1.op {
-                        for node2 in e_graph.members.get(&node1.args[0]).unwrap().iter() {
-                            if let Op::Mul(k) = &node2.op {
-
-                                // With k arguments to permute, each requires a column permutation for `act1`.
-                                let mut arities = Vec::with_capacity(node2.args.len());
-                                for class in node2.args.iter() {
-                                    if let Op::Map(act) = &e_graph.members.get(class).unwrap().first().unwrap().op {
-                                        arities.push(act.projection.len());
-                                    }
-                                    else { panic!("Mal-typed expression") }
-                                }
-
-                                let old_input = arities.iter().enumerate().flat_map(|(i,a)| std::iter::repeat(i).enumerate().take(*a)).collect::<Vec<_>>();
-
-                                use itertools::Itertools;
-                                for permutation in (0 .. *k).permutations(*k) {
-
-                                    let args = permutation.iter().map(|i| node2.args[*i]).collect::<Vec<_>>();
-                                    let offset = permutation.iter().scan(0, |off, ind| { *off += arities[*ind]; Some(*off - arities[*ind]) }).collect::<Vec<_>>();
-                                    let inv = permutation.iter().copied().enumerate().map(|(i,p)| (p,i)).collect::<BTreeMap<_,_>>();
-
-                                    let mut act = act1.clone();
-                                    act.permute(|c| {
-                                        let (col, inp) = old_input[*c];
-                                        *c = offset[inv[&inp]] + col;
-                                    });
-
-                                    let cmd1: Vec<EAct<Op>> = vec![EAct::EClass(*class)];
-                                    // `[Mul, Map, A, B, .. K]`
-                                    let mut cmd2 = vec![
-                                        EAct::Operator(Op::Map(act)),
-                                        EAct::Operator(Op::Mul(*k)),
-                                    ];
-                                    cmd2.extend(args.into_iter().map(EAct::EClass));
-                                    equate.push((cmd1, cmd2));
-
-            }   }   }   }   }   }
-
-            for (a1, a2) in equate {
-                let id1 = apply(&a1, e_graph);
-                let id2 = apply(&a2, e_graph);
-                e_graph.merge(id1, id2);
-            }
-        }
-    }
-
-    /// Equates `[Mul(k), A, B, .. K]` with `[Mul(2), Map, Mul(j), A .. J, Map, Mul(k-j), .. K]`.
-    pub struct MulPartition;
-    impl ERule for MulPartition {
-        fn act(&self, e_graph: &mut EGraph<Op>) {
-            let mut equate = Vec::new();
-            for (class, nodes) in e_graph.members.iter() {
-                for node in nodes.iter() {
-                    if let Op::Mul(k) = &node.op {
-                        // We only have something interesting to propose for multi-way joins.
-                        if *k > 2 {
-                            // Arities are important for the new `Map`s we introduce.
-                            let mut arities = Vec::with_capacity(node.args.len());
-                            let mut key_arity = None;
-                            for class in node.args.iter() {
-                                if let Op::Map(act) = &e_graph.members.get(class).unwrap().first().unwrap().op {
-                                    arities.push(act.projection.len());
-                                    key_arity = Some(act.key_arity);
-                                }
-                                else { panic!("Mal-typed expression") }
-                            }
-                            let key_arity = key_arity.unwrap();
-
-                            // Each space between two arguments could be a break point.
-                            // There are k-1 spaces, and so 2^{k-1} possible breaks.
-                            use itertools::Itertools;
-                            for mut splits in (1 .. *k-1).powerset() {
-                                if !splits.is_empty() {
-                                    splits.push(*k);
-                                    let mut lower = 0;
-                                    let cmd1: Vec<EAct<Op>> = vec![EAct::EClass(*class)];
-                                    let mut cmd2 = vec![EAct::Operator(Op::Mul(splits.len()))];
-                                    for upper in splits {
-                                        let arity = (lower .. upper).map(|i| arities[i]).sum::<usize>();
-                                        if upper - lower > 1 {
-                                            cmd2.push(EAct::Operator(Op::Map(Action::shuffle(0 .. arity, key_arity))));
-                                            cmd2.push(EAct::Operator(Op::Mul(upper-lower)));
-                                            cmd2.extend((lower .. upper).map(|i| EAct::EClass(node.args[i])));
-                                        }
-                                        else {
-                                            cmd2.push(EAct::EClass(node.args[lower]));
-                                        }
-                                        lower = upper;
-                                    }
-                                    equate.push((cmd1, cmd2));
-
-            }   }   }   }   }   }
-
-            for (a1, a2) in equate {
-                let id1 = apply(&a1, e_graph);
-                let id2 = apply(&a2, e_graph);
-                e_graph.merge(id1, id2);
-            }
-        }
-    }
-
-    /// Equates `[A, Mul(1), B]` with `[C]` for C equal to A composed with B.
-    pub struct MulElimination;
-    impl ERule for MulElimination {
-        fn act(&self, e_graph: &mut EGraph<Op>) {
-            let mut equate = Vec::new();
-            for (class, nodes) in e_graph.members.iter() {
-                for node1 in nodes.iter() {
-                    if let Op::Map(act1) = &node1.op {
-                        for node2 in e_graph.members.get(&node1.args[0]).unwrap().iter() {
-                            if let Op::Mul(1) = &node2.op {
-
-                                for node3 in e_graph.members.get(&node2.args[0]).unwrap().iter() {
-                                    if let Op::Map(act3) = &node3.op {
-                                        let act = act1.compose(act3);
-                                        let cmd1: Vec<EAct<Op>> = vec![EAct::EClass(*class)];
-                                        let cmd2 = vec![
-                                            EAct::Operator(Op::Map(act)),
-                                            EAct::EClass(node3.args[0]),
-                                        ];
-                                        equate.push((cmd1, cmd2));
-
-            }   }   }   }   }   }   }
-
-            for (a1, a2) in equate {
-                let id1 = apply(&a1, e_graph);
-                let id2 = apply(&a2, e_graph);
-                e_graph.merge(id1, id2);
-            }
-        }
-    }
-
-    /// Acts on `[Map, Mul, Map, _, Map, _]` in several ways.
+    /// Produces a term order for head atoms.
     ///
-    /// 1. Literal filters are pushed down to any corresponding inputs.
-    /// 2. Variable filters are pushed to each input, and converted to keys if across inputs.
-    /// 3. Projections are pushed down to each input.
-    pub struct MapPushdown;
-    impl ERule for MapPushdown {
-        fn act(&self, e_graph: &mut EGraph<Op>) {
+    /// The order is of distinct terms in order of presentation.
+    /// Repeated terms and literals should be added in post.
+    fn head_order<'a>(head: &'a [Atom]) -> Vec<&'a String> {
+        let mut seen: BTreeSet<&'a String> = BTreeSet::default();
+        head.iter().flat_map(|a| a.terms.iter()).filter_map(|t| t.as_var()).filter(|t| seen.insert(t)).collect()
+    }
 
-            let mut equate = Vec::new();
+    /// A type that can produce an update plan for a rule.
+    pub trait Strategy<A: Ord+Copy, T: Ord+Copy> {
+        /// For `atom`, a sequence of (atoms, terms) to introduce to effect a join.
+        fn plan_atom(atom: A, atoms_to_terms: &BTreeMap<A, BTreeSet<T>>, terms_to_atoms: &BTreeMap<T, BTreeSet<A>>) -> Plan<A, T>;
 
-            // `[Map, Mul, Map, A, Map, B]`
-            for (class, nodes) in e_graph.members.iter() {
-                for node1 in nodes.iter() { if let Op::Map(act1) = &node1.op {
-                for node2 in e_graph.members.get(&node1.args[0]).unwrap().iter() { if let Op::Mul(2) = &node2.op {
-                for node3 in e_graph.members.get(&node2.args[0]).unwrap().iter() { if let Op::Map(act3) = &node3.op {
-                for node4 in e_graph.members.get(&node2.args[1]).unwrap().iter() { if let Op::Map(act4) = &node4.op {
+        /// Plans updates for each atom in the rule.
+        fn plan_rule(atoms_to_terms: &BTreeMap<A, BTreeSet<T>>, terms_to_atoms: &BTreeMap<T, BTreeSet<A>>, head_terms: &[T]) -> BTreeMap<A, Plan<A, T>> {
+            let mut rule_plan = BTreeMap::default();
+            for atom in atoms_to_terms.keys().copied() {
+                let mut atom_plan = Self::plan_atom(atom, atoms_to_terms, terms_to_atoms);
 
-                // We'll fire only if all actions but `act1` are key-free.
-                // Should still work out, if we start with cross joins and introduce keys later.
-                if (act3.key_arity == 0 && act3.lit_filter.is_empty() && act3.var_filter.is_empty()) &&
-                (act4.key_arity == 0 && act4.lit_filter.is_empty() && act4.var_filter.is_empty()) {
-
-                    // We have found a pattern, and need to figure out what to do with it.
-                    let a = node3.args[0];
-                    let b = node4.args[0];
-
-                    // Each list of variable equivalences can be pushed down, and create keys.
-                    // Equivalent variables pushed down also projects away all but one column.
-                    // Equivalences across the inputs result in keying for each of the inputs.
-                    // Literal equivalences are pushed down either branch, or both if possible.
-                    let mut act_0 = act1.clone();
-                    let mut act_a = Action::default();
-                    let mut act_b = Action::default();
-                    let mut keys = Vec::new();
-                    for list in act_0.var_filter.drain(..) {
-                        let mut list_a = Vec::new();
-                        let mut list_b = Vec::new();
-                        for col in list.iter() {
-                            if *col < act3.projection.len() { list_a.push(*col); }
-                            else { list_b.push(*col - act3.projection.len()); }
-                        }
-                        if let (Some(a), Some(b)) = (list_a.first(), list_b.first()) {
-                            keys.push((*a, *b));
-                        }
-                        if list_a.len() > 1 { act_a.var_filter.push(list_a); }
-                        if list_b.len() > 1 { act_b.var_filter.push(list_b); }
+                // Fuse plan stages with identical atoms.
+                for index in (1 .. atom_plan.len()).rev() {
+                    if atom_plan[index].0 == atom_plan[index-1].0 {
+                        let stage = atom_plan.remove(index);
+                        atom_plan[index-1].1.extend(stage.1);
                     }
-                    for (col, lit) in act_0.lit_filter.drain(..) {
-                        if col < act3.projection.len() { act_a.lit_filter.push((col, lit)); }
-                        else { act_b.lit_filter.push((col - act3.projection.len(), lit)); }
-                    }
-
-                    // We will have this many keys.
-                    act_a.key_arity = keys.len();
-                    act_b.key_arity = keys.len();
-
-                    // Now to sort out the projections
-                    // We need to preserve any columns that occur in `act_0`.
-                    // Ideally that would be just the projection, but we skipped literal filters.
-                    let mut demanded = std::collections::BTreeSet::default();
-                    demanded.extend(act_0.lit_filter.iter().map(|(i,_)| *i));
-                    demanded.extend(act_0.projection.iter().copied());
-                    for (key_a, key_b) in keys.iter() {
-                        act_a.projection.push(*key_a);
-                        act_b.projection.push(*key_b);
-                        demanded.remove(key_a);
-                        demanded.remove(&(key_b + act3.projection.len()));
-                    }
-                    for col in demanded {
-                        if col < act3.projection.len() { act_a.projection.push(col); }
-                        else { act_b.projection.push(col - act3.projection.len()); }
-                    }
-
-                    let mut act0_map = BTreeMap::default();
-                    for col in act_a.projection.iter() { act0_map.insert(*col, act0_map.len()); }
-                    for col in act_b.projection.iter() { act0_map.insert(act3.projection.len() + *col, act0_map.len()); }
-                    act_0.permute(|c| *c = *act0_map.get(c).unwrap());
-
-                    act_a.permute(|c| { *c = act3.projection[*c]; });
-                    act_b.permute(|c| { *c = act4.projection[*c]; });
-
-                    let cmd1: Vec<EAct<Op>> = vec![EAct::EClass(*class)];
-                    // `[Map, Mul, Map A, Map, B]`
-                    let cmd2 = vec![
-                        EAct::Operator(Op::Map(act_0)),
-                        EAct::Operator(Op::Mul(2)),
-                        EAct::Operator(Op::Map(act_a)),
-                        EAct::EClass(a),
-                        EAct::Operator(Op::Map(act_b)),
-                        EAct::EClass(b),
-                    ];
-                    equate.push((cmd1, cmd2));
-
                 }
-            // Avert your eyes
-            }}}}}}}}}
 
-            for (a1, a2) in equate {
-                let id1 = apply(&a1, e_graph);
-                let id2 = apply(&a2, e_graph);
-                e_graph.merge(id1, id2);
+                // Plan outgoing projections, based on demand and ending with `head_terms`.
+                for index in 1 .. atom_plan.len() {
+                    let (this, rest) = atom_plan.split_at_mut(index);
+                    let demanded = rest.iter().flat_map(|(atoms, _, _)| atoms.iter()).flat_map(|a| atoms_to_terms[a].iter()).chain(head_terms.iter()).collect::<BTreeSet<_>>();
+
+                    let order = &mut this[index-1].2;
+                    order.clear();
+                    order.extend(demanded.iter().filter(|t| rest[0].0.iter().any(|a| atoms_to_terms[a].contains(t))).copied());
+                    order.extend(demanded.iter().filter(|t| !rest[0].0.iter().any(|a| atoms_to_terms[a].contains(t))).copied());
+                }
+                atom_plan.last_mut().unwrap().2 = head_terms.iter().copied().collect();
+
+                rule_plan.insert(atom, atom_plan);
             }
-
+            rule_plan
         }
     }
 
-    use eggsalad::egraph::Id;
-    #[derive(Debug)]
-    enum EAct<T: Function> {
-        Operator(T),
-        EClass(Id),
+    /// Plans updates for an atom by repeatedly introducing individual terms and all supported atoms.
+    pub struct ByTerm;
+    impl<A: Ord+Copy, T: Ord+Copy> Strategy<A, T> for ByTerm {
+        fn plan_atom(atom: A, atoms_to_terms: &BTreeMap<A, BTreeSet<T>>, terms_to_atoms: &BTreeMap<T, BTreeSet<A>>) -> Plan<A, T> {
+
+            let init_terms: BTreeSet<T> = atoms_to_terms[&atom].clone();
+            let init_atoms: BTreeSet<A> = init_terms.iter().flat_map(|t| terms_to_atoms[t].iter()).filter(|a| atoms_to_terms[a].iter().all(|t| init_terms.contains(t))).copied().collect();
+
+            // One approach: grow terms through adjacent atoms.
+            let mut terms: BTreeSet<T> = init_terms.clone();
+            let mut plan: Plan<A, T> = vec![(init_atoms, init_terms, Vec::new())];
+            while terms.len() < terms_to_atoms.len() {
+
+                // Terms that can be reached through an atom from `output`, but not yet in `output`.
+                let mut next_terms =
+                terms.iter()
+                     .flat_map(|term| terms_to_atoms[term].iter())
+                     .flat_map(|atom| atoms_to_terms[atom].iter())
+                     .filter(|term| !terms.contains(term));
+
+                // Choose the first available term. This can be dramatically improved.
+                let next_term = next_terms.next().unwrap_or_else(|| terms_to_atoms.keys().filter(|t| !terms.contains(t)).next().unwrap());
+                let next_atoms = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].iter().any(|t| terms.contains(t))).copied().collect();
+
+                terms.insert(*next_term);
+                plan.push((next_atoms, [*next_term].into_iter().collect(), Vec::new()));
+            }
+            plan
+        }
     }
 
-    fn apply<T: Clone + Ord + Function + std::fmt::Debug>(list: &[EAct<T>], e_graph: &mut EGraph<T>) -> Id {
+    /// Plans updates for an atom by repeatedly adding individual atoms and all of their terms.
+    pub struct ByAtom;
+    impl<A: Ord+Copy, T: Ord+Copy> Strategy<A, T> for ByAtom {
+        fn plan_atom(atom: A, atoms_to_terms: &BTreeMap<A, BTreeSet<T>>, terms_to_atoms: &BTreeMap<T, BTreeSet<A>>) -> Plan<A, T> {
 
-        let mut ids = Vec::new();
-        for sym in list.iter().rev() {
-            match sym {
-                EAct::Operator(op) => {
-                    let inputs = op.inputs();
-                    let args = &ids[ids.len() - inputs..];
-                    let e_node = ENode::new(op.clone(), args.iter().cloned().rev());
-                    ids.truncate(ids.len() - inputs);
-                    ids.push(e_graph.ensure(e_node));
-                }
-                EAct::EClass(id) => {
-                    ids.push(*id);
-                }
+            // We start with `atom`, but also semijoin subsumed atoms.
+            let init_atoms: BTreeSet<A> = [atom].into_iter().collect();
+            let init_terms: BTreeSet<T> = atoms_to_terms[&atom].clone();
+
+            // One approach: grow terms through adjacent atoms.
+            let mut atoms: BTreeSet<A> = init_atoms.clone();
+            let mut plan: Plan<A, T> = vec![(init_atoms, init_terms, Vec::new())];
+            while atoms.len() < atoms_to_terms.len() {
+
+                // Atoms that can be reached through an atom's terms.
+                let mut next_atoms =
+                atoms.iter()
+                     .flat_map(|atom| atoms_to_terms[atom].iter())
+                     .flat_map(|term| terms_to_atoms[term].iter())
+                     .filter(|atom| !atoms.contains(atom));
+
+                // Choose the first available atom. This can be dramatically improved.
+                let next_atom = next_atoms.next().unwrap_or_else(|| atoms_to_terms.keys().filter(|a| !atoms.contains(a)).next().unwrap());
+                let next_terms = atoms_to_terms[&next_atom].iter().filter(|t| terms_to_atoms[t].iter().all(|a| !atoms.contains(a))).copied().collect();
+
+                atoms.insert(*next_atom);
+                plan.push(([*next_atom].into_iter().collect(), next_terms, Vec::new()));
             }
+            plan
         }
-        ids.pop().unwrap()
     }
 }
 
-use eggstraction::eggstract;
-mod eggstraction {
+/// Permute `delta` from its current order, `delta_terms` to one that matches `other_terms` on common terms.
+///
+/// The method updates both `delta` and `delta_terms`.
+/// The method assumes that some prefix of `other_terms` is present in `delta_terms`, and no further terms
+/// from `other_terms` around found there. The caller must restrict `other_terms` to make this the case.
+fn permute_delta<F: FactContainer, T: Ord + Copy>(
+    delta: &mut FactLSM<F>,
+    delta_terms: &mut Vec<T>,
+    other_terms: impl Iterator<Item = T>,
+) {
+    let mut permutation: Vec<usize> = other_terms.flat_map(|t1| delta_terms.iter().position(|t2| &t1 == t2)).collect();
+    for index in 0 .. delta_terms.len() { if !permutation.contains(&index) { permutation.push(index); }}
 
-    use std::collections::{BTreeMap, BTreeSet};
-
-    use eggsalad::egraph::{EGraph, ENode, Id};
-    use super::Op;
-
-    pub fn eggstract(e_graph: &EGraph<Op>, active: impl Fn(&ENode<Op>, &EGraph<Op>)->bool) -> BTreeMap<Id, BTreeSet<BTreeSet<Id>>> {
-
-        // We'll use the cost function that all k-arity relations are equally expensive,
-        // and arbitrarily more expensive than a lesser arity relation.
-
-        // Each e-class could be realized through the instantiation of various sets of other e-classes.
-        // Any member can propose the e-classes that would work for it, and the distinct lists are the candidates.
-
-        // Map from e-class to list of sets of e-classes each sufficient to reify an instance of the class.
-        let mut needs: BTreeMap<Id, BTreeSet<BTreeSet<Id>>> = BTreeMap::default();
-        let mut done = false;
-        while !done {
-            let prev = needs.clone();
-            // We can saturate, but we can also stop once new costs are greater than the current best.
-
-            for (class, nodes) in e_graph.members.iter() {
-                let mut options = BTreeSet::default();
-                for node in nodes.iter() {
-                    if active(node, e_graph) {
-                        match &node.op {
-                            Op::Var(_) => { options.insert(BTreeSet::default()); },
-                            Op::Mul(k) => {
-                                assert_eq!(node.args.len(), *k);
-                                let mut fold = BTreeSet::default();
-                                fold.insert(BTreeSet::<Id>::default());
-                                // Repeatedly cross each child with `fold`.
-                                for child in node.args.iter().copied() {
-                                    if let Some(need) = needs.get(&child) {
-                                        fold =
-                                        fold.into_iter()
-                                            .flat_map(|f| need.iter().map(move |n| n.union(&f).copied().chain(Some(child)).collect()))
-                                            .collect();
-                                    }
-                                    else { fold.clear(); }
-                                }
-                                options.extend(fold);
-                            },
-                            Op::Map(_) => {
-                                if let Some(need) = needs.get(&node.args[0]) {
-                                    options.extend(need.iter().map(|n| n.iter().copied().chain(Some(node.args[0])).collect()));
-                                }
-                            },
-                        }
-                    }
-                }
-                if !options.is_empty() { needs.entry(*class).or_default().extend(options); }
-            }
-
-            for need in needs.values_mut() {
-                *need = thin(std::mem::take(need));
-            }
-
-            done = prev == needs;
-        }
-
-        needs
+    if permutation.iter().enumerate().any(|(index, i)| &index != i) {
+        let mut flattened = delta.flatten().unwrap_or_default().act_on(&Action::permutation(permutation.iter().copied()));
+        delta.extend(&mut flattened);
+        *delta_terms = permutation.iter().map(|i| delta_terms[*i]).collect::<Vec<_>>();
     }
+}
 
-    /// Remove any element that is a superset of another.
-    fn thin(options: impl IntoIterator<Item=BTreeSet<Id>>) -> BTreeSet<BTreeSet<Id>> {
-        let mut next = BTreeSet::default();
-        for set in options {
-            if next.iter().all(|x: &BTreeSet<Id>| !x.is_subset(&set)) {
-                next.retain(|x| !set.is_subset(x));
-                next.insert(set);
-            }
-        }
-        next
-    }
+/// Join `delta` with `other`, by permuting `delta` to match columns in `other`.
+fn join_delta<F: FactContainer, T: Ord + Copy + std::fmt::Debug>(
+    delta: &mut FactLSM<F>,
+    delta_terms: &mut Vec<T>,
+    other: &FactSet<F>,
+    other_terms: impl Iterator<Item = T>,
+    with_recent: bool,
+    yield_order: &[T],
+) {
+    let other_terms = other_terms.collect::<Vec<_>>();
+    permute_delta(delta, delta_terms, other_terms.iter().copied());
+
+    let join_arity = delta_terms.iter().zip(other_terms.iter()).take_while(|(d, o)| d == o).count();
+
+    let to_chain = if with_recent { Some(&other.recent) } else { None };
+
+    let projection = yield_order.iter().map(|t| {
+        let this_term = delta_terms.iter().position(|t2| t == t2);
+        let that_term = other_terms.iter().position(|t2| t == t2).map(|p| p + delta_terms.len());
+        this_term.or(that_term).unwrap()
+    }).collect::<Vec<_>>();
+
+    let flattened = delta.flatten().unwrap_or_default();
+    delta.extend(&mut flattened.join_many(other.stable.contents().chain(to_chain), join_arity, &[&projection]).pop().unwrap());
+    *delta_terms = yield_order.to_vec();
 }
