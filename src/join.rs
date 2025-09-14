@@ -1,38 +1,4 @@
 use columnar::Index;
-use crate::facts::{FactContainer, FactLSM, FactSet};
-
-/// Joins `body1` and `body2` using the first `arity` columns.
-///
-/// Matching elements are subjected to `action`.
-/// When `stable` is set, we join the stable plus recent elements of each input;
-/// when it is unset we exclude pairs of terms that are both stable.
-pub fn join_with<F: FactContainer + Clone>(
-    body1: &FactSet<F>,
-    body2: &FactSet<F>,
-    stable: bool,
-    arity: usize,
-    projections: &[&[usize]],
-) -> Vec<FactLSM<F>>
-{
-    let mut lsms = vec![FactLSM::default(); projections.len()];
-
-    if stable {
-        for layer1 in body1.stable.contents() {
-            let built = layer1.join_many(body2.stable.contents(), arity, projections);
-            lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
-        }
-    }
-
-    let built = body1.recent.join_many(body2.stable.contents().chain([&body2.recent]), arity, projections);
-    lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
-
-    for stable1 in body1.stable.contents() {
-        let built = stable1.join(&body2.recent, arity, projections);
-        lsms.iter_mut().zip(built).for_each(|(lsm, mut built)| lsm.extend(&mut built));
-    }
-
-    lsms
-}
 
 /// Increments `index` until just after the last element of `input` to satisfy `cmp`.
 ///

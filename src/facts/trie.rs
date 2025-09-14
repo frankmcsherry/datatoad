@@ -192,7 +192,7 @@ pub mod non_columnar {
                     std::cmp::Ordering::Less => {
                         let lower = *l0;
                         *l0 += 1;
-                        crate::join::gallop(borrow0, l0, *u0, |x| x < item1);
+                        crate::facts::gallop(borrow0, l0, *u0, |x| x < item1);
                         action(&values[..], std::cmp::Ordering::Less, (lower, *l0));
                     },
                     std::cmp::Ordering::Equal => {
@@ -215,7 +215,7 @@ pub mod non_columnar {
                     std::cmp::Ordering::Greater => {
                         let lower = *l1;
                         *l1 += 1;
-                        crate::join::gallop(borrow1, l1, *u1, |x| x < item0);
+                        crate::facts::gallop(borrow1, l1, *u1, |x| x < item0);
                         action(&values[..], std::cmp::Ordering::Greater, (lower, *l1));
                     },
                 }
@@ -779,7 +779,7 @@ pub mod layers {
                             std::cmp::Ordering::Less => {
                                 let start = lower0;
                                 lower0 += 1;
-                                crate::join::gallop(lists0.values, &mut lower0, upper0, |x| x < val1);
+                                crate::facts::gallop(lists0.values, &mut lower0, upper0, |x| x < val1);
                                 if next { reports.push_back(Report::This(start, lower0)); }
                                 list.values.extend_from_self(lists0.values, start .. lower0);
                             },
@@ -792,7 +792,7 @@ pub mod layers {
                             std::cmp::Ordering::Greater => {
                                 let start = lower1;
                                 lower1 += 1;
-                                crate::join::gallop(lists1.values, &mut lower1, upper1, |x| x < val0);
+                                crate::facts::gallop(lists1.values, &mut lower1, upper1, |x| x < val0);
                                 if next { reports.push_back(Report::That(start, lower1)); }
                                 list.values.extend_from_self(lists1.values, start .. lower1);
                             },
@@ -850,7 +850,7 @@ pub mod layers {
                     match val0.cmp(&val1) {
                         std::cmp::Ordering::Less => {
                             lower0 += 1;
-                            crate::join::gallop(list0.values, &mut lower0, upper0, |x| x < val1);
+                            crate::facts::gallop(list0.values, &mut lower0, upper0, |x| x < val1);
                         },
                         std::cmp::Ordering::Equal => {
                             aligns.push_back((lower0, lower1));
@@ -859,7 +859,7 @@ pub mod layers {
                         },
                         std::cmp::Ordering::Greater => {
                             lower1 += 1;
-                            crate::join::gallop(list1.values, &mut lower1, upper1, |x| x < val0);
+                            crate::facts::gallop(list1.values, &mut lower1, upper1, |x| x < val0);
                         },
                     }
                 }

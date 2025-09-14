@@ -1,6 +1,5 @@
 pub mod parse;
 pub mod facts;
-pub mod join;
 
 pub mod plan;
 
