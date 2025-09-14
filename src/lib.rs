@@ -43,7 +43,7 @@ pub mod types {
             self.advance();
             while self.active() {
                 for rule in self.rules.iter() {
-                    crate::plan::implement(&rule, false, &mut self.facts);
+                    crate::plan::implement(rule, false, &mut self.facts);
                 }
                 self.advance();
             }

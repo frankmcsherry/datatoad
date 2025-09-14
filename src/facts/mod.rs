@@ -7,7 +7,6 @@ use columnar::primitive::offsets::Strides;
 
 use crate::types::Action;
 
-pub mod list;
 pub mod trie;
 
 /// A `Vecs` using strided offsets.
@@ -34,8 +33,11 @@ pub type Facts = Lists<Terms>;
 #[derive(Default)]
 pub struct Relations {
     /// Map from name to raw data, and various linear transforms thereof.
-    relations: BTreeMap<String, (FactSet<FactCollection>, BTreeMap<Action<String>, FactSet<FactCollection>>)>,
+    relations: BTreeMap<String, (FactSet<FactCollection>, Forms)>,
 }
+
+/// An alias for a map from actions to fact sets, one for each relation.
+pub type Forms = BTreeMap<Action<String>, FactSet<FactCollection>>;
 
 impl Relations {
     pub fn get(&self, name: &str) -> Option<&FactSet<FactCollection>> {
@@ -56,7 +58,7 @@ impl Relations {
                 }
                 if let Some(mut recent) = facts.recent.act_on(action).flatten() {
                     // Non-permutations need to be deduplicated against existing facts.
-                    if !action.is_permutation() { recent = recent.except(transform.stable.contents()); }
+                    if !action.is_permutation() { recent = recent.antijoin(transform.stable.contents()); }
                     transform.recent = recent;
                 }
             }
@@ -89,7 +91,7 @@ impl Relations {
                 fact_set.stable.push(stable);
             }
             if let Some(recent) = base.recent.act_on(action).flatten() {
-                fact_set.recent = recent.except(fact_set.stable.contents());
+                fact_set.recent = recent.antijoin(fact_set.stable.contents());
             }
             transforms.insert(action.clone(), fact_set);
         }
@@ -112,9 +114,7 @@ pub type FactCollection = Forest<Terms>;
 ///
 /// The upgraded form is a distinct type, and this method cannot produce it alone.
 /// It requires help to observe the possibility, and invoke the specialized code.
-pub fn upgrade_hint(terms: <Lists<Terms> as Container>::Borrowed<'_>) -> Option<u64> {
-    terms.values.bounds.strided()
-}
+pub fn upgrade_hint(terms: <Lists<Terms> as Container>::Borrowed<'_>) -> Option<u64> { terms.values.bounds.strided() }
 
 /// Attempts to recast a general term list as one of fixed width byte slices.
 pub fn upgrade<'a, const K: usize>(terms: <Lists<Terms> as Container>::Borrowed<'a>) -> Option<<Lists<Vec<[u8; K]>> as Container>::Borrowed<'a>> {
@@ -212,10 +212,16 @@ pub trait Merge {
 
 /// A type that can contain and work with facts.
 pub trait FactContainer : Form + Length + Merge + Default + Sized + Clone {
-    /// Applies an action to each contained fact.
-    fn apply<'a>(&'a self, action: impl FnMut(&[<Terms as Container>::Ref<'a>]));
+
+    /// Applies an action to the facts, building the corresponding output.
+    fn act_on(&self, action: &Action<String>) -> FactLSM<Self>;
     /// Joins `self` and `other` on the first `arity` columns, putting projected results in `builders`.
-    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[usize]]) -> Vec<FactLSM<Self>> ;
+    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[usize]]) -> Vec<FactLSM<Self>>;
+    /// The subset of `self` whose facts do not start with any prefix in `others`.
+    fn antijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a { unimplemented!() }
+    /// The subset of `self` whose facts start with some prefix in `others`.
+    fn semijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a;
+
     /// Joins `self` and `others` on the first `arity` columns, putting projected results in `builders`.
     ///
     /// The default implementation processes `others` in order, but more thoughtful implementations exist.
@@ -228,44 +234,6 @@ pub trait FactContainer : Form + Length + Merge + Default + Sized + Clone {
             }
         }
         results
-    }
-    /// Builds a container of facts present in `self` but not in any of `others`.
-    fn except<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a;
-
-    /// The subset of `self` whose facts do not start with any prefix in `others`.
-    fn antijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a { unimplemented!() }
-    /// The subset of `self` whose facts start with some prefix in `others`.
-    fn semijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a { unimplemented!() }
-    /// Applies an action to the set of facts, building the corresponding output.
-    fn act_on(&self, action: &Action<String>) -> FactLSM<Self> {
-        // This has the potential to be efficiently implemented, by capturing and unfolding the corresponding columns,
-        // filtering and sorting as appropriate, and then rebuilding. Much more structured than `apply`, who is only
-        // provided a closure.
-        if action.is_identity() {
-            let mut lsm = FactLSM::default();
-            lsm.push(self.clone());
-            return lsm;
-        }
-
-        let mut builder = FactBuilder::default();
-        self.apply(|row| {
-            let lit_filtered = action.lit_filter.iter().all(|(index, value)| row[*index].as_slice() == value.as_bytes());
-            let var_filtered = action.var_filter.iter().all(|columns| columns[1..].iter().all(|c| row[*c] == row[columns[0]]));
-            if lit_filtered && var_filtered {
-                builder.push(action.projection.iter().map(|c| {
-                    match c {
-                        Ok(col) => row[*col].as_slice(),
-                        Err(lit) => lit.as_bytes(),
-                    }
-                }))
-            }
-        });
-        builder.finish()
-    }
-    /// Permutes the columns, putting them in the order of `columns`.
-    #[inline(never)]
-    fn permute(&self, columns: impl Iterator<Item = usize>) -> Self {
-        self.act_on(&Action::permutation(columns)).flatten().unwrap_or_default()
     }
 }
 
@@ -301,7 +269,7 @@ impl<F: FactContainer> FactSet<F> {
             // Tidy stable by an amount proportional to the work we are about to do.
             self.stable.tidy_through(2 * to_add.len());
             // Remove from to_add any facts already in stable.
-            self.recent = to_add.except(self.stable.contents());
+            self.recent = to_add.antijoin(self.stable.contents());
         }
     }
 }
@@ -400,6 +368,12 @@ impl<F> IntoIterator for FactLSM<F> {
     type Item = F;
     type IntoIter = std::vec::IntoIter<F>;
     fn into_iter(self) -> Self::IntoIter { self.layers.into_iter() }
+}
+
+impl<F: Length> From<F> for FactLSM<F> {
+    fn from(item: F) -> Self {
+        Self { layers: if item.is_empty() { Vec::default() } else { vec![item] } }
+    }
 }
 
 pub mod radix_sort {
@@ -555,7 +529,6 @@ impl <C: for<'a> Container<Ref<'a>: Ord>> Sorted for C { }
 /// should be considered deduplicated, and the result should be deduplicated as
 /// well. Essentially, that repeats across collections should be suppressed.
 pub trait Sorted : for<'a> Container<Ref<'a>: Ord> {
-
     /// Sort the container in place; optionally deduplicate.
     fn sort<const DEDUP: bool>(&mut self) {
         let mut result = Self::default();
@@ -565,76 +538,5 @@ pub trait Sorted : for<'a> Container<Ref<'a>: Ord> {
         if DEDUP { items.dedup(); }
         result.extend(items);
         *self = result;
-    }
-
-    /// Merge two borrowed variants into an owned container.
-    fn merge<'a, const DEDUP: bool>(this: Self::Borrowed<'a>, that: Self::Borrowed<'a>) -> Self {
-
-        use crate::join::gallop;
-
-        let mut merged = Self::default();
-
-        let mut index0 = 0;
-        let mut index1 = 0;
-
-        while index0 < this.len() && index1 < that.len() {
-            let val0 = this.get(index0);
-            let val1 = that.get(index1);
-            match val0.cmp(&val1) {
-                std::cmp::Ordering::Less => {
-                    let lower = index0;
-                    // advance `index1` while strictly less than `pos2`.
-                    gallop(this, &mut index0, this.len(), |x| x < val1);
-                    merged.extend_from_self(this, lower .. index0);
-                }
-                std::cmp::Ordering::Equal => {
-                    merged.extend_from_self(this, index0 .. index0 + 1);
-                    if !DEDUP {
-                        // Use `that`, in case of some weird `Ord` impl.
-                        merged.extend_from_self(that, index1 .. index1 + 1);
-                    }
-                    index0 += 1;
-                    index1 += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    let lower = index1;
-                    // advance `index1` while strictly less than `pos2`.
-                    gallop(that, &mut index1, that.len(), |x| x < val0);
-                    merged.extend_from_self(that, lower .. index1);
-                }
-            }
-        }
-
-        merged.extend_from_self(this, index0 .. this.len());
-        merged.extend_from_self(that, index1 .. that.len());
-
-        merged
-    }
-
-    /// Merges many sorted deduplicated lists into one sorted deduplicated list.
-    fn multiway_merge<const K: usize, const DEDUP: bool>(many: &[Self; K]) -> Self {
-
-        let mut merged = Self::default();
-
-        let mut iters: [_; K] =
-        many.iter()
-            .map(|x| x.borrow().into_index_iter().peekable())
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap_or_else(|_| panic!());
-
-        // TODO: Gallop a bit and see if there is an interval to `extend_from_self`.
-        while let Some((_min, idx)) = iters.iter_mut().enumerate().filter_map(|(i,x)| x.peek().map(|x| (x,i))).min() {
-            let min = iters[idx].next().unwrap();
-            if DEDUP { merged.push(min); }
-            for iter in iters.iter_mut() {
-                if iter.peek() == Some(&min) {
-                    if !DEDUP { merged.push(min); }
-                    iter.next();
-                }
-            }
-        }
-
-        merged
     }
 }
