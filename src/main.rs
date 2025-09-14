@@ -25,26 +25,6 @@ fn main() {
             if let Some(word) = words.next() {
                 match word {
                     ".list" => { state.facts.list() }
-                    // ".show" => {
-                    //     use columnar::Index;
-                    //     for name in words {
-                    //         if let Some(found) = state.facts.get(name) {
-                    //             println!();
-                    //             let mut temp = found.stable.contents().flat_map(|i| i.borrow().into_index_iter().take(10)).collect::<Vec<_>>();
-                    //             temp.sort();
-                    //             for item in temp.iter().take(10) {
-                    //                 print!("\t(");
-                    //                 for coord in item.into_iter() {
-                    //                     print!("{:?},", str::from_utf8(coord.as_slice()).unwrap());
-                    //                 }
-                    //                 println!(")");
-                    //             }
-                    //             if found.len() > 10 {
-                    //                 println!("\t .. ({:?} more)", found.len() - 10);
-                    //             }
-                    //         }
-                    //     }
-                    // }
                     ".load" => {
 
                         use std::io::{BufRead, BufReader};
