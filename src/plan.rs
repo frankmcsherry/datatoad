@@ -62,12 +62,12 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         if stable {
             let facts = &facts.get(atom.name.as_str()).unwrap();
             for layer in facts.stable.contents().chain([&facts.recent]) {
-                delta_lsm.extend(&mut layer.act_on(&action));
+                delta_lsm.extend(&mut layer.act_on(action));
             }
         }
         else {
             let facts = &facts.get(atom.name.as_str()).unwrap();
-            delta_lsm.extend(&mut facts.recent.act_on(&action));
+            delta_lsm.extend(&mut facts.recent.act_on(action));
         };
 
         // Stage 1: Semijoin with other atoms that are subsumed by the initial terms.
@@ -97,7 +97,46 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
                 join_delta(&mut delta_lsm, &mut delta_terms, other, other_terms, load_atom > &plan_atom, order);
             }
             // Multi-atom stages call for different logic.
-            else { unimplemented!("Multi-atom join stages not yet implemented") }
+            else {
+
+                // We may have terms that are not needed for the term extensions,
+                // in which case we should know, and perhaps project them away.
+                for term in delta_terms.iter().filter(|t| atoms.iter().all(|a| loads[&(plan_atom, *a)].1.contains(t))) {
+                    println!("Non-anchor term: {:?} (could project away for the moment)", term);
+                }
+
+                // For each atom, we'll need to permute `delta` to start with their terms.
+                // Then we'll want to join, and capture the number of extensions, somehow.
+                // Then we'll need to update any recorded numbers, recording smaller counts
+                // and indexes where appropriate.
+                // We could, naively, just start with a new column that is the count of extensions,
+                // and just join using it, and then apply an action to the last two layers.
+                // It's more of a semijoin, and using the general join logic would be more
+                // expensive than we really need.
+
+                // Our plan is to identify an extending atom for each delta fact,
+                // then propose extensions for each fact from their identified atom,
+                // then semijoin with other atoms (perhaps union and semijoin all).
+
+                // Informally, we'll identify a set of columns as the "active" columns,
+                // which contain all pre-active terms in the listed atoms. We'll then
+                // develop a list of `(count, index)` for each fact among these columns.
+                // Each will likely require appending the list as a layer, then permuting.
+                // Permuted, we are able to semijoin/align and read out the counts for
+                // each other layer, and then update the list to track the index with
+                // the smallest count.
+                //
+                // Having done this, we'd then like to perform multiple restrictions
+                // to the facts by their identified index, so that they can join with
+                // the atoms themselves to propose extensions.
+                //
+                // Finally, we could/should semijoin with the atoms, to provide the
+                // full information about the terms the atoms can provide. We can defer
+                // this, but we do need to perform the operation at some point (e.g.
+                // later, if we revisit the atom)
+
+                unimplemented!("Multi-atom join stages not yet implemented");
+            }
         }
 
         // Stage 3: We now need to form up the facts to commit back to `facts`.
@@ -270,7 +309,7 @@ pub mod plan {
                     order.extend(demanded.iter().filter(|t| rest[0].0.iter().any(|a| atoms_to_terms[a].contains(t))).copied());
                     order.extend(demanded.iter().filter(|t| !rest[0].0.iter().any(|a| atoms_to_terms[a].contains(t))).copied());
                 }
-                atom_plan.last_mut().unwrap().2 = head_terms.iter().copied().collect();
+                atom_plan.last_mut().unwrap().2 = head_terms.to_vec();
 
                 rule_plan.insert(atom, atom_plan);
             }
@@ -299,8 +338,8 @@ pub mod plan {
                      .filter(|term| !terms.contains(term));
 
                 // Choose the first available term. This can be dramatically improved.
-                let next_term = next_terms.next().unwrap_or_else(|| terms_to_atoms.keys().filter(|t| !terms.contains(t)).next().unwrap());
-                let next_atoms = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].iter().any(|t| terms.contains(t))).copied().collect();
+                let next_term = next_terms.next().unwrap_or_else(|| terms_to_atoms.keys().find(|t| !terms.contains(t)).unwrap());
+                let next_atoms = terms_to_atoms[next_term].iter().filter(|a| atoms_to_terms[a].iter().any(|t| terms.contains(t))).copied().collect();
 
                 terms.insert(*next_term);
                 plan.push((next_atoms, [*next_term].into_iter().collect(), Vec::new()));
@@ -332,7 +371,7 @@ pub mod plan {
 
                 // Choose the first available atom. This can be dramatically improved.
                 let next_atom = next_atoms.next().unwrap_or_else(|| atoms_to_terms.keys().filter(|a| !atoms.contains(a)).next().unwrap());
-                let next_terms = atoms_to_terms[&next_atom].iter().filter(|t| terms_to_atoms[t].iter().all(|a| !atoms.contains(a))).copied().collect();
+                let next_terms = atoms_to_terms[next_atom].iter().filter(|t| terms_to_atoms[t].iter().all(|a| !atoms.contains(a))).copied().collect();
 
                 atoms.insert(*next_atom);
                 plan.push(([*next_atom].into_iter().collect(), next_terms, Vec::new()));
