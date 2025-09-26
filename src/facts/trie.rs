@@ -510,6 +510,8 @@ pub mod byte_array {
 
         if projections.is_empty() { return Vec::default(); }
 
+        if this.len() < arity || that.len() < arity { return Vec::default(); }
+
         // We'll build into buffers of the specific type, without knowing the projection width.
         // To commit the values, we'll need to reshape using `as_chunks()`.
         // The intent is that we buffer up ~1M rows and form a `Forest<Vec<[u8;K]>>` from them,
@@ -517,8 +519,6 @@ pub mod byte_array {
         let mut buffered = 0;
         let mut buffers: Vec<Vec<[u8; K]>> = projections.iter().map(|p| Vec::with_capacity(1_000_000 * p.len())).collect();
         let mut builders: Vec<FactLSM<Forest<Vec<[u8;K]>>>> = vec![FactLSM::default(); projections.len()];
-
-        if this.len() < arity || that.len() < arity { return Vec::default(); }
 
         let width0 = this.len() - arity;
         let width1 = that.len() - arity;
@@ -746,6 +746,7 @@ pub mod layers {
     /// The `next` parameter indicates whether the next round of reports should be prepared,
     /// which is for example not necessary in the last layer of a union, as there is no next
     /// layer to prepare reports for, and the cost can be higher there than for prior layers.
+    #[inline(never)]
     pub fn union<'a, C: Container<Ref<'a>: Ord>>(
         lists0: <Lists<C> as Container>::Borrowed<'a>,
         lists1: <Lists<C> as Container>::Borrowed<'a>,
@@ -822,9 +823,12 @@ pub mod layers {
 
     /// Intersects pairs of lists aligned by `aligns`, refilling it with aligned list items.
     ///
-    /// THe `counts` argument blocks the aligns, and we update it to maintain this property.
-    /// Informally, each count corresponds to a retained join prefix, and we want to map the
-    /// their grouping of aligned lists into a corresponding grouping of aligned items.
+    /// The `counts` argument blocks the aligns, and we update it to maintain this property.
+    /// The sum of `counts` should equal the length of `aligns`, and this should remain true
+    /// after the method returns. Each count should be updated to the number of matched
+    /// items among the aligned lists associated with the count. The counts allow us to move
+    /// in the reverse direction, from aligned indexes back to prefixes that gave rise to them.
+    #[inline(never)]
     pub fn intersection<'a, C: Container<Ref<'a>: Ord>>(
         list0: <Lists<C> as Container>::Borrowed<'a>,
         list1: <Lists<C> as Container>::Borrowed<'a>,
@@ -871,10 +875,7 @@ pub mod layers {
 
     /// Restrict lists based on per-list bools, producing a new layer and updating `bools` for the items.
     #[inline(never)]
-    pub fn retain_lists<'a, C: Container>(
-        lists: <Lists<C> as Container>::Borrowed<'a>,
-        bools: &mut VecDeque<bool>,
-    ) -> Lists<C> {
+    pub fn retain_lists<'a, C: Container>(lists: <Lists<C> as Container>::Borrowed<'a>, bools: &mut VecDeque<bool>) -> Lists<C> {
 
         // In principle we can copy runs described in `bools` for bulk copying.
         let mut output = <Lists::<C> as Container>::with_capacity_for([lists].into_iter());
@@ -892,10 +893,7 @@ pub mod layers {
 
     /// Restrict lists based on per-item bools, producing a new layer and updating `bools` for the lists.
     #[inline(never)]
-    pub fn retain_items<'a, C: Container>(
-        lists: <Lists<C> as Container>::Borrowed<'a>,
-        bools: &mut VecDeque<bool>,
-    ) -> Lists<C> {
+    pub fn retain_items<'a, C: Container>(lists: <Lists<C> as Container>::Borrowed<'a>, bools: &mut VecDeque<bool>) -> Lists<C> {
 
         // In principle we can copy runs described in `bools` for bulk copying.
         let mut output = <Lists::<C> as Container>::with_capacity_for([lists].into_iter());

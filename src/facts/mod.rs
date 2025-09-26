@@ -382,24 +382,27 @@ pub mod radix_sort {
     #[inline(never)]
     pub fn lsb<R: Radixable>(data: &mut [R]) {
 
-        let mut histogram = vec![[0usize; 256]; R::WIDTH];
+        let mut counts = vec![[0usize; 256]; R::WIDTH];
         for item in data.iter() {
             for index in 0 .. R::WIDTH {
-                histogram[index][item.byte(index) as usize] += 1;
+                counts[index][item.byte(index) as usize] += 1;
             }
         }
         let mut temp = data.to_vec();
         let mut temp = &mut temp[..];
         let mut data = &mut data[..];
 
-        let indexes = histogram.iter_mut().enumerate().filter(|(_,h)| h.iter().filter(|c| **c > 0).count() > 1).collect::<Vec<_>>();
-        for (round, hist) in indexes.iter().rev() {
-            let mut counts = [0usize; 256];
-            for i in 1 .. 256 { counts[i] = counts[i-1] + hist[i-1]; }
+        let mut indexes = counts.iter_mut().enumerate().filter(|(_,h)| h.iter().filter(|c| **c > 0).count() > 1).collect::<Vec<_>>();
+        for (round, count) in indexes.iter_mut().rev() {
+            let mut total = 0;
+            for i in 0 .. 256 {
+                std::mem::swap(&mut count[i], &mut total);
+                total += count[i];
+            }
             for item in data.iter() {
                 let byte = item.byte(*round) as usize;
-                temp[counts[byte]] = *item;
-                counts[byte] += 1;
+                temp[count[byte]] = *item;
+                count[byte] += 1;
             }
             std::mem::swap(&mut data, &mut temp);
         }
