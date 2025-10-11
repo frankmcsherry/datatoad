@@ -370,7 +370,7 @@ pub mod plan {
                      .filter(|atom| !atoms.contains(atom));
 
                 // Choose the first available atom. This can be dramatically improved.
-                let next_atom = next_atoms.next().unwrap_or_else(|| atoms_to_terms.keys().filter(|a| !atoms.contains(a)).next().unwrap());
+                let next_atom = next_atoms.next().unwrap_or_else(|| atoms_to_terms.keys().find(|a| !atoms.contains(a)).unwrap());
                 let next_terms = atoms_to_terms[next_atom].iter().filter(|t| terms_to_atoms[t].iter().all(|a| !atoms.contains(a))).copied().collect();
 
                 atoms.insert(*next_atom);

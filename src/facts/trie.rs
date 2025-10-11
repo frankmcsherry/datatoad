@@ -510,7 +510,7 @@ pub mod byte_array {
 
         let mut builders: Vec<FactLSM<Forest<Terms>>> = vec![FactLSM::default(); projections.len()];
 
-        if this.last().map_or(false, |l| l.is_empty()) || that.last().map_or(false, |l| l.is_empty()) { return builders; }
+        if this.last().is_some_and(|l| l.is_empty()) || that.last().is_some_and(|l| l.is_empty()) { return builders; }
 
         use std::collections::BTreeMap;
 
@@ -588,10 +588,10 @@ pub mod byte_array {
             // Teaches us about the length of each interval, which we may not otherwise record.
             // Crucial for the blocking of flattened extensions.
             let mut this_bounds = aligned.map(|i| (i,i+1)).collect::<Vec<_>>();
-            for layer in 0 .. layers.len() {
+            for layer in layers.iter() {
                 for (lower, upper) in this_bounds.iter_mut() {
-                    *lower = layers[layer].bounds.bounds(*lower).0;
-                    *upper = layers[layer].bounds.bounds(*upper - 1).1;
+                    *lower = layer.bounds.bounds(*lower).0;
+                    *upper = layer.bounds.bounds(*upper - 1).1;
                 }
             }
 
@@ -615,8 +615,8 @@ pub mod byte_array {
             let mut aligned = reports.iter().map(|(i,_)| *i).peekable();
             let counts = bounds.iter().map(|(l,u)| {
                 let mut count = 0;
-                while let Some(_) = aligned.next_if(|x| x < l) { }
-                while let Some(_) = aligned.next_if(|x| x < u) { count += 1; }
+                while aligned.next_if(|x| x < l).is_some() { }
+                while aligned.next_if(|x| x < u).is_some() { count += 1; }
                 count
             });
 
@@ -715,14 +715,13 @@ pub mod byte_array {
             let mut layers: [Layer<Vec<[u8; K]>>; W] = (0 .. W).map(|_| Default::default()).collect::<Vec<_>>().try_into().unwrap();
             for i in 0 .. W { layers[i].list.values.push(facts[0][i]); }
             for i in 1 .. facts.len() {
-                if facts[i] != facts[i-1] {
-                    let pos = facts[i].iter().zip(facts[i-1].iter()).position(|(i0, i1)| i0 != i1).unwrap();
+                if let Some(pos) = facts[i].iter().zip(facts[i-1].iter()).position(|(i0, i1)| i0 != i1) {
                     for to_seal in pos+1 .. W { layers[to_seal].list.bounds.push(layers[to_seal].list.values.len() as u64); }
                     for to_push in pos   .. W { layers[to_push].list.values.push(facts[i][to_push]); }
                 }
             }
 
-            for to_seal in 0 .. W { layers[to_seal].list.bounds.push(layers[to_seal].list.values.len() as u64); }
+            layers.iter_mut().for_each(|layer| layer.list.bounds.push(layer.list.values.len() as u64));
 
             Self { layers: layers.into_iter().collect() }
         }
