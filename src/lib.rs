@@ -16,6 +16,7 @@ pub mod types {
     #[derive(Clone, Debug)]
     pub struct Atom {
         pub name: String,
+        pub anti: bool,
         pub terms: Vec<Term>,
     }
 

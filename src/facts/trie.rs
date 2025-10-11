@@ -294,24 +294,23 @@ pub mod terms {
 
                     // Specialized builder, using a more specific `buffer` for byte arrays.
                     let mut buffer: Vec<[u8;4]> = Vec::with_capacity(1_000_000 * columns.len());
-                    let mut builder: FactLSM<Forest<Vec<[u8;4]>>> = FactLSM::default();
+                    let mut builder: FactLSM<Forest<Terms>> = FactLSM::default();
 
                     non_columnar::apply(&this[..], 0, |row| {
                         let lit_filtered = action.lit_filter.iter().all(|(index, value)| row[*index].as_slice() == value.as_bytes());
                         let var_filtered = action.var_filter.iter().all(|columns| columns[1..].iter().all(|c| row[*c] == row[columns[0]]));
                         if lit_filtered && var_filtered {
                             if buffer.len() == buffer.capacity() {
-                                builder.push(Forest::from_bytes(&mut buffer, columns.len()));
+                                builder.push(Forest::downgrade(Forest::from_bytes(&mut buffer, columns.len())));
                                 buffer.clear();
                             }
                             buffer.extend(columns.iter().map(|c| row[*c]));
                         }
                     });
 
-                    builder.push(Forest::from_bytes(&mut buffer, columns.len()));
+                    builder.push(Forest::downgrade(Forest::from_bytes(&mut buffer, columns.len())));
                     buffer.clear();
-
-                    return FactLSM { layers: builder.layers.into_iter().map(Forest::downgrade).collect() };
+                    return builder;
                 }
             }
 
@@ -341,8 +340,7 @@ pub mod terms {
             }
 
             if let (Some(this), Some(that)) = (self.upgrade::<4>(), other.upgrade::<4>()) {
-                let lsms = super::byte_array::join_help(this, that, arity, projections);
-                return lsms.into_iter().map(|b| { FactLSM { layers: b.layers.into_iter().map(Forest::downgrade).collect() } }).collect();
+                return super::byte_array::join_help(&this[..], &that[..], arity, projections);
             }
 
             let mut builders = vec![FactBuilder::default(); projections.len()];
@@ -485,142 +483,213 @@ pub mod terms {
 }
 
 /// Implementations for `Forest<Vec<[u8; K]>>`, for fixed-width byte arrays.
+///
+/// These implementations are all a smell, in that their requirement that all columns have the same type
+/// speaks to non-columnar implementations.
 pub mod byte_array {
 
-    use columnar::{Container, Index, Len, Vecs};
-    use crate::facts::{Facts, FactLSM, Lists};
-    use super::{Forest, Layer, non_columnar};
+    use columnar::{Container, Len};
+    use crate::facts::{FactLSM, Lists, Terms};
+    use super::{Forest, Layer};
 
     /// Support method for binary joins on arrays of bytes.
     ///
-    /// Matches are found by comparing the first `arity` columns of `this` and `that`, and for each match,
-    /// enumerating the cross join of all remaining columns, and subjecting it to various projections.
-    /// The projections are column references, where
-    ///     columns in `[0, arity)` are from the matched columns,
-    ///     columns in `[arity, this_arity)` are from the additional columns of `this`,
-    ///     columns in `[this_arity, this_arity + arity)` are again the matched columns,
-    ///     columns in `[this_arity + arity, this_arity + that_arity + arity)` are from the additional columns of `that`.
+    /// Identifies prefixes `this[..arity]` and `that[..arity]` that match, and populates fact lsms
+    /// based on requested `projections`. Each projection contains integers that call out columns as
+    /// if columns of `this` and `that` were simply appended.
     #[inline(never)]
     pub fn join_help<'a, const K: usize>(
-        this: Vec<<Lists<Vec<[u8; K]>> as Container>::Borrowed<'a>>,
-        that: Vec<<Lists<Vec<[u8; K]>> as Container>::Borrowed<'a>>,
+        this: &[<Lists<Vec<[u8; K]>> as Container>::Borrowed<'a>],
+        that: &[<Lists<Vec<[u8; K]>> as Container>::Borrowed<'a>],
         arity: usize,
         projections: &[&[usize]],
-    ) -> Vec<FactLSM<Forest<Vec<[u8; K]>>>> {
+    ) -> Vec<FactLSM<Forest<Terms>>> {
 
         if projections.is_empty() { return Vec::default(); }
-
         if this.len() < arity || that.len() < arity { return Vec::default(); }
 
-        // We'll build into buffers of the specific type, without knowing the projection width.
-        // To commit the values, we'll need to reshape using `as_chunks()`.
-        // The intent is that we buffer up ~1M rows and form a `Forest<Vec<[u8;K]>>` from them,
-        // and commit each of these to an ongoing `FactLSM` for each projection.
-        let mut buffered = 0;
-        let mut buffers: Vec<Vec<[u8; K]>> = projections.iter().map(|p| Vec::with_capacity(1_000_000 * p.len())).collect();
-        let mut builders: Vec<FactLSM<Forest<Vec<[u8;K]>>>> = vec![FactLSM::default(); projections.len()];
+        let mut builders: Vec<FactLSM<Forest<Terms>>> = vec![FactLSM::default(); projections.len()];
 
-        let width0 = this.len() - arity;
-        let width1 = that.len() - arity;
+        if this.last().map_or(false, |l| l.is_empty()) || that.last().map_or(false, |l| l.is_empty()) { return builders; }
 
-        // Allocations to stash the post-`arity` extensions for each of `this` and `that`.
-        let mut extensions0: Vec<&'a [u8; K]> = Vec::with_capacity(width0);
-        let mut extensions1: Vec<&'a [u8; K]> = Vec::with_capacity(width1);
+        use std::collections::BTreeMap;
 
-        non_columnar::align(&this[..arity], &that[..arity], |prefix, order, (index0, index1)| {
-            if let std::cmp::Ordering::Equal = order {
+        // Recording the column identifiers needed for each by reason.
+        let mut both_need: BTreeMap<usize, Vec<usize>> = Default::default();
+        let mut this_need: BTreeMap<usize, Vec<usize>> = Default::default();
+        let mut that_need: BTreeMap<usize, Vec<usize>> = Default::default();
 
-                // TODO: Project away columns not referenced by any projection.
-                non_columnar::apply(&this[arity..], index0, |list| Extend::extend(&mut extensions0, list.iter().cloned()));
-                non_columnar::apply(&that[arity..], index1, |list| Extend::extend(&mut extensions1, list.iter().cloned()));
+        // Introduce empty lists for columns we must retain.
+        for column in projections.iter().flat_map(|x| x.iter()).copied() {
+            if column < arity { both_need.insert(column, Vec::default()); }
+            else if column < this.len() { this_need.insert(column - arity, Vec::default()); }
+            else if column < this.len() + arity { both_need.insert(column - this.len(), Vec::default()); }
+            else { that_need.insert(column - this.len() - arity, Vec::default()); }
+        }
 
-                // Width 0 moments still have a unit `[]` to engage with.
-                let count0 = if width0 > 0 { extensions0.len() / width0 } else { 1 };
-                let count1 = if width1 > 0 { extensions1.len() / width1 } else { 1 };
+        // Determine the alignments of shared prefixes.
+        // `reports` will contain all pairs of matching path prefixes, from `this` and `that`.
+        let mut reports = std::collections::VecDeque::default();
+        reports.push_back((0, 0));
+        for (index, (layer0, layer1)) in this[..arity].iter().zip(that[..arity].iter()).enumerate() {
+            crate::facts::trie::layers::intersection::<Vec<[u8;K]>>(*layer0, *layer1, &mut [reports.len()], &mut reports);
+            // If we need to retain the column, then record the aligned indexes in the `this` layer.
+            both_need.get_mut(&index).map(|a| a.extend(reports.iter().map(|(i,_)| *i)));
+        }
 
-                if buffered + count0 * count1 > 1_000_000 {
-                    for index in 0 .. projections.len() {
-                        builders[index].push(Forest::from_bytes(&mut buffers[index], projections[index].len()));
-                        buffers[index].clear();
+        // NB: From this point on the method is "less columnar". The plan is to improve this.
+
+        /// Establishes multiplicities for layers of `targets` starting from lists in `aligned`.
+        #[inline(never)]
+        fn flattening<'a, const K: usize>(
+            targets: impl Iterator<Item=usize>,
+            layers: &[<Lists<Vec<[u8;K]>> as Container>::Borrowed<'a>],
+            aligned: impl Iterator<Item=usize> + Clone,
+        ) -> (BTreeMap<usize, Vec<[u8;K]>>, Vec<usize>) {
+
+            // For each retained layer other than the last, for each present item, the number of times we need it repeated.
+            let this_counts: BTreeMap::<usize, Vec<[u8;K]>> =
+            targets.map(|key| {
+                let mut layer = 0;
+                let mut bounds = aligned.clone().map(|i| layers[0].bounds.bounds(i)).collect::<Vec<_>>();
+                // Project forward until we identify the *items* of layer `key`.
+                while layer < key {
+                    layer += 1;
+                    for (lower, upper) in bounds.iter_mut() {
+                        *lower = layers[layer].bounds.bounds(*lower).0;
+                        *upper = layers[layer].bounds.bounds(*upper - 1).1;
                     }
-                    buffered = 0;
                 }
 
-                // TODO: Pivot the logic to be builders first, then columns, then rows.
-                for idx0 in 0 .. count0 {
-                    let ext0 = &extensions0[idx0 * width0 ..][.. width0];
-                    for idx1 in 0 .. count1 {
-                        let ext1 = &extensions1[idx1 * width1 ..][.. width1];
-                        for (projection, buffer) in projections.iter().zip(buffers.iter_mut()) {
-                            buffer.extend(projection.iter().map(|col|
-                                if *col < arity { prefix[*col] }
-                                else if *col < arity + width0 { ext0[col - arity] }
-                                else if *col < arity + width0 + arity { prefix[*col - arity - width0] }
-                                else { ext1[col - width0 - arity - arity] }
-                            ));
+                let flat = if layer + 1 == layers.len() {
+                    bounds.iter().copied().flat_map(|(lower, upper)| (lower .. upper).map(|i| columnar::Index::get(layers[layer].values, i))).collect::<Vec<_>>()
+                }
+                else {
+                    let indexes = bounds.iter().copied().flat_map(|(lower, upper)| lower .. upper).collect::<Vec<_>>();
+                    // Project forward to determine the counts required for each item.
+                    let mut bounds = indexes.iter().copied().map(|i| (i, i+1)).collect::<Vec<_>>();
+                    while layer + 1 < layers.len() {
+                        layer += 1;
+                        for (lower, upper) in bounds.iter_mut() {
+                            *lower = layers[layer].bounds.bounds(*lower).0;
+                            *upper = layers[layer].bounds.bounds(*upper - 1).1;
+                        }
+                    }
+                    let counts = bounds.into_iter().map(|(l,u)| u - l);
+                    // Flatten the (index, count) into repetitions.
+                    indexes.iter().zip(counts).flat_map(|(i,c)| {
+                        let bytes: [u8; K] = columnar::Index::get(layers[key].values, *i);
+                        std::iter::repeat(bytes).take(c)
+                    }).collect::<Vec<_>>()
+                };
+                (key, flat)
+            }).collect::<BTreeMap<_,_>>();
+
+            // Teaches us about the length of each interval, which we may not otherwise record.
+            // Crucial for the blocking of flattened extensions.
+            let mut this_bounds = aligned.map(|i| (i,i+1)).collect::<Vec<_>>();
+            for layer in 0 .. layers.len() {
+                for (lower, upper) in this_bounds.iter_mut() {
+                    *lower = layers[layer].bounds.bounds(*lower).0;
+                    *upper = layers[layer].bounds.bounds(*upper - 1).1;
+                }
+            }
+
+            let counts = this_bounds.into_iter().map(|(l,u)| u - l).collect::<Vec<_>>();
+
+            (this_counts, counts)
+        }
+
+        // TODO: walk backwards through retained layers, then project forwards until a retained layer is found.
+        let mut both_flat: BTreeMap::<usize, Vec<[u8;K]>> = Default::default();
+        for (key, val) in both_need.into_iter() {
+            // map bounds for `key` forward until they reach `result`.
+            let mut bounds = val.iter().copied().map(|i| (i,i+1)).collect::<Vec<_>>();
+            for layer in (key .. arity).skip(1) {
+                for (lower, upper) in bounds.iter_mut() {
+                    *lower = this[layer].bounds.bounds(*lower).0;
+                    *upper = this[layer].bounds.bounds(*upper - 1).1;
+                }
+            }
+            // intersect each bound with `reports`.
+            let mut aligned = reports.iter().map(|(i,_)| *i).peekable();
+            let counts = bounds.iter().map(|(l,u)| {
+                let mut count = 0;
+                while let Some(_) = aligned.next_if(|x| x < l) { }
+                while let Some(_) = aligned.next_if(|x| x < u) { count += 1; }
+                count
+            });
+
+            // Flatten the (index, count) into repetitions.
+            let flat = val.iter().zip(counts).flat_map(|(i,c)| {
+                let bytes: [u8; K] = columnar::Index::get(this[key].values, *i);
+                std::iter::repeat(bytes).take(c)
+            }).collect::<Vec<_>>();
+
+            both_flat.insert(key, flat);
+        }
+
+        // Produce flattening instructions, and blocking information.
+        let (this_flat, this_counts) = flattening(this_need.keys().copied(), &this[arity..], reports.iter().map(|x| x.0));
+        let (that_flat, that_counts) = flattening(that_need.keys().copied(), &that[arity..], reports.iter().map(|x| x.1));
+
+        // Move through `reports` and populate allocations to provide to builders.
+        let mut buffered = 0;
+        let mut buffers: Vec<Vec<[u8; K]>> = projections.iter().map(|p| Vec::with_capacity(1_000_000 * p.len())).collect();
+
+        let mut this_cursor = 0;
+        let mut that_cursor = 0;
+        for (index, (count0, count1)) in this_counts.iter().zip(that_counts.iter()).enumerate() {
+            if buffered + count0 * count1 > 1_000_000 {
+                for index in 0 .. projections.len() {
+                    builders[index].push(Forest::downgrade(Forest::from_bytes(&mut buffers[index], projections[index].len())));
+                    buffers[index].clear();
+                }
+                buffered = 0;
+            }
+            // blat down the bytes for each projection.
+            for (projection, buffer) in projections.iter().zip(buffers.iter_mut()) {
+                let buffer_start = buffer.len();
+                buffer.resize((buffered + count0 * count1) * projection.len(), [255; K]);
+                for (p_index, column) in projection.iter().copied().enumerate() {
+                    if column < arity {
+                        let value = both_flat[&column][index];
+                        for pos in 0 .. count0 * count1 {
+                            buffer[buffer_start + p_index + (projection.len() * pos)] = value;
+                        }
+                    }
+                    else if column < this.len() {
+                        let values = &this_flat[&(column-arity)][this_cursor ..][..*count0];
+                        for this_idx in 0 .. *count0 {
+                            for that_idx in 0 .. *count1 {
+                                buffer[buffer_start + p_index + (projection.len() * (count1 * this_idx + that_idx))] = values[this_idx];
+                            }
+                        }
+                    }
+                    else if column < this.len() + arity {
+                        unimplemented!()
+                    }
+                    else {
+                        let values = &that_flat[&(column-arity-this.len())][that_cursor ..][..*count1];
+                        for this_idx in 0 .. *count0 {
+                            for that_idx in 0 .. *count1 {
+                                buffer[buffer_start + p_index + (projection.len() * (count1 * this_idx + that_idx))] = values[that_idx];
+                            }
                         }
                     }
                 }
-                buffered += count0 * count1;
-
-                // Tidy up after ourselves.
-                extensions0.clear();
-                extensions1.clear();
             }
-        });
+
+            this_cursor += count0;
+            that_cursor += count1;
+            buffered += count0 * count1;
+        }
 
         for index in 0 .. projections.len() {
-            builders[index].push(Forest::from_bytes(&mut buffers[index], projections[index].len()));
+            builders[index].push(Forest::downgrade(Forest::from_bytes(&mut buffers[index], projections[index].len())));
         }
 
         builders
-    }
-
-    impl<const K: usize> crate::facts::Merge for Forest<Vec<[u8; K]>> {
-        fn merge(self, other: Self) -> Self {
-
-            if self.is_empty() { return other; }
-            if other.is_empty() { return self; }
-
-            assert_eq!(self.layers.len(), other.layers.len());
-
-            use crate::facts::trie::layers::{Report, union};
-
-            let mut layers = Vec::with_capacity(self.layers.len());
-            let mut reports = std::collections::VecDeque::default();
-            reports.push_back(Report::Both(0, 0));
-            for (layer0, layer1) in self.layers.iter().zip(other.layers.iter()) {
-                layers.push(Layer { list: union(layer0.borrow(), layer1.borrow(), &mut reports, layers.len() + 1 < self.layers.len()) });
-            }
-
-            Self { layers }
-        }
-    }
-
-    impl<const K: usize> crate::facts::Length for Forest<Vec<[u8; K]>> {
-        fn len(&self) -> usize { self.layers.last().map(|x| x.list.values.len()).unwrap_or(0) }
-    }
-
-    impl<const K: usize> crate::facts::Form for Forest<Vec<[u8; K]>> {
-        fn form(facts: &mut Facts) -> Self {
-
-            if facts.len() == 0 {
-                return Self::form_inner(None.into_iter());
-            }
-
-            if facts.values.bounds.strided() == Some(K as u64) {
-                crate::facts::sort::<true>(facts);
-                let borrow = facts.borrow();
-                let arrays: Vecs<&[[u8; K]],_> = Vecs {
-                    bounds: borrow.bounds,
-                    values: borrow.values.values.as_chunks::<K>().0,
-                };
-                Forest::form_inner(arrays.into_index_iter())
-            }
-            else {
-                panic!("Cannot form fixed width terms from variable width terms");
-            }
-        }
     }
 
     impl<const K: usize> Forest<Vec<[u8; K]>> {
@@ -661,6 +730,10 @@ pub mod byte_array {
 }
 
 /// Layer-at-a-time functionality.
+///
+/// These are meant to be the high-performance kernels used by forests of more general layers.
+/// Implementations for `Layer<Terms>` are "abstract" and not performance optimized, whereas
+/// the implementations for generic container types are "specialized" and potentially efficient.
 pub mod layers {
 
     use std::collections::VecDeque;
@@ -873,6 +946,9 @@ pub mod layers {
         }
     }
 
+    // TODO: This method needs to be at most ~linear in the number of items that will be written out.
+    // TODO: Invocations of this method will not have their bounds grow in number of intervals, and so
+    //       we can re-use an argument `&mut [(usize, usize)]` to house the output bounds.
     /// Restrict lists based on per-list bools, producing a new layer and updating `bools` for the items.
     #[inline(never)]
     pub fn retain_lists<'a, C: Container>(lists: <Lists<C> as Container>::Borrowed<'a>, bools: &mut VecDeque<bool>) -> Lists<C> {
@@ -891,6 +967,9 @@ pub mod layers {
         output
     }
 
+    // TODO: This method needs to be at most ~linear in the number of items that will be written out.
+    // TODO: Invocations of this method will not have their bounds grow in number of intervals, and so
+    //       we can re-use an argument `&mut [(usize, usize)]` to house the output bounds.
     /// Restrict lists based on per-item bools, producing a new layer and updating `bools` for the lists.
     #[inline(never)]
     pub fn retain_items<'a, C: Container>(lists: <Lists<C> as Container>::Borrowed<'a>, bools: &mut VecDeque<bool>) -> Lists<C> {
