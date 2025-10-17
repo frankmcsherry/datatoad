@@ -380,19 +380,21 @@ pub mod radix_sort {
 
     /// Least-significant-byte radix sort, skipping identical bytes.
     #[inline(never)]
-    pub fn lsb<R: Radixable>(data: &mut [R]) {
+    pub fn lsb<R: Radixable>(data: &mut [R]) { lsb_range(data, 0, R::WIDTH) }
 
-        let mut counts = vec![[0usize; 256]; R::WIDTH];
+    pub fn lsb_range<R: Radixable>(data: &mut [R], lower: usize, upper: usize) {
+
+        let mut counts = vec![[0usize; 256]; upper - lower];
         for item in data.iter() {
-            for index in 0 .. R::WIDTH {
-                counts[index][item.byte(index) as usize] += 1;
+            for (count, index) in counts.iter_mut().zip(lower..upper) {
+                count[item.byte(index) as usize] += 1;
             }
         }
         let mut temp = data.to_vec();
         let mut temp = &mut temp[..];
         let mut data = &mut data[..];
 
-        let mut indexes = counts.iter_mut().enumerate().filter(|(_,h)| h.iter().filter(|c| **c > 0).count() > 1).collect::<Vec<_>>();
+        let mut indexes = (lower..upper).zip(counts.iter_mut()).filter(|(_,h)| h.iter().filter(|c| **c > 0).count() > 1).collect::<Vec<_>>();
         for (round, count) in indexes.iter_mut().rev() {
             let mut total = 0;
             for i in 0 .. 256 {
