@@ -1,5 +1,4 @@
-use datatoad::{facts, parse, types};
-use datatoad::facts::FactCollection;
+use datatoad::{parse, types};
 
 fn main() {
 
@@ -38,35 +37,27 @@ fn main() {
 
                             if let Ok(regex) = regex::Regex::new(pattern) {
                                 let names = regex.capture_names().map(|x| x.to_owned()).collect::<Vec<_>>();
-                                let mut builder = facts::FactBuilder::<FactCollection>::default();
                                 if let Ok(file) = File::open(filename) {
                                     let file = BufReader::new(file);
-                                    let mut terms = datatoad::facts::Terms::default();
+                                    use columnar::{Container, Push};
+                                    use datatoad::facts::{Forest, Terms};
+                                    let mut columns = vec![Terms::default(); names.len()-1];
                                     for readline in file.lines() {
                                         let line = readline.expect("read error");
                                         if let Some(captures) = regex.captures(&line) {
-                                            use columnar::{Container, Index, Push, Clear};
-                                            terms.clear();
-                                            for (term, name) in captures.iter().zip(names.iter()).skip(1) {
+                                            for ((term, name), col) in captures.iter().zip(names.iter()).skip(1).zip(columns.iter_mut()) {
                                                 let term = term.unwrap().as_str();
                                                 if name.map(|x| x.starts_with("u32")).unwrap_or(false) {
-                                                    let u = term.parse::<u32>().unwrap();
-                                                    let bytes = [
-                                                        (u >> 24) as u8,
-                                                        (u >> 16) as u8,
-                                                        (u >>  8) as u8,
-                                                        (u >>  0) as u8,
-                                                    ];
-                                                    terms.push(&bytes);
+                                                    col.push(&term.parse::<u32>().unwrap().to_be_bytes());
                                                 }
                                                 else {
-                                                    terms.push(term.as_bytes());
+                                                    col.push(term.as_bytes());
                                                 }
                                             }
-                                            builder.push(terms.borrow().into_index_iter());
                                         }
                                     }
-                                    state.facts.entry(name).extend(builder.finish());
+                                    let trie = Forest::from_columns(&columns.iter().map(|c| c.borrow()).collect::<Vec<_>>()[..]);
+                                    state.facts.entry(name).extend([trie]);
                                     state.update();
                                 }
                                 else { println!("file not found: {:?}", filename); }

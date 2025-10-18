@@ -1,7 +1,7 @@
 //! Methods and types to support building and maintaining ordered sets of facts.
 
 use std::collections::BTreeMap;
-use columnar::{Container, Index, Len, Push};
+use columnar::{Container, Index};
 use columnar::Vecs;
 use columnar::primitive::offsets::Strides;
 
@@ -11,11 +11,8 @@ pub mod trie;
 
 /// A `Vecs` using strided offsets.
 pub type Lists<C> = Vecs<C, Strides>;
-
 /// Use the `List` type to access an alternate columnar container.
-pub type Fact = Vec<Vec<u8>>;
 pub type Terms = Lists<Vec<u8>>;
-pub type Facts = Lists<Terms>;
 
 /// A map from text name to collection of facts.
 ///
@@ -145,59 +142,6 @@ pub fn downgrade<const K: usize>(terms: Lists<Vec<[u8; K]>>) -> Lists<Terms> {
     }
 }
 
-/// Sorts and potentially deduplicates
-pub fn sort<const DEDUP: bool>(facts: &mut Facts) {
-    // Attempt to sniff out a known pattern of fact and term sizes.
-    // Clearly needs to be generalized, or something.
-
-    let terms = facts.bounds.strided();
-    let bytes = facts.values.bounds.strided();
-
-    let width = terms.and_then(|w0| bytes.map(|w1| w0 * w1));
-    match width {
-        Some(8)  => sort_help::<DEDUP,  8>(facts, terms.unwrap()),
-        Some(12) => sort_help::<DEDUP, 12>(facts, terms.unwrap()),
-        Some(16) => sort_help::<DEDUP, 16>(facts, terms.unwrap()),
-        _ => {
-            use crate::facts::Sorted;
-            facts.sort::<DEDUP>();
-        }
-    }
-}
-
-#[inline(never)]
-fn sort_help<const DEDUP: bool, const W: usize>(facts: &mut Facts, terms: u64) {
-    let (more, less) = facts.values.values.as_chunks_mut::<W>();
-    assert!(less.is_empty());
-    // more.sort();
-    // more.sort_unstable();
-    radix_sort::lsb(more);
-    // radix_sort::msb(more);
-    if DEDUP {
-        let mut finger = 0;
-        for i in 1 .. more.len() {
-            if more[i] != more[finger] {
-                finger += 1;
-                more[finger] = more[i];
-            }
-        }
-        finger += 1;
-        // Popping back out to referencing bytes.
-        facts.values.values.truncate(W * finger);
-        facts.bounds.length = finger as u64;
-        facts.values.bounds.length = terms * finger as u64;
-    }
-}
-
-pub trait Form {
-    /// Forms a container from a list of facts.
-    ///
-    /// The mutable reference allows us to efficiently sort `facts` if it has the right shape.
-    /// The method is not expected to consume or remove `facts`, and the caller should expect
-    /// to be able to reuse the resources after the call, without needing to reallocate.
-    fn form(facts: &mut Facts) -> Self;
-}
-
 pub trait Length {
     /// Number of facts in the container.
     fn len(&self) -> usize;
@@ -211,7 +155,7 @@ pub trait Merge {
 }
 
 /// A type that can contain and work with facts.
-pub trait FactContainer : Form + Length + Merge + Default + Sized + Clone {
+pub trait FactContainer : Length + Merge + Default + Sized + Clone {
 
     /// Applies an action to the facts, building the corresponding output.
     fn act_on(&self, action: &Action<String>) -> FactLSM<Self>;
@@ -271,28 +215,6 @@ impl<F: FactContainer> FactSet<F> {
             // Remove from to_add any facts already in stable.
             self.recent = to_add.antijoin(self.stable.contents());
         }
-    }
-}
-
-/// A staging ground for developing facts.
-#[derive(Clone, Default)]
-pub struct FactBuilder<F: Merge> {
-    active: Facts,
-    layers: FactLSM<F>,
-}
-
-impl<F: Form + Merge + Length> FactBuilder<F> {
-    pub fn push<I>(&mut self, item: I) where Facts: Push<I> {
-        self.active.push(item);
-        if self.active.len() > 1_000_000 {
-            use columnar::Clear;
-            self.layers.push(Form::form(&mut self.active));
-            self.active.clear();
-        }
-    }
-    pub fn finish(mut self) -> FactLSM<F> {
-        self.layers.push(Form::form(&mut self.active));
-        self.layers
     }
 }
 
@@ -525,27 +447,6 @@ pub mod radix_sort {
         }
     }
 }
-
-impl <C: for<'a> Container<Ref<'a>: Ord>> Sorted for C { }
-
-/// Methods on containers with orderable items.
-///
-/// When specified, the `const DEDUP: usize` argument indicates that the inputs
-/// should be considered deduplicated, and the result should be deduplicated as
-/// well. Essentially, that repeats across collections should be suppressed.
-pub trait Sorted : for<'a> Container<Ref<'a>: Ord> {
-    /// Sort the container in place; optionally deduplicate.
-    fn sort<const DEDUP: bool>(&mut self) {
-        let mut result = Self::default();
-        let borrowed = self.borrow();
-        let mut items = borrowed.into_index_iter().collect::<Vec<_>>();
-        items.sort();
-        if DEDUP { items.dedup(); }
-        result.extend(items);
-        *self = result;
-    }
-}
-
 
 /// Increments `index` until just after the last element of `input` to satisfy `cmp`.
 ///
