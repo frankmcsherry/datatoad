@@ -64,21 +64,24 @@ pub mod types {
         pub fn push(&mut self, rule: Rule) {
             if rule.body.is_empty() {
                 for atom in rule.head.iter() {
+                    use columnar::{Container, Push};
+                    use crate::facts::{Forest, Terms};
                     let mut lits = Vec::with_capacity(atom.terms.len());
                     for term in atom.terms.iter() {
                         if let Term::Lit(text) = term {
-                            lits.push(text.to_string().into_bytes());
+                            let mut term = Terms::default();
+                            term.push(text.as_bytes());
+                            lits.push(term);
                         }
                         else {
                             println!("Axioms not supported (all fact terms must be literals)");
                             continue;
                         }
                     }
-                    let mut builder = facts::FactBuilder::default();
-                    builder.push(lits.iter().map(|x| &x[..]));
+                    let facts = Forest::<Terms>::from_columns(&lits.iter().map(|l| l.borrow()).collect::<Vec<_>>()[..]);
                     self.facts
                         .entry(atom.name.to_owned())
-                        .extend(builder.finish());
+                        .extend([facts]);
                 }
             }
             else {
