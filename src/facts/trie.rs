@@ -47,17 +47,11 @@ impl<C: Container> Forest<C> {
         Self { layers }
     }
 
-    /// Advances bounds on lists through layers `lower .. upper`.
-    ///
-    /// The bounds should start in terms of lists of layer `lower`, and will end in terms of lists of layer `upper`.
-    fn advance_list_bounds(&self, bounds: &mut [(usize, usize)], lower: usize, upper: usize) {
-        advance_list_bounds::<C>(&self.borrow()[..], bounds, lower, upper);
-    }
     /// Advances bounds on items through layers `lower .. upper`.
     ///
     /// The bounds should start in terms of items of layer `lower`, and will end in terms of items of layer `upper`.
     fn advance_item_bounds(&self, bounds: &mut [(usize, usize)], lower: usize, upper: usize) {
-        self.advance_list_bounds(bounds, lower+1, upper+1)
+        advance_bounds::<C>(&self.borrow()[lower+1 .. upper+1], bounds)
     }
 }
 
@@ -65,9 +59,9 @@ fn advance_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed<'_>]
     for layer in layers.iter() { crate::facts::trie::layers::advance_bounds::<C>(*layer, bounds); }
 }
 
-fn advance_list_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed<'_>], bounds: &mut[(usize, usize)], lower: usize, upper: usize) {
-    advance_bounds::<C>(&layers[lower .. upper], bounds)
-}
+// fn advance_list_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed<'_>], bounds: &mut[(usize, usize)], lower: usize, upper: usize) {
+//     advance_bounds::<C>(&layers[lower .. upper], bounds)
+// }
 fn advance_item_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed<'_>], bounds: &mut[(usize, usize)], lower: usize, upper: usize) {
     advance_bounds::<C>(&layers[lower+1 .. upper+1], bounds)
 }
@@ -369,23 +363,18 @@ pub mod terms {
 
                 let last = idx+1 == projection.len();
 
-                let layer = if column < arity {
+                let list = if column < arity {
                     // Flow the column bounds forward to `aligned`, then count.
 
                     // First, let's determine the counts for each of `this` and `that` at `aligned`.
                     let mut this_bounds = aligned.iter().map(|(i,_)| (*i,*i+1)).collect::<Vec<_>>();
-                    crate::facts::trie::advance_list_bounds::<Terms>(&this_values[..], &mut this_bounds[..], 0, this_cursor);
+                    crate::facts::trie::advance_bounds::<Terms>(&this_values[0 .. this_cursor], &mut this_bounds[..]);
                     let mut that_bounds = aligned.iter().map(|(_,j)| (*j,*j+1)).collect::<Vec<_>>();
-                    crate::facts::trie::advance_list_bounds::<Terms>(&that_values[..], &mut that_bounds[..], 0, that_cursor);
+                    crate::facts::trie::advance_bounds::<Terms>(&that_values[0 .. that_cursor], &mut that_bounds[..]);
 
                     // Now let's project forward from `both_need[column]`.
                     let mut bounds = both_need[&column].iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
-                    for layer in this[column .. arity].iter().skip(1) {
-                        for (lower, upper) in bounds.iter_mut() {
-                            *lower = layer.bounds.bounds(*lower).0;
-                            *upper = layer.bounds.bounds(*upper - 1).1;
-                        }
-                    }
+                    crate::facts::trie::advance_bounds::<Terms>(&this[column+1 .. arity], &mut bounds);
 
                     let mut products = this_bounds.iter().zip(that_bounds.iter()).map(|((l0,u0), (l1,u1))| (u0-l0)*(u1-l1))
                                                      .zip(aligned.iter().map(|(i,_)| *i)).peekable();
@@ -427,10 +416,10 @@ pub mod terms {
                     sort_terms(values, &mut groups, last)
                 };
 
-                layers.push(layer);
+                layers.push(Layer { list } );
             }
 
-            builders.push(Forest { layers: layers.into_iter().map(|list| Layer { list }).collect() }.into());
+            builders.push(Forest { layers }.into());
         }
 
         builders
@@ -806,9 +795,15 @@ pub mod layers {
 
     /// Advances (lower, upper] bounds on lists to the corresponding bounds on items.
     pub fn advance_bounds<'a, C: Container>(lists: <Lists<C> as Container>::Borrowed<'a>, bounds: &mut [(usize, usize)]) {
-        for (lower, upper) in bounds.iter_mut() {
-            *lower = lists.bounds.bounds(*lower).0;
-            *upper = lists.bounds.bounds(*upper-1).1;
+        if let Some(stride) = lists.bounds.strided() {
+            let stride = stride as usize;
+            if stride > 1 { for (lower, upper) in bounds.iter_mut() { *lower *= stride; *upper *= stride; } }
+        }
+        else {
+            for (lower, upper) in bounds.iter_mut() {
+                *lower = lists.bounds.bounds(*lower).0;
+                *upper = lists.bounds.bounds(*upper-1).1;
+            }
         }
     }
 
@@ -852,10 +847,7 @@ pub mod layers {
         }
         output.bounds.push(output.values.len() as u64);
 
-        if !last {
-            for i in 0 .. to_sort.len() { group[i] = (to_sort[i].0, to_sort[i].2); }
-            group.sort_unstable_by(|x,y| x.1.cmp(&y.1));
-        }
+        if !last { for (g, _, i) in to_sort { group[i] = (g, i); } }
 
         output
     }
@@ -884,10 +876,10 @@ pub mod layers {
         output.bounds.push(output.values.len() as u64);
 
         if !last {
-            crate::facts::radix_sort::lsb_range(&mut to_sort, 8, 12);
-            for i in 0 .. to_sort.len() {
-                group[i] = (u32::from_be_bytes(to_sort[i][0]) as usize, i);
-            }
+            // Sorting is optional, and could improve performance for large, disordered lists, or cost otherwise.
+            // If we retained the counts and allocation from the previous invocation it might be faster.
+            // crate::facts::radix_sort::lsb_range(&mut to_sort, 8, 12);
+            for [g, _, index] in to_sort { group[u32::from_be_bytes(index) as usize] = (u32::from_be_bytes(g) as usize, u32::from_be_bytes(index) as usize); }
         }
 
         output
