@@ -59,9 +59,6 @@ fn advance_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed<'_>]
     for layer in layers.iter() { crate::facts::trie::layers::advance_bounds::<C>(*layer, bounds); }
 }
 
-// fn advance_list_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed<'_>], bounds: &mut[(usize, usize)], lower: usize, upper: usize) {
-//     advance_bounds::<C>(&layers[lower .. upper], bounds)
-// }
 fn advance_item_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed<'_>], bounds: &mut[(usize, usize)], lower: usize, upper: usize) {
     advance_bounds::<C>(&layers[lower+1 .. upper+1], bounds)
 }
@@ -856,8 +853,18 @@ pub mod layers {
     pub fn u32_sort<'a>(items: &'a [[u8;4]], group: &mut [(usize, usize)], last: bool) -> Lists<Vec<[u8;4]>> {
 
         let mut output = Lists::<Vec<[u8;4]>>::default();
-        let mut to_sort: Vec<[[u8;4];3]> = group.iter().copied().enumerate().map(|(idx,(g,i))| [(g as u32).to_be_bytes(), items[i], (idx as u32).to_be_bytes()]).collect::<Vec<_>>();
-        crate::facts::radix_sort::lsb_range(&mut to_sort, 0, 8);
+
+        // Populate a byte vector with the content we want.
+        let mut to_sort: Vec<u8> = Vec::with_capacity(12 * group.len());
+        for (idx,(g,i)) in group.iter().copied().enumerate() {
+            to_sort.extend(&(g as u32).to_be_bytes());
+            to_sort.extend(&items[i]);
+            to_sort.extend(&(idx as u32).to_be_bytes());
+        }
+
+        crate::facts::radix_sort::lsb_range(to_sort.as_chunks_mut::<12>().0, 0, 8);
+
+        let to_sort = to_sort.as_chunks_mut::<4>().0.as_chunks_mut::<3>().0;
 
         // We want to mint a new item for each distinct (group, value).
         // We want to seal a new list for each distinct group.
@@ -879,7 +886,7 @@ pub mod layers {
             // Sorting is optional, and could improve performance for large, disordered lists, or cost otherwise.
             // If we retained the counts and allocation from the previous invocation it might be faster.
             // crate::facts::radix_sort::lsb_range(&mut to_sort, 8, 12);
-            for [g, _, index] in to_sort { group[u32::from_be_bytes(index) as usize] = (u32::from_be_bytes(g) as usize, u32::from_be_bytes(index) as usize); }
+            for [g, _, index] in to_sort { group[u32::from_be_bytes(*index) as usize] = (u32::from_be_bytes(*g) as usize, u32::from_be_bytes(*index) as usize); }
         }
 
         output
