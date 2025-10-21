@@ -884,8 +884,8 @@ pub mod layers {
                 prev = (*group, value);
                 *group = ((output.values.len() - 1) as u32).to_be_bytes();
             }
+            output.bounds.push(output.values.len() as u64);
         }
-        if output.values.len() > 0 { output.bounds.push(output.values.len() as u64); }
 
         if !last {
             // Sorting is optional, and could improve performance for large, disordered lists, or cost otherwise.
