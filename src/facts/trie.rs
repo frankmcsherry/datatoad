@@ -321,8 +321,9 @@ pub mod terms {
 
             // Introduce columns one-by-one.
             let mut layers = Vec::with_capacity(projection.len());
-            // List of pairs of list indexes in `this` and `that` that need to be joined, in this order.
-            let mut tojoin = aligned.clone();
+            // Pairs of lists of list indexes in `this` and `that` that need to be joined, in this order.
+            let (mut this_i, mut that_j): (Vec<_>, Vec<_>) = aligned.iter().copied().unzip();
+            // TODO: remove second coordinate (believed redundant with `tojoin`).
             // Maintains grouping information for each element of `tojoin`.
             let mut groups = (0 .. aligned.len()).map(|i| (0, i)).collect::<Vec<_>>();
 
@@ -334,17 +335,17 @@ pub mod terms {
                 let groups = aligned.iter().map(|(i,_)| *i).enumerate().collect::<Vec<_>>();
                 let layers = permute_subset(&this[arity..], &this_order[..], &groups[..]);
                 this_values = Some(Forest { layers });
-                for i in 0 .. tojoin.len() { tojoin[i].0 = i; }
+                for i in 0 .. this_i.len() { this_i[i] = i; }
             }
 
             let mut that_values = None;
             let mut that_order = Vec::default();
             for col in projection.iter().copied() { if this.len() + arity <= col && !that_order.contains(&(col - arity - this.len())) { that_order.push(col - arity - this.len()); } }
             if that_order != (0 .. that_order.len()).collect::<Vec<_>>() {
-                let groups = aligned.iter().map(|(_,i)| *i).enumerate().collect::<Vec<_>>();
+                let groups = aligned.iter().map(|(_,j)| *j).enumerate().collect::<Vec<_>>();
                 let layers = permute_subset(&that[arity..], &that_order[..], &groups[..]);
                 that_values = Some(Forest { layers });
-                for i in 0 .. tojoin.len() { tojoin[i].1 = i; }
+                for j in 0 .. that_j.len() { that_j[j] = j; }
             }
 
             // Lists of non-shared layers for `this` and `that` in the order introduced by `projection`.
@@ -394,8 +395,10 @@ pub mod terms {
                     let values = this_values[this_cursor];
 
                     // Expand `groups` to call out items in `values`.
-                    groups = groups.into_iter().zip(tojoin.iter().copied()).flat_map(|((g,_),(i,_))| { let (l,u) = values.bounds.bounds(i); (l .. u).map(move |i| (g,i)) }).collect();
-                    if !last { tojoin = tojoin.into_iter().flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(i); (l .. u).map(move |i| (i,j)) }).collect(); }
+                    groups = groups.into_iter().zip(this_i.iter().copied()).flat_map(|((g,_),i)| { let (l,u) = values.bounds.bounds(i); (l .. u).map(move |i| (g,i)) }).collect();
+                    if !last {
+                        (this_i, that_j) = this_i.iter().zip(that_j.iter()).flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(*i); (l .. u).map(move |i| (i,*j)) }).unzip();
+                    }
                     this_cursor += 1;
                     sort_terms(values, &mut groups, last)
                 }
@@ -407,8 +410,10 @@ pub mod terms {
                     let values = that_values[that_cursor];
 
                     // Expand `groups` to call out items in `values`.
-                    groups = groups.into_iter().zip(tojoin.iter().copied()).flat_map(|((g,_),(_,j))| { let (l,u) = values.bounds.bounds(j); (l .. u).map(move |j| (g,j)) }).collect();
-                    if !last { tojoin = tojoin.into_iter().flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(j); (l .. u).map(move |j| (i,j)) }).collect(); }
+                    groups = groups.into_iter().zip(that_j.iter().copied()).flat_map(|((g,_),j)| { let (l,u) = values.bounds.bounds(j); (l .. u).map(move |j| (g,j)) }).collect();
+                    if !last {
+                        (this_i, that_j) = this_i.iter().zip(that_j.iter()).flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(*j); (l .. u).map(move |j| (*i,j)) }).unzip();
+                    }
                     that_cursor += 1;
                     sort_terms(values, &mut groups, last)
                 };
@@ -880,7 +885,7 @@ pub mod layers {
                 *group = ((output.values.len() - 1) as u32).to_be_bytes();
             }
         }
-        output.bounds.push(output.values.len() as u64);
+        if output.values.len() > 0 { output.bounds.push(output.values.len() as u64); }
 
         if !last {
             // Sorting is optional, and could improve performance for large, disordered lists, or cost otherwise.
