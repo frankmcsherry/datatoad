@@ -392,11 +392,11 @@ pub mod terms {
                 else if column < this.len() {
                     // We expect this to be the next column in `this_values`.
                     let values = this_values[this_cursor];
+                    this_cursor += 1;
 
                     // Expand `this_i`, and corresponding repetitions in `groups` and `that_j`.
-                    if !last { that_j = this_i.iter().zip(that_j.iter()).flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(*i); (l .. u).map(move |_| *j) }).collect(); }
+                    if that_cursor < that_values.len() { that_j = this_i.iter().zip(that_j.iter()).flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(*i); (l .. u).map(move |_| *j) }).collect(); }
                     (groups, this_i) = groups.into_iter().zip(this_i.iter().copied()).flat_map(|(g,i)| { let (l,u) = values.bounds.bounds(i); (l .. u).map(move |i| (g, i)) }).unzip();
-                    this_cursor += 1;
                     sort_terms(values, &mut groups, &this_i, last)
                 }
                 else if column < this.len() + arity {
@@ -405,11 +405,11 @@ pub mod terms {
                 else {
                     // We expect this to be the next column in `that_values`.
                     let values = that_values[that_cursor];
+                    that_cursor += 1;
 
                     // Expand `that_j`, and corresponding repetitions in `groups` and `this_i`.
-                    if !last { this_i = this_i.iter().zip(that_j.iter()).flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(*j); (l .. u).map(move |_| *i) }).collect(); }
+                    if this_cursor < this_values.len() { this_i = this_i.iter().zip(that_j.iter()).flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(*j); (l .. u).map(move |_| *i) }).collect(); }
                     (groups, that_j) = groups.into_iter().zip(that_j.iter().copied()).flat_map(|(g,j)| { let (l,u) = values.bounds.bounds(j); (l .. u).map(move |j| (g, j)) }).unzip();
-                    that_cursor += 1;
                     sort_terms(values, &mut groups, &that_j, last)
                 };
 
