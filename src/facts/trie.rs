@@ -42,8 +42,8 @@ impl<C: Container> Forest<C> {
 
     /// Forms a forest trie from a sequence of columns of identical lengths.
     pub fn from_columns<'a>(columns: &[C::Borrowed<'a>]) -> Self where C::Ref<'a>: Ord {
-        let mut groups = (0 .. columns.first().map(columnar::Len::len).unwrap_or(0)).map(|i| (0, i)).collect::<Vec<_>>();
-        let layers = columns.iter().map(|column| Layer { list: crate::facts::trie::layers::col_sort(*column, &mut groups[..], false) }).collect();
+        let (mut groups, indexs): (Vec<_>, Vec<_>) = (0 .. columns.first().map(columnar::Len::len).unwrap_or(0)).map(|i| (0, i)).unzip();
+        let layers = columns.iter().map(|column| Layer { list: crate::facts::trie::layers::col_sort(*column, &mut groups[..], &indexs[..], false) }).collect();
         Self { layers }
     }
 
@@ -226,6 +226,7 @@ pub mod terms {
     /// The `groups` input identifies lists in the first layer, and groupings associated with them, which
     /// constrain the permutation to distinguish lists with different groups, merge lists with equal groups,
     /// and discard lists that are not referenced at all.
+    #[inline(never)]
     fn permute_subset(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], in_groups: &[(usize, usize)]) -> Vec<Layer<Terms>> {
 
         use crate::facts::trie::advance_item_bounds;
@@ -241,8 +242,8 @@ pub mod terms {
             let mut maxima = col;
             let mut bounds = in_bounds.clone();
             advance_item_bounds::<Terms>(in_layers, &mut bounds[..], 0, col);
-            let mut groups = in_groups.iter().copied().zip(bounds.iter().copied()).flat_map(|((g,_i),(l,u))| (l..u).map(move |i| (g,i))).collect::<Vec<_>>();
-            layers.push(Layer { list: crate::facts::trie::layers::sort_terms(in_layers[col], &mut groups, last) });
+            let (mut groups, mut indexs): (Vec<_>, Vec<_>) = in_groups.iter().copied().zip(bounds.iter().copied()).flat_map(|((g,_i),(l,u))| (l..u).map(move |i| (g,i))).unzip();
+            layers.push(Layer { list: crate::facts::trie::layers::sort_terms(in_layers[col], &mut groups, &indexs, last) });
 
             while let Some(col) = columns.next() {
 
@@ -254,7 +255,8 @@ pub mod terms {
                     advance_item_bounds::<Terms>(in_layers, &mut my_bounds[..], 0, col);
                     let mut bounds = my_bounds.iter().copied().flat_map(|(l,u)| l .. u).map(|i| in_layers[col+1].bounds.bounds(i)).collect::<Vec<_>>();
                     if col+1 < maxima { advance_item_bounds::<Terms>(in_layers, &mut bounds[..], col+1, maxima); }
-                    my_bounds.iter().copied().flat_map(|(l,u)| l..u).zip(bounds.iter()).flat_map(|(i, (l,u))| std::iter::repeat(i).take(u-l)).zip(groups.iter_mut()).for_each(|(x,(_g,i))| *i = x);
+                    indexs.clear();
+                    indexs.extend(my_bounds.iter().copied().flat_map(|(l,u)| l..u).zip(bounds.iter()).flat_map(|(i, (l,u))| std::iter::repeat(i).take(u-l)));
                 }
                 else {
                     assert!(col > maxima);
@@ -265,12 +267,12 @@ pub mod terms {
                     advance_item_bounds::<Terms>(in_layers, &mut bounds[..], 0, maxima);
                     let mut bounds = bounds.into_iter().flat_map(|(l,u)| l .. u).map(|i| in_layers[maxima+1].bounds.bounds(i)).collect::<Vec<_>>();
                     if maxima+1 < col { advance_item_bounds::<Terms>(in_layers, &mut bounds[..], maxima+1, col); }
-                    groups = groups.into_iter().zip(bounds).flat_map(|((g,_),(l,u))| (l..u).map(move |i| (g, i))).collect::<Vec<_>>();
+                    (groups, indexs) = groups.into_iter().zip(bounds).flat_map(|(g,(l,u))| (l..u).map(move |i| (g, i))).unzip();
                 }
 
                 maxima = std::cmp::max(maxima, col);
                 let last = columns.peek().is_none();
-                layers.push(Layer { list: crate::facts::trie::layers::sort_terms(in_layers[col], &mut groups, last) });
+                layers.push(Layer { list: crate::facts::trie::layers::sort_terms(in_layers[col], &mut groups, &indexs, last) });
             }
         }
 
@@ -321,10 +323,10 @@ pub mod terms {
 
             // Introduce columns one-by-one.
             let mut layers = Vec::with_capacity(projection.len());
-            // List of pairs of list indexes in `this` and `that` that need to be joined, in this order.
-            let mut tojoin = aligned.clone();
-            // Maintains grouping information for each element of `tojoin`.
-            let mut groups = (0 .. aligned.len()).map(|i| (0, i)).collect::<Vec<_>>();
+            // Pairs of lists of list indexes in `this` and `that` that need to be joined, in this order.
+            let (mut this_i, mut that_j): (Vec<_>, Vec<_>) = aligned.iter().copied().unzip();
+            // Ordering and grouping information for corresponding pairs of `this_i` and `that_j`.
+            let mut groups = std::iter::repeat(0).take(aligned.len()).collect::<Vec<_>>();
 
             // Orient `this[arity..]` and `that[arity..]` to match the order introduced in `projection`.
             let mut this_values = None;
@@ -334,17 +336,17 @@ pub mod terms {
                 let groups = aligned.iter().map(|(i,_)| *i).enumerate().collect::<Vec<_>>();
                 let layers = permute_subset(&this[arity..], &this_order[..], &groups[..]);
                 this_values = Some(Forest { layers });
-                for i in 0 .. tojoin.len() { tojoin[i].0 = i; }
+                for i in 0 .. this_i.len() { this_i[i] = i; }
             }
 
             let mut that_values = None;
             let mut that_order = Vec::default();
             for col in projection.iter().copied() { if this.len() + arity <= col && !that_order.contains(&(col - arity - this.len())) { that_order.push(col - arity - this.len()); } }
             if that_order != (0 .. that_order.len()).collect::<Vec<_>>() {
-                let groups = aligned.iter().map(|(_,i)| *i).enumerate().collect::<Vec<_>>();
+                let groups = aligned.iter().map(|(_,j)| *j).enumerate().collect::<Vec<_>>();
                 let layers = permute_subset(&that[arity..], &that_order[..], &groups[..]);
                 that_values = Some(Forest { layers });
-                for i in 0 .. tojoin.len() { tojoin[i].1 = i; }
+                for j in 0 .. that_j.len() { that_j[j] = j; }
             }
 
             // Lists of non-shared layers for `this` and `that` in the order introduced by `projection`.
@@ -385,19 +387,17 @@ pub mod terms {
 
                     // Flatten the (index, count) into repetitions.
                     let flat = both_need[&column].iter().zip(counts).flat_map(|(i,c)| std::iter::repeat(*i).take(c)).collect::<Vec<_>>();
-                    assert_eq!(flat.len(), groups.len());
-                    groups.iter_mut().zip(flat.iter()).for_each(|((_,x),i)| { *x = *i; });
-                    sort_terms(this[column], &mut groups, last)
+                    sort_terms(this[column], &mut groups, &flat, last)
                 }
                 else if column < this.len() {
                     // We expect this to be the next column in `this_values`.
                     let values = this_values[this_cursor];
-
-                    // Expand `groups` to call out items in `values`.
-                    groups = groups.into_iter().zip(tojoin.iter().copied()).flat_map(|((g,_),(i,_))| { let (l,u) = values.bounds.bounds(i); (l .. u).map(move |i| (g,i)) }).collect();
-                    if !last { tojoin = tojoin.into_iter().flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(i); (l .. u).map(move |i| (i,j)) }).collect(); }
                     this_cursor += 1;
-                    sort_terms(values, &mut groups, last)
+
+                    // Expand `this_i`, and corresponding repetitions in `groups` and `that_j`.
+                    if that_cursor < that_values.len() { that_j = this_i.iter().zip(that_j.iter()).flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(*i); (l .. u).map(move |_| *j) }).collect(); }
+                    (groups, this_i) = groups.into_iter().zip(this_i.iter().copied()).flat_map(|(g,i)| { let (l,u) = values.bounds.bounds(i); (l .. u).map(move |i| (g, i)) }).unzip();
+                    sort_terms(values, &mut groups, &this_i, last)
                 }
                 else if column < this.len() + arity {
                     unimplemented!("reference equated column of first join argument")
@@ -405,12 +405,12 @@ pub mod terms {
                 else {
                     // We expect this to be the next column in `that_values`.
                     let values = that_values[that_cursor];
-
-                    // Expand `groups` to call out items in `values`.
-                    groups = groups.into_iter().zip(tojoin.iter().copied()).flat_map(|((g,_),(_,j))| { let (l,u) = values.bounds.bounds(j); (l .. u).map(move |j| (g,j)) }).collect();
-                    if !last { tojoin = tojoin.into_iter().flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(j); (l .. u).map(move |j| (i,j)) }).collect(); }
                     that_cursor += 1;
-                    sort_terms(values, &mut groups, last)
+
+                    // Expand `that_j`, and corresponding repetitions in `groups` and `this_i`.
+                    if this_cursor < this_values.len() { this_i = this_i.iter().zip(that_j.iter()).flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(*j); (l .. u).map(move |_| *i) }).collect(); }
+                    (groups, that_j) = groups.into_iter().zip(that_j.iter().copied()).flat_map(|(g,j)| { let (l,u) = values.bounds.bounds(j); (l .. u).map(move |j| (g, j)) }).unzip();
+                    sort_terms(values, &mut groups, &that_j, last)
                 };
 
                 layers.push(Layer { list } );
@@ -601,8 +601,8 @@ pub mod layers {
             };
         }
 
-        pub fn sort(&self, groups: &mut [(usize, usize)], last: bool) -> Self {
-            Self { list: sort_terms(self.borrow(), groups, last) }
+        pub fn sort(&self, groups: &mut [usize], indexs: &[usize], last: bool) -> Self {
+            Self { list: sort_terms(self.borrow(), groups, indexs, last) }
         }
     }
 
@@ -811,21 +811,21 @@ pub mod layers {
         active.retain(|i| lists.values.get(*i) == other.get(aligned.next().unwrap()));
     }
 
-    pub fn sort_terms(lists: <Lists<Terms> as Container>::Borrowed<'_>, groups: &mut [(usize, usize)], last: bool) -> Lists<Terms> {
+    pub fn sort_terms(lists: <Lists<Terms> as Container>::Borrowed<'_>, groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Terms> {
         match upgrade_hint(lists) {
-            Some(1) => { downgrade(col_sort(upgrade::<1>(lists).unwrap().values, groups, last)) }
-            Some(2) => { downgrade(col_sort(upgrade::<2>(lists).unwrap().values, groups, last)) }
-            Some(3) => { downgrade(col_sort(upgrade::<3>(lists).unwrap().values, groups, last)) }
-            Some(4) => { downgrade(u32_sort(upgrade::<4>(lists).unwrap().values, groups, last)) }
-            _______ => { col_sort(lists.values, groups, last) }
+            Some(1) => { downgrade(col_sort(upgrade::<1>(lists).unwrap().values, groups, indexs, last)) }
+            Some(2) => { downgrade(col_sort(upgrade::<2>(lists).unwrap().values, groups, indexs, last)) }
+            Some(3) => { downgrade(col_sort(upgrade::<3>(lists).unwrap().values, groups, indexs, last)) }
+            Some(4) => { downgrade(u32_sort(upgrade::<4>(lists).unwrap().values, groups, indexs, last)) }
+            _______ => { col_sort(lists.values, groups, indexs, last) }
         }
     }
 
     /// Sort the items of `lists` subject to the grouping/ordering of `group` of the lists.
-    pub fn col_sort<'a, C: Container<Ref<'a>: Ord>>(items: C::Borrowed<'a>, group: &mut [(usize, usize)], last: bool) -> Lists<C> {
+    pub fn col_sort<'a, C: Container<Ref<'a>: Ord>>(items: C::Borrowed<'a>, groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<C> {
 
         let mut output = Lists::<C>::default();
-        let mut to_sort = group.iter().copied().enumerate().map(|(idx,(g,i))| (g, items.get(i), idx)).collect::<Vec<_>>();
+        let mut to_sort = groups.iter().zip(indexs.iter()).enumerate().map(|(i, (group, index))| (*group, items.get(*index), i)).collect::<Vec<_>>();
         to_sort.sort_unstable();
 
         // We want to mint a new item for each distinct (group, value).
@@ -844,22 +844,24 @@ pub mod layers {
         }
         output.bounds.push(output.values.len() as u64);
 
-        if !last { for (g, _, i) in to_sort { group[i] = (g, i); } }
+        if !last { for (g, _, i) in to_sort { groups[i] = g; } }
 
         output
     }
 
     /// Sort the items of `lists` subject to the grouping/ordering of `group` of the lists.
-    pub fn u32_sort<'a>(items: &'a [[u8;4]], group: &mut [(usize, usize)], last: bool) -> Lists<Vec<[u8;4]>> {
+    pub fn u32_sort<'a>(items: &'a [[u8;4]], groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Vec<[u8;4]>> {
+
+        assert_eq!(groups.len(), indexs.len());
 
         let mut output = Lists::<Vec<[u8;4]>>::default();
 
         // Populate a byte vector with the content we want.
-        let mut to_sort: Vec<u8> = Vec::with_capacity(12 * group.len());
-        for (idx,(g,i)) in group.iter().copied().enumerate() {
-            to_sort.extend(&(g as u32).to_be_bytes());
-            to_sort.extend(&items[i]);
-            to_sort.extend(&(idx as u32).to_be_bytes());
+        let mut to_sort: Vec<u8> = Vec::with_capacity(12 * groups.len());
+        for (i,(group,index)) in groups.iter().zip(indexs.iter()).enumerate() {
+            to_sort.extend(&(*group as u32).to_be_bytes());
+            to_sort.extend(&items[*index]);
+            to_sort.extend(&(i as u32).to_be_bytes());
         }
 
         crate::facts::radix_sort::lsb_range(to_sort.as_chunks_mut::<12>().0, 0, 8);
@@ -879,14 +881,14 @@ pub mod layers {
                 prev = (*group, value);
                 *group = ((output.values.len() - 1) as u32).to_be_bytes();
             }
+            output.bounds.push(output.values.len() as u64);
         }
-        output.bounds.push(output.values.len() as u64);
 
         if !last {
             // Sorting is optional, and could improve performance for large, disordered lists, or cost otherwise.
             // If we retained the counts and allocation from the previous invocation it might be faster.
             // crate::facts::radix_sort::lsb_range(&mut to_sort, 8, 12);
-            for [g, _, index] in to_sort { group[u32::from_be_bytes(*index) as usize] = (u32::from_be_bytes(*g) as usize, u32::from_be_bytes(*index) as usize); }
+            for [g, _, i] in to_sort { groups[u32::from_be_bytes(*i) as usize] = u32::from_be_bytes(*g) as usize; }
         }
 
         output
