@@ -306,32 +306,39 @@ pub mod radix_sort {
 
     pub fn lsb_range<R: Radixable>(data: &mut [R], lower: usize, upper: usize) {
 
-        let mut counts = vec![[0usize; 256]; upper - lower];
+        let mut counts = vec![[0usize; 256]; R::WIDTH];
+        let mut filter = vec![false; R::WIDTH];
+        for i in lower .. upper { filter[i] = true; }
         for item in data.iter() {
-            for (count, index) in counts.iter_mut().zip(lower..upper) {
-                count[item.byte(index) as usize] += 1;
+            for index in 0 .. R::WIDTH {
+                if filter[index] { counts[index][item.byte(index) as usize] += 1; }
             }
         }
+
         let mut temp = data.to_vec();
         let mut temp = &mut temp[..];
         let mut data = &mut data[..];
 
-        let mut indexes = (lower..upper).zip(counts.iter_mut()).filter(|(_,h)| h.iter().filter(|c| **c > 0).count() > 1).collect::<Vec<_>>();
-        for (round, count) in indexes.iter_mut().rev() {
-            let mut total = 0;
-            for i in 0 .. 256 {
-                std::mem::swap(&mut count[i], &mut total);
-                total += count[i];
+        for index in 0 .. R::WIDTH { if filter[index] { filter[index] = counts[index].iter().filter(|c| **c > 0).count() > 1; } }
+        for index in (0 .. R::WIDTH).rev() {
+            if filter[index] {
+                let count = &mut counts[index];
+                let mut total = 0;
+                for i in 0 .. 256 {
+                    std::mem::swap(&mut count[i], &mut total);
+                    total += count[i];
+                }
+                for item in data.iter() {
+                    let byte = item.byte(index) as usize;
+                    temp[count[byte]] = *item;
+                    count[byte] += 1;
+                }
+                std::mem::swap(&mut data, &mut temp);
             }
-            for item in data.iter() {
-                let byte = item.byte(*round) as usize;
-                temp[count[byte]] = *item;
-                count[byte] += 1;
-            }
-            std::mem::swap(&mut data, &mut temp);
         }
-        // TODO: we could dedup as part of this scan.
-        if indexes.len() % 2 == 1 { temp.copy_from_slice(data); }
+        // We should perform an even number of copies to return to the input `data`.
+        // TODO: if we don't need in-place sorting, we could swap or return `temp`.
+        if filter.iter().filter(|b| **b).count() % 2 == 1 { temp.copy_from_slice(data); }
     }
 
     pub trait Radixable : Copy + std::fmt::Debug {
