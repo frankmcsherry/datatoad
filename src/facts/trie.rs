@@ -852,6 +852,8 @@ pub mod layers {
     /// Sort the items of `lists` subject to the grouping/ordering of `group` of the lists.
     pub fn u32_sort<'a>(items: &'a [[u8;4]], groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Vec<[u8;4]>> {
 
+        if last { return u32_sort_last(items, groups, indexs); }
+
         assert_eq!(groups.len(), indexs.len());
 
         let mut output = Lists::<Vec<[u8;4]>>::default();
@@ -893,4 +895,39 @@ pub mod layers {
 
         output
     }
+
+    pub fn u32_sort_last<'a>(items: &'a [[u8;4]], groups: &mut [usize], indexs: &[usize]) -> Lists<Vec<[u8;4]>> {
+
+        assert_eq!(groups.len(), indexs.len());
+
+        let mut output = Lists::<Vec<[u8;4]>>::default();
+
+        // Populate a byte vector with the content we want.
+        let mut to_sort: Vec<u8> = Vec::with_capacity(8 * groups.len());
+        for (group, index) in groups.iter().zip(indexs.iter()) {
+            to_sort.extend(&(*group as u32).to_be_bytes());
+            to_sort.extend(&items[*index]);
+        }
+
+        crate::facts::radix_sort::lsb_range(to_sort.as_chunks_mut::<8>().0, 0, 8);
+
+        let to_sort = to_sort.as_chunks_mut::<4>().0.as_chunks_mut::<2>().0;
+
+        // We want to mint a new item for each distinct (group, value).
+        // We want to seal a new list for each distinct group.
+        let mut iter = to_sort.iter_mut();
+        if let Some([group, value]) = iter.next() {
+            output.values.push(*value);
+            let mut prev = (*group, value);
+            for [group, value] in iter {
+                if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
+                if prev != (*group, value) { output.values.push(*value); }
+                prev = (*group, value);
+            }
+            output.bounds.push(output.values.len() as u64);
+        }
+
+        output
+    }
+
 }
