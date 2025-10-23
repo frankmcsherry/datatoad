@@ -300,20 +300,28 @@ impl<F: Length> From<F> for FactLSM<F> {
 
 pub mod radix_sort {
 
+    /// Counts the number of bytes present for each
+    #[inline(never)]
+    pub fn count_bytes<R: Radixable>(data: &mut [R], filter: &[bool]) -> Vec<[usize;256]> {
+        assert_eq!(filter.len(), R::WIDTH);
+        let mut counts = vec![[0usize; 256]; R::WIDTH];
+        for item in data.iter() {
+            for index in 0 .. R::WIDTH {
+                if filter[index] { counts[index][item.byte(index) as usize] += 1; }
+            }
+        }
+        counts
+    }
+
     /// Least-significant-byte radix sort, skipping identical bytes.
     #[inline(never)]
     pub fn lsb<R: Radixable>(data: &mut [R]) { lsb_range(data, 0, R::WIDTH) }
 
     pub fn lsb_range<R: Radixable>(data: &mut [R], lower: usize, upper: usize) {
 
-        let mut counts = vec![[0usize; 256]; R::WIDTH];
         let mut filter = vec![false; R::WIDTH];
         for i in lower .. upper { filter[i] = true; }
-        for item in data.iter() {
-            for index in 0 .. R::WIDTH {
-                if filter[index] { counts[index][item.byte(index) as usize] += 1; }
-            }
-        }
+        let mut counts = count_bytes(data, &filter);
 
         let mut temp = data.to_vec();
         let mut temp = &mut temp[..];
