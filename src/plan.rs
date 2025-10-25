@@ -45,9 +45,6 @@ fn implement_action(head: &[Atom], body: &Atom, stable: bool, facts: &mut Relati
 fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relations) {
 
     let (plans, loads) = plan::plan_rule::<plan::ByAtom>(head, body);
-    for ((_, load_atom), (action, _)) in loads.iter().filter(|((p,l),_)| p != l) {
-        facts.ensure_action(body[*load_atom].name.as_str(), action);
-    }
 
     let plan_atoms = if stable { 1 } else { body.len() };
 
@@ -56,7 +53,9 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         let plan = &plans[&plan_atom];
 
         // Stage 0: Load the recently added facts.
-        let (action, terms) = &loads[&(plan_atom, plan_atom)];
+        let (action, terms) = &loads[&plan_atom][&plan_atom];
+        facts.ensure_action(body[plan_atom].name.as_str(), action);
+
         let mut delta_terms = terms.clone();
         let mut delta_lsm = FactLSM::default();
         if stable {
@@ -70,10 +69,16 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             delta_lsm.extend(&mut facts.recent.act_on(action));
         };
 
+        if delta_lsm.is_empty() { continue; }
+
+        for (load_atom, (action, _)) in loads[&plan_atom].iter() {
+            facts.ensure_action(body[*load_atom].name.as_str(), action);
+        }
+
         // Stage 1: Semijoin with other atoms that are subsumed by the initial terms.
         let (init_atoms, _init_terms, init_order) = &plan[0];
         for load_atom in init_atoms.iter().filter(|a| a != &&plan_atom) {
-            let (load_action, load_terms) = &loads[&(plan_atom, *load_atom)];
+            let (load_action, load_terms) = &loads[&plan_atom][load_atom];
             let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
             let to_chain = if load_atom > &plan_atom { Some(&other.recent) } else { None };
             let load_terms = load_terms.iter().take_while(|t| delta_terms.contains(t)).copied().collect::<Vec<_>>().into_iter();
@@ -90,7 +95,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             // A single atom stage can just be a join.
             if atoms.len() == 1 {
                 let load_atom = atoms.first().unwrap();
-                let (load_action, load_terms) = &loads[&(plan_atom, *load_atom)];
+                let (load_action, load_terms) = &loads[&plan_atom][load_atom];
                 let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
                 let other_terms = load_terms.iter().take_while(|t| delta_terms.contains(t) || terms.contains(*t)).copied().collect::<Vec<_>>().into_iter();
 
@@ -99,11 +104,11 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             // Multi-atom stages call for different logic.
             else {
 
-                // We may have terms that are not needed for the term extensions,
-                // in which case we should know, and perhaps project them away.
-                for term in delta_terms.iter().filter(|t| atoms.iter().all(|a| loads[&(plan_atom, *a)].1.contains(t))) {
-                    println!("Non-anchor term: {:?} (could project away for the moment)", term);
-                }
+                // // We may have terms that are not needed for the term extensions,
+                // // in which case we should know, and perhaps project them away.
+                // for term in delta_terms.iter().filter(|t| atoms.iter().all(|a| loads[&(plan_atom, *a)].1.contains(t))) {
+                //     println!("Non-anchor term: {:?} (could project away for the moment)", term);
+                // }
 
                 // For each atom, we'll need to permute `delta` to start with their terms.
                 // Then we'll want to join, and capture the number of extensions, somehow.
@@ -182,7 +187,7 @@ pub mod plan {
     pub type Plan<A, T> = Vec<(BTreeSet<A>, BTreeSet<T>, Vec<T>)>;
     pub type Plans<A, T> = BTreeMap<A, Plan<A, T>>;
     pub type Load<T> = (Action<String>, Vec<T>);
-    pub type Loads<A, T> = BTreeMap<(A, A), Load<T>>;
+    pub type Loads<A, T> = BTreeMap<A, BTreeMap<A, Load<T>>>;
 
     pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a [Atom]) -> (Plans<usize, &'a String>, Loads<usize, &'a String>) {
 
@@ -225,7 +230,7 @@ pub mod plan {
         for (plan_atom, atom) in body.iter().enumerate() {
             let action = Action::from_body(atom);
             let terms = action.projection.iter().flatten().map(|c| atom.terms[*c].as_var().unwrap()).collect::<Vec<_>>();
-            load_actions.insert((plan_atom, plan_atom), (action, terms));
+            load_actions.get_mut(&plan_atom).map(|l| l.insert(plan_atom, (action, terms)));
         }
 
         (plans, load_actions)
@@ -240,11 +245,11 @@ pub mod plan {
         plans: &BTreeMap<A, Plan<A, T>>,
         atoms_to_terms: &BTreeMap<A, BTreeSet<T>>,
         base_actions: &BTreeMap<A, Action<String>>,
-    ) -> BTreeMap<(A, A), (Action<String>, Vec<T>)> {
+    ) -> Loads<A, T> {
 
         // This could be quite general, and use an arbitrary action for each atom in each stage.
         // For example, it needn't even be the same action across uses of the same atom.
-        let mut result = BTreeMap::default();
+        let mut result: Loads<A, T> = BTreeMap::default();
         for (plan_atom, plan) in plans.iter() {
             let mut all_terms = BTreeSet::default();
             let mut in_order = Vec::default();
@@ -253,6 +258,7 @@ pub mod plan {
                 in_order.extend(new_terms);
                 all_terms.extend(terms.iter().copied());
             }
+            let mut loads = BTreeMap::default();
             for load_atom in atoms_to_terms.keys().filter(|a| *a != plan_atom) {
 
                 let load_terms = in_order.iter().filter(|t| atoms_to_terms[load_atom].contains(t)).copied().collect::<Vec<_>>();
@@ -264,8 +270,9 @@ pub mod plan {
                         .map(|p| base_actions[load_atom].projection[p].clone())
                         .collect();
 
-                result.insert((*plan_atom, *load_atom), (action, load_terms));
+                loads.insert(*load_atom, (action, load_terms));
             }
+            result.insert(*plan_atom, loads);
         }
 
         result
@@ -302,7 +309,8 @@ pub mod plan {
                 // Plan outgoing projections, based on demand and ending with `head_terms`.
                 for index in 1 .. atom_plan.len() {
                     let (this, rest) = atom_plan.split_at_mut(index);
-                    let demanded = rest.iter().flat_map(|(atoms, _, _)| atoms.iter()).flat_map(|a| atoms_to_terms[a].iter()).chain(head_terms.iter()).collect::<BTreeSet<_>>();
+                    let present = this.iter().flat_map(|(atoms, _, _)| atoms.iter()).flat_map(|a| atoms_to_terms[a].iter()).collect::<BTreeSet<_>>();
+                    let demanded = rest.iter().flat_map(|(atoms, _, _)| atoms.iter()).flat_map(|a| atoms_to_terms[a].iter()).chain(head_terms.iter()).filter(|t| present.contains(t)).collect::<BTreeSet<_>>();
 
                     let order = &mut this[index-1].2;
                     order.clear();
