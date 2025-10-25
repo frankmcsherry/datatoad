@@ -4,8 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytemuck = "1.20"
 columnar = "0.10"
-eggsalad = { git = "https://github.com/frankmcsherry/eggsalad.git" }
-itertools = "0.14.0"
 regex = "1.11.1"
