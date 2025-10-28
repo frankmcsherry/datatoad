@@ -395,7 +395,8 @@ pub mod terms {
                     this_cursor += 1;
 
                     // Expand `this_i`, and corresponding repetitions in `groups` and `that_j`.
-                    expand(&mut this_i, &mut groups, values, (that_cursor < that_values.len()).then_some(&mut that_j));
+                    let mut others = if that_cursor < that_values.len() { vec![&mut groups, &mut that_j] } else { vec![&mut groups] };
+                    expand(&mut this_i, values, &mut others);
                     sort_terms(values, &mut groups, &this_i, last)
                 }
                 else if column < this.len() + arity {
@@ -407,7 +408,8 @@ pub mod terms {
                     that_cursor += 1;
 
                     // Expand `that_j`, and corresponding repetitions in `groups` and `this_i`.
-                    expand(&mut that_j, &mut groups, values, (this_cursor < this_values.len()).then_some(&mut this_i));
+                    let mut others = if this_cursor < this_values.len() { vec![&mut groups, &mut this_i] } else { vec![&mut groups] };
+                    expand(&mut that_j, values, &mut others);
                     sort_terms(values, &mut groups, &that_j, last)
                 };
 
@@ -422,13 +424,13 @@ pub mod terms {
 
     /// Expand vectors to track the bounds found in `lists` using indexes in `index`.
     ///
-    /// The other vectors also contain indexes, but where `index` will be expanded to the range of indexes found in `lists`, the others just have their
-    /// corresponding values repeated a number of times to match the `index` ranges. One of the vectors is optional (`bonus`).
+    /// The `index` vector has each item expanded in-place to the range found in `bounds`, while the other vectors have their
+    /// indexes repeated a corresponding number of times to match the lengths of these ranges.
     ///
-    /// In principle the explicit representation of the ranges and repetitions could be avoided, by updating `index` and reporting the range widths.
+    /// In principle the explicit representation of the ranges and repetitions could be avoided, by updating `index` and reporting the range lengths.
     /// This would avoid resizing any of the vectors, only rewriting `index`, and pushing the work of unpacking any until later when actually needed.
     #[inline(never)]
-    fn expand<'a>(index: &mut Vec<usize>, group: &mut Vec<usize>, lists: <Lists<Terms> as Container>::Borrowed<'a>, bonus: Option<&mut Vec<usize>>) {
+    fn expand<'a>(index: &mut Vec<usize>, lists: <Lists<Terms> as Container>::Borrowed<'a>, others: &mut [&mut Vec<usize>]) {
 
         // Map out the number of repetitions for each position, and tally the total for pre-allocation.
         let mut total = 0;
@@ -441,26 +443,14 @@ pub mod terms {
         }
 
         let mut index_new = Vec::with_capacity(total);
-        let mut group_new = Vec::with_capacity(total);
-
-        if let Some(bonus) = bonus {
-            let mut bonus_new = Vec::with_capacity(total);
-            for (i, count) in counts.iter().copied().enumerate() {
-                index_new.extend(index[i] .. (index[i] + count));
-                group_new.extend(std::iter::repeat(group[i]).take(count));
-                bonus_new.extend(std::iter::repeat(bonus[i]).take(count));
-            }
-            *bonus = bonus_new;
-        }
-        else {
-            for (i, count) in counts.iter().copied().enumerate() {
-                index_new.extend(index[i] .. (index[i] + count));
-                group_new.extend(std::iter::repeat(group[i]).take(count));
-            }
-        }
-
+        for (index, count) in index.iter().copied().zip(counts.iter().copied()) { index_new.extend(index .. (index + count)); }
         *index = index_new;
-        *group = group_new;
+
+        for other in others.iter_mut() {
+            let mut other_new = Vec::with_capacity(total);
+            for (other, count) in other.iter().copied().zip(counts.iter().copied()) { other_new.extend(std::iter::repeat(other).take(count)); }
+            **other = other_new;
+        }
     }
 
     impl FactContainer for Forest<Terms> {
