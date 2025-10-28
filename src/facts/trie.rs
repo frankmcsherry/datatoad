@@ -395,8 +395,8 @@ pub mod terms {
                     this_cursor += 1;
 
                     // Expand `this_i`, and corresponding repetitions in `groups` and `that_j`.
-                    if that_cursor < that_values.len() { that_j = this_i.iter().zip(that_j.iter()).flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(*i); (l .. u).map(move |_| *j) }).collect(); }
-                    (groups, this_i) = groups.into_iter().zip(this_i.iter().copied()).flat_map(|(g,i)| { let (l,u) = values.bounds.bounds(i); (l .. u).map(move |i| (g, i)) }).unzip();
+                    let mut others = if that_cursor < that_values.len() { vec![&mut groups, &mut that_j] } else { vec![&mut groups] };
+                    expand(&mut this_i, values, &mut others);
                     sort_terms(values, &mut groups, &this_i, last)
                 }
                 else if column < this.len() + arity {
@@ -408,8 +408,8 @@ pub mod terms {
                     that_cursor += 1;
 
                     // Expand `that_j`, and corresponding repetitions in `groups` and `this_i`.
-                    if this_cursor < this_values.len() { this_i = this_i.iter().zip(that_j.iter()).flat_map(|(i,j)| { let (l,u) = values.bounds.bounds(*j); (l .. u).map(move |_| *i) }).collect(); }
-                    (groups, that_j) = groups.into_iter().zip(that_j.iter().copied()).flat_map(|(g,j)| { let (l,u) = values.bounds.bounds(j); (l .. u).map(move |j| (g, j)) }).unzip();
+                    let mut others = if this_cursor < this_values.len() { vec![&mut groups, &mut this_i] } else { vec![&mut groups] };
+                    expand(&mut that_j, values, &mut others);
                     sort_terms(values, &mut groups, &that_j, last)
                 };
 
@@ -420,6 +420,37 @@ pub mod terms {
         }
 
         builders
+    }
+
+    /// Expand vectors to track the bounds found in `lists` using indexes in `index`.
+    ///
+    /// The `index` vector has each item expanded in-place to the range found in `bounds`, while the other vectors have their
+    /// indexes repeated a corresponding number of times to match the lengths of these ranges.
+    ///
+    /// In principle the explicit representation of the ranges and repetitions could be avoided, by updating `index` and reporting the range lengths.
+    /// This would avoid resizing any of the vectors, only rewriting `index`, and pushing the work of unpacking any until later when actually needed.
+    #[inline(never)]
+    fn expand<'a>(index: &mut Vec<usize>, lists: <Lists<Terms> as Container>::Borrowed<'a>, others: &mut [&mut Vec<usize>]) {
+
+        // Map out the number of repetitions for each position, and tally the total for pre-allocation.
+        let mut total = 0;
+        let mut counts = Vec::with_capacity(index.len());
+        for i in index.iter_mut() {
+            let (l,u) = lists.bounds.bounds(*i);
+            *i = l;
+            counts.push(u-l);
+            total += u-l;
+        }
+
+        let mut index_new = Vec::with_capacity(total);
+        for (index, count) in index.iter().copied().zip(counts.iter().copied()) { index_new.extend(index .. (index + count)); }
+        *index = index_new;
+
+        for other in others.iter_mut() {
+            let mut other_new = Vec::with_capacity(total);
+            for (other, count) in other.iter().copied().zip(counts.iter().copied()) { other_new.extend(std::iter::repeat(other).take(count)); }
+            **other = other_new;
+        }
     }
 
     impl FactContainer for Forest<Terms> {
