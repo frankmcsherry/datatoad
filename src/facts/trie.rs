@@ -313,7 +313,7 @@ pub mod terms {
         let mut aligned = std::collections::VecDeque::default();
         aligned.push_back((0, 0));
         for (index, (layer0, layer1)) in this[..arity].iter().zip(that[..arity].iter()).enumerate() {
-            crate::facts::trie::layers::intersection::<Terms>(*layer0, *layer1, &mut [aligned.len()], &mut aligned);
+            crate::facts::trie::layers::intersection::<Terms>(*layer0, *layer1, &mut aligned);
             // If we need to retain the column, then record the aligned indexes in the `this` layer.
             both_need.get_mut(&index).map(|a| a.extend(aligned.iter().map(|(i,_)| *i)));
         }
@@ -519,7 +519,7 @@ pub mod terms {
             for other in others.iter() {
                 reports.push_back((0, 0));
                 for (layer0, layer1) in self.layers.iter().zip(other.layers.iter()) {
-                    layer0.intersection(layer1, &mut [reports.len()], &mut reports);
+                    layer0.intersection(layer1, &mut reports);
                 }
                 // Mark shared paths appropriately.
                 for (index,_) in reports.drain(..) {
@@ -596,17 +596,17 @@ pub mod layers {
             Layer { list }
         }
         /// Intersects two layers, aligned through `aligns`.
-        pub fn intersection(&self, other: &Self, counts: &mut [usize], aligns: &mut VecDeque<(usize, usize)>) {
+        pub fn intersection(&self, other: &Self, aligns: &mut VecDeque<(usize, usize)>) {
             // Borrow the layers for read-only access.
             let lists0 = self.borrow();
             let lists1 = other.borrow();
             // Update `aligns` for the next layer, or output.
             match (upgrade_hint(lists0), upgrade_hint(lists1)) {
-                (Some(1), Some(1)) => { intersection::<Vec<[u8; 1]>>(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), counts, aligns); }
-                (Some(2), Some(2)) => { intersection::<Vec<[u8; 2]>>(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), counts, aligns); }
-                (Some(3), Some(3)) => { intersection::<Vec<[u8; 3]>>(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), counts, aligns); }
-                (Some(4), Some(4)) => { intersection::<Vec<[u8; 4]>>(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), counts, aligns); }
-                _ => { intersection::<Terms>(lists0, lists1, counts, aligns); }
+                (Some(1), Some(1)) => { intersection::<Vec<[u8; 1]>>(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), aligns); }
+                (Some(2), Some(2)) => { intersection::<Vec<[u8; 2]>>(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), aligns); }
+                (Some(3), Some(3)) => { intersection::<Vec<[u8; 3]>>(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), aligns); }
+                (Some(4), Some(4)) => { intersection::<Vec<[u8; 4]>>(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), aligns); }
+                _ => { intersection::<Terms>(lists0, lists1, aligns); }
             };
         }
         /// Retains lists indicated by `retain`, which is refilled.
@@ -728,44 +728,36 @@ pub mod layers {
     pub fn intersection<'a, C: Container<Ref<'a>: Ord>>(
         list0: <Lists<C> as Container>::Borrowed<'a>,
         list1: <Lists<C> as Container>::Borrowed<'a>,
-        counts: &mut [usize],
         aligns: &mut VecDeque<(usize, usize)>,
     ) {
-        assert_eq!(counts.iter().sum::<usize>(), aligns.len());
-        for count in counts.iter_mut() {
+        for _ in 0 .. aligns.len() {
 
-            let aligns_len = aligns.len();
-            for _ in 0 .. *count {
+            let (index0, index1) = aligns.pop_front().unwrap();
 
-                let (index0, index1) = aligns.pop_front().unwrap();
+            // Fetch the bounds from the layers.
+            let (mut lower0, upper0) = list0.bounds.bounds(index0);
+            let (mut lower1, upper1) = list1.bounds.bounds(index1);
 
-                // Fetch the bounds from the layers.
-                let (mut lower0, upper0) = list0.bounds.bounds(index0);
-                let (mut lower1, upper1) = list1.bounds.bounds(index1);
-
-                // Scour the intersecting range for matches.
-                while lower0 < upper0 && lower1 < upper1 {
-                    let val0 = list0.values.get(lower0);
-                    let val1 = list1.values.get(lower1);
-                    match val0.cmp(&val1) {
-                        std::cmp::Ordering::Less => {
-                            lower0 += 1;
-                            crate::facts::gallop(list0.values, &mut lower0, upper0, |x| x < val1);
-                        },
-                        std::cmp::Ordering::Equal => {
-                            aligns.push_back((lower0, lower1));
-                            lower0 += 1;
-                            lower1 += 1;
-                        },
-                        std::cmp::Ordering::Greater => {
-                            lower1 += 1;
-                            crate::facts::gallop(list1.values, &mut lower1, upper1, |x| x < val0);
-                        },
-                    }
+            // Scour the intersecting range for matches.
+            while lower0 < upper0 && lower1 < upper1 {
+                let val0 = list0.values.get(lower0);
+                let val1 = list1.values.get(lower1);
+                match val0.cmp(&val1) {
+                    std::cmp::Ordering::Less => {
+                        lower0 += 1;
+                        crate::facts::gallop(list0.values, &mut lower0, upper0, |x| x < val1);
+                    },
+                    std::cmp::Ordering::Equal => {
+                        aligns.push_back((lower0, lower1));
+                        lower0 += 1;
+                        lower1 += 1;
+                    },
+                    std::cmp::Ordering::Greater => {
+                        lower1 += 1;
+                        crate::facts::gallop(list1.values, &mut lower1, upper1, |x| x < val0);
+                    },
                 }
             }
-            // New count is the number we've added, equal to what we have now, minus what we could have with no additions.
-            *count = aligns.len() - (aligns_len - *count);
         }
     }
 
