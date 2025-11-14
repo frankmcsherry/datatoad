@@ -293,6 +293,8 @@ pub mod terms {
         projections: &[&[usize]],
     ) -> Vec<FactLSM<Forest<Terms>>> {
 
+        use std::rc::Rc;
+
         if projections.is_empty() { return Vec::default(); }
         if this.len() < arity || that.len() < arity { return Vec::default(); }
 
@@ -302,20 +304,20 @@ pub mod terms {
 
         // Introduce empty lists for prefix columns we must retain.
         use std::collections::BTreeMap;
-        let mut both_need: BTreeMap<usize, Vec<usize>> = Default::default();
+        let mut both_need: BTreeMap<usize, Rc<Vec<usize>>> = Default::default();
         for column in projections.iter().flat_map(|x| x.iter()).copied() {
-            if column < arity { both_need.insert(column, Vec::default()); }
-            else if column >= this.len() && column < this.len() + arity { both_need.insert(column - this.len(), Vec::default()); }
+            if column < arity { both_need.insert(column, Default::default()); }
+            else if column >= this.len() && column < this.len() + arity { both_need.insert(column - this.len(), Default::default()); }
         }
 
         // Determine the alignments of shared prefixes.
         // `aligned` will contain all pairs of matching path prefixes, from `this` and `that`.
-        let mut aligned = std::collections::VecDeque::default();
-        aligned.push_back((0, 0));
+        let mut aligned = (Rc::new(vec![0]), Rc::new(vec![0]));
         for (index, (layer0, layer1)) in this[..arity].iter().zip(that[..arity].iter()).enumerate() {
-            crate::facts::trie::layers::intersection::<Terms>(*layer0, *layer1, &mut [aligned.len()], &mut aligned);
+            let results = crate::facts::trie::layers::intersection::<Terms>(*layer0, *layer1, &aligned.0, &aligned.1);
+            aligned = (Rc::new(results.0), Rc::new(results.1));
             // If we need to retain the column, then record the aligned indexes in the `this` layer.
-            both_need.get_mut(&index).map(|a| a.extend(aligned.iter().map(|(i,_)| *i)));
+            both_need.get_mut(&index).map(|a| *a = aligned.0.clone());
         }
 
         // Handle each projection independently.
@@ -324,18 +326,19 @@ pub mod terms {
             // Introduce columns one-by-one.
             let mut layers = Vec::with_capacity(projection.len());
             // Pairs of lists of list indexes in `this` and `that` that need to be joined, in this order.
-            let (mut this_i, mut that_j): (Vec<_>, Vec<_>) = aligned.iter().copied().unzip();
+            let (mut this_i, mut that_j): (Rc<Vec<_>>, Rc<Vec<_>>) = aligned.clone();
             // Ordering and grouping information for corresponding pairs of `this_i` and `that_j`.
-            let mut groups = std::iter::repeat(0).take(aligned.len()).collect::<Vec<_>>();
+            let mut groups = std::iter::repeat(0).take(aligned.0.len()).collect::<Vec<_>>();
 
             // Orient `this[arity..]` and `that[arity..]` to match the order introduced in `projection`.
             let mut this_values = None;
             let mut this_order = Vec::default();
             for col in projection.iter().copied() { if arity <= col && col < this.len() && !this_order.contains(&(col - arity)) { this_order.push(col - arity); } }
             if this_order != (0 .. this_order.len()).collect::<Vec<_>>() {
-                let groups = aligned.iter().map(|(i,_)| *i).enumerate().collect::<Vec<_>>();
+                let groups = aligned.0.iter().copied().enumerate().collect::<Vec<_>>();
                 let layers = permute_subset(&this[arity..], &this_order[..], &groups[..]);
                 this_values = Some(Forest { layers });
+                let this_i = Rc::make_mut(&mut this_i);
                 for i in 0 .. this_i.len() { this_i[i] = i; }
             }
 
@@ -343,9 +346,10 @@ pub mod terms {
             let mut that_order = Vec::default();
             for col in projection.iter().copied() { if this.len() + arity <= col && !that_order.contains(&(col - arity - this.len())) { that_order.push(col - arity - this.len()); } }
             if that_order != (0 .. that_order.len()).collect::<Vec<_>>() {
-                let groups = aligned.iter().map(|(_,j)| *j).enumerate().collect::<Vec<_>>();
+                let groups = aligned.1.iter().copied().enumerate().collect::<Vec<_>>();
                 let layers = permute_subset(&that[arity..], &that_order[..], &groups[..]);
                 that_values = Some(Forest { layers });
+                let that_j = Rc::make_mut(&mut that_j);
                 for j in 0 .. that_j.len() { that_j[j] = j; }
             }
 
@@ -366,9 +370,9 @@ pub mod terms {
                     // Flow the column bounds forward to `aligned`, then count.
 
                     // First, let's determine the counts for each of `this` and `that` at `aligned`.
-                    let mut this_bounds = aligned.iter().map(|(i,_)| (*i,*i+1)).collect::<Vec<_>>();
+                    let mut this_bounds = aligned.0.iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
                     crate::facts::trie::advance_bounds::<Terms>(&this_values[0 .. this_cursor], &mut this_bounds[..]);
-                    let mut that_bounds = aligned.iter().map(|(_,j)| (*j,*j+1)).collect::<Vec<_>>();
+                    let mut that_bounds = aligned.1.iter().map(|j| (*j,*j+1)).collect::<Vec<_>>();
                     crate::facts::trie::advance_bounds::<Terms>(&that_values[0 .. that_cursor], &mut that_bounds[..]);
 
                     // Now let's project forward from `both_need[column]`.
@@ -376,7 +380,7 @@ pub mod terms {
                     crate::facts::trie::advance_bounds::<Terms>(&this[column+1 .. arity], &mut bounds);
 
                     let mut products = this_bounds.iter().zip(that_bounds.iter()).map(|((l0,u0), (l1,u1))| (u0-l0)*(u1-l1))
-                                                     .zip(aligned.iter().map(|(i,_)| *i)).peekable();
+                                                     .zip(aligned.0.iter().copied()).peekable();
 
                     let counts = bounds.iter().map(|(l,u)| {
                         let mut count = 0;
@@ -395,8 +399,8 @@ pub mod terms {
                     this_cursor += 1;
 
                     // Expand `this_i`, and corresponding repetitions in `groups` and `that_j`.
-                    let mut others = if that_cursor < that_values.len() { vec![&mut groups, &mut that_j] } else { vec![&mut groups] };
-                    expand(&mut this_i, values, &mut others);
+                    let mut others = if that_cursor < that_values.len() { vec![&mut groups, Rc::make_mut(&mut that_j)] } else { vec![&mut groups] };
+                    expand(Rc::make_mut(&mut this_i), values, &mut others);
                     sort_terms(values, &mut groups, &this_i, last)
                 }
                 else if column < this.len() + arity {
@@ -408,8 +412,8 @@ pub mod terms {
                     that_cursor += 1;
 
                     // Expand `that_j`, and corresponding repetitions in `groups` and `this_i`.
-                    let mut others = if this_cursor < this_values.len() { vec![&mut groups, &mut this_i] } else { vec![&mut groups] };
-                    expand(&mut that_j, values, &mut others);
+                    let mut others = if this_cursor < this_values.len() { vec![&mut groups, Rc::make_mut(&mut this_i)] } else { vec![&mut groups] };
+                    expand(Rc::make_mut(&mut that_j), values, &mut others);
                     sort_terms(values, &mut groups, &that_j, last)
                 };
 
@@ -515,14 +519,13 @@ pub mod terms {
 
             // First, collect reports to determine paths to retain to `self`.
             let mut include = std::iter::repeat(!semi).take(self.layers[other_arity-1].list.values.len()).collect::<VecDeque<_>>();
-            let mut reports = VecDeque::default();
             for other in others.iter() {
-                reports.push_back((0, 0));
+                let mut reports = (vec![0], vec![0]);
                 for (layer0, layer1) in self.layers.iter().zip(other.layers.iter()) {
-                    layer0.intersection(layer1, &mut [reports.len()], &mut reports);
+                    reports = layer0.intersection(layer1, &reports.0, &reports.1);
                 }
                 // Mark shared paths appropriately.
-                for (index,_) in reports.drain(..) {
+                for index in reports.0.iter().copied() {
                     include[index] = semi;
                 }
             }
@@ -596,18 +599,18 @@ pub mod layers {
             Layer { list }
         }
         /// Intersects two layers, aligned through `aligns`.
-        pub fn intersection(&self, other: &Self, counts: &mut [usize], aligns: &mut VecDeque<(usize, usize)>) {
+        pub fn intersection(&self, other: &Self, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) {
             // Borrow the layers for read-only access.
             let lists0 = self.borrow();
             let lists1 = other.borrow();
             // Update `aligns` for the next layer, or output.
             match (upgrade_hint(lists0), upgrade_hint(lists1)) {
-                (Some(1), Some(1)) => { intersection::<Vec<[u8; 1]>>(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), counts, aligns); }
-                (Some(2), Some(2)) => { intersection::<Vec<[u8; 2]>>(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), counts, aligns); }
-                (Some(3), Some(3)) => { intersection::<Vec<[u8; 3]>>(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), counts, aligns); }
-                (Some(4), Some(4)) => { intersection::<Vec<[u8; 4]>>(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), counts, aligns); }
-                _ => { intersection::<Terms>(lists0, lists1, counts, aligns); }
-            };
+                (Some(1), Some(1)) => { intersection::<Vec<[u8; 1]>>(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), both0, both1) }
+                (Some(2), Some(2)) => { intersection::<Vec<[u8; 2]>>(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), both0, both1) }
+                (Some(3), Some(3)) => { intersection::<Vec<[u8; 3]>>(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), both0, both1) }
+                (Some(4), Some(4)) => { intersection::<Vec<[u8; 4]>>(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), both0, both1) }
+                _ => { intersection::<Terms>(lists0, lists1, both0, both1) }
+            }
         }
         /// Retains lists indicated by `retain`, which is refilled.
         pub fn retain_lists(&mut self, retain: &mut VecDeque<bool>) {
@@ -728,45 +731,45 @@ pub mod layers {
     pub fn intersection<'a, C: Container<Ref<'a>: Ord>>(
         list0: <Lists<C> as Container>::Borrowed<'a>,
         list1: <Lists<C> as Container>::Borrowed<'a>,
-        counts: &mut [usize],
-        aligns: &mut VecDeque<(usize, usize)>,
-    ) {
-        assert_eq!(counts.iter().sum::<usize>(), aligns.len());
-        for count in counts.iter_mut() {
+        both0: &[usize],
+        both1: &[usize],
+    ) -> (Vec<usize>, Vec<usize>) {
 
-            let aligns_len = aligns.len();
-            for _ in 0 .. *count {
+        assert_eq!(both0.len(), both1.len());
 
-                let (index0, index1) = aligns.pop_front().unwrap();
+        let mut match0 = Vec::new();
+        let mut match1 = Vec::new();
 
-                // Fetch the bounds from the layers.
-                let (mut lower0, upper0) = list0.bounds.bounds(index0);
-                let (mut lower1, upper1) = list1.bounds.bounds(index1);
+        for (index0, index1) in both0.iter().copied().zip(both1.iter().copied()) {
 
-                // Scour the intersecting range for matches.
-                while lower0 < upper0 && lower1 < upper1 {
-                    let val0 = list0.values.get(lower0);
-                    let val1 = list1.values.get(lower1);
-                    match val0.cmp(&val1) {
-                        std::cmp::Ordering::Less => {
-                            lower0 += 1;
-                            crate::facts::gallop(list0.values, &mut lower0, upper0, |x| x < val1);
-                        },
-                        std::cmp::Ordering::Equal => {
-                            aligns.push_back((lower0, lower1));
-                            lower0 += 1;
-                            lower1 += 1;
-                        },
-                        std::cmp::Ordering::Greater => {
-                            lower1 += 1;
-                            crate::facts::gallop(list1.values, &mut lower1, upper1, |x| x < val0);
-                        },
-                    }
+            // Fetch the bounds from the layers.
+            let (mut lower0, upper0) = list0.bounds.bounds(index0);
+            let (mut lower1, upper1) = list1.bounds.bounds(index1);
+
+            // Scour the intersecting range for matches.
+            while lower0 < upper0 && lower1 < upper1 {
+                let val0 = list0.values.get(lower0);
+                let val1 = list1.values.get(lower1);
+                match val0.cmp(&val1) {
+                    std::cmp::Ordering::Less => {
+                        lower0 += 1;
+                        crate::facts::gallop(list0.values, &mut lower0, upper0, |x| x < val1);
+                    },
+                    std::cmp::Ordering::Equal => {
+                        match0.push(lower0);
+                        match1.push(lower1);
+                        lower0 += 1;
+                        lower1 += 1;
+                    },
+                    std::cmp::Ordering::Greater => {
+                        lower1 += 1;
+                        crate::facts::gallop(list1.values, &mut lower1, upper1, |x| x < val0);
+                    },
                 }
             }
-            // New count is the number we've added, equal to what we have now, minus what we could have with no additions.
-            *count = aligns.len() - (aligns_len - *count);
         }
+
+        (match0, match1)
     }
 
     // TODO: This method needs to be at most ~linear in the number of items that will be written out.
