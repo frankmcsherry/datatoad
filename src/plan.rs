@@ -44,7 +44,7 @@ fn implement_action(head: &[Atom], body: &Atom, stable: bool, facts: &mut Relati
 /// The complicated implementation case where these is at least one join.
 fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relations) {
 
-    let (plans, loads) = plan::plan_rule::<plan::ByAtom>(head, body);
+    let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body);
 
     let plan_atoms = if stable { 1 } else { body.len() };
 
@@ -102,46 +102,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
                 join_delta(&mut delta_lsm, &mut delta_terms, other, other_terms, load_atom > &plan_atom, order);
             }
             // Multi-atom stages call for different logic.
-            else {
-
-                // // We may have terms that are not needed for the term extensions,
-                // // in which case we should know, and perhaps project them away.
-                // for term in delta_terms.iter().filter(|t| atoms.iter().all(|a| loads[&(plan_atom, *a)].1.contains(t))) {
-                //     println!("Non-anchor term: {:?} (could project away for the moment)", term);
-                // }
-
-                // For each atom, we'll need to permute `delta` to start with their terms.
-                // Then we'll want to join, and capture the number of extensions, somehow.
-                // Then we'll need to update any recorded numbers, recording smaller counts
-                // and indexes where appropriate.
-                // We could, naively, just start with a new column that is the count of extensions,
-                // and just join using it, and then apply an action to the last two layers.
-                // It's more of a semijoin, and using the general join logic would be more
-                // expensive than we really need.
-
-                // Our plan is to identify an extending atom for each delta fact,
-                // then propose extensions for each fact from their identified atom,
-                // then semijoin with other atoms (perhaps union and semijoin all).
-
-                // Informally, we'll identify a set of columns as the "active" columns,
-                // which contain all pre-active terms in the listed atoms. We'll then
-                // develop a list of `(count, index)` for each fact among these columns.
-                // Each will likely require appending the list as a layer, then permuting.
-                // Permuted, we are able to semijoin/align and read out the counts for
-                // each other layer, and then update the list to track the index with
-                // the smallest count.
-                //
-                // Having done this, we'd then like to perform multiple restrictions
-                // to the facts by their identified index, so that they can join with
-                // the atoms themselves to propose extensions.
-                //
-                // Finally, we could/should semijoin with the atoms, to provide the
-                // full information about the terms the atoms can provide. We can defer
-                // this, but we do need to perform the operation at some point (e.g.
-                // later, if we revisit the atom)
-
-                unimplemented!("Multi-atom join stages not yet implemented");
-            }
+            else { unimplemented!("Multi-atom join stages not yet implemented"); }
         }
 
         // Stage 3: We now need to form up the facts to commit back to `facts`.
@@ -432,6 +393,6 @@ fn join_delta<F: FactContainer, T: Ord + Copy + std::fmt::Debug>(
     }).collect::<Vec<_>>();
 
     let flattened = delta.flatten().unwrap_or_default();
-    delta.extend(&mut flattened.join_many(other.stable.contents().chain(to_chain), join_arity, &[&projection]).pop().unwrap());
+    delta.extend(&mut flattened.join_many(other.stable.contents().chain(to_chain), join_arity, &projection));
     *delta_terms = yield_order.to_vec();
 }

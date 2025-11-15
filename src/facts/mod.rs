@@ -160,7 +160,7 @@ pub trait FactContainer : Length + Merge + Default + Sized + Clone {
     /// Applies an action to the facts, building the corresponding output.
     fn act_on(&self, action: &Action<String>) -> FactLSM<Self>;
     /// Joins `self` and `other` on the first `arity` columns, putting projected results in `builders`.
-    fn join<'a>(&'a self, other: &'a Self, arity: usize, projections: &[&[usize]]) -> Vec<FactLSM<Self>>;
+    fn join<'a>(&'a self, other: &'a Self, arity: usize, projection: &[usize]) -> FactLSM<Self>;
     /// The subset of `self` whose facts do not start with any prefix in `others`.
     fn antijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a { unimplemented!() }
     /// The subset of `self` whose facts start with some prefix in `others`.
@@ -169,15 +169,12 @@ pub trait FactContainer : Length + Merge + Default + Sized + Clone {
     /// Joins `self` and `others` on the first `arity` columns, putting projected results in `builders`.
     ///
     /// The default implementation processes `others` in order, but more thoughtful implementations exist.
-    fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projections: &[&[usize]]) -> Vec<FactLSM<Self>> {
-        let mut results = (0 .. projections.len()).map(|_| FactLSM::default()).collect::<Vec<_>>();
+    fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize]) -> FactLSM<Self> {
+        let mut result = FactLSM::default();
         for other in others {
-            let builts = self.join(other, arity, projections);
-            for (result, mut built) in results.iter_mut().zip(builts) {
-                result.extend(&mut built);
-            }
+            result.extend(&mut self.join(other, arity, projection));
         }
-        results
+        result
     }
 }
 
