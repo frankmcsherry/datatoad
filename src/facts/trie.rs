@@ -183,8 +183,9 @@ pub mod terms {
         /// Produces columns in the order indicated by `projection`. Each column should appear at most once.
         #[inline(never)]
         fn permute(&self, projection: &[usize]) -> Self {
-            let groups = (0 .. self.layers[0].list.len()).map(|i| (0, i)).collect::<Vec<_>>();
-            Self { layers: permute_subset(&self.borrow()[..], projection, &groups[..]) }
+            let groups = std::iter::repeat(0).take(self.layers[0].list.len()).collect::<Vec<_>>();
+            let indexs = (0 .. self.layers[0].list.len()).collect::<Vec<_>>();
+            Self { layers: permute_subset(&self.borrow()[..], projection, &groups, &indexs) }
         }
         /// Introduces repeated and literal columns.
         ///
@@ -228,12 +229,12 @@ pub mod terms {
     /// constrain the permutation to distinguish lists with different groups, merge lists with equal groups,
     /// and discard lists that are not referenced at all.
     #[inline(never)]
-    fn permute_subset(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], in_groups: &[(usize, usize)]) -> Vec<Layer<Terms>> {
+    fn permute_subset(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], groups: &[usize], indexs: &[usize]) -> Vec<Layer<Terms>> {
 
         use crate::facts::trie::advance_item_bounds;
 
         let mut layers: Vec<Layer<Terms>> = Vec::with_capacity(projection.len());
-        let in_bounds = in_groups.iter().copied().map(|(_g,i)| in_layers[0].bounds.bounds(i)).collect::<Vec<_>>();
+        let in_bounds = indexs.iter().copied().map(|i| in_layers[0].bounds.bounds(i)).collect::<Vec<_>>();
 
         let mut columns = projection.iter().copied().peekable();
         if let Some(col) = columns.next() {
@@ -243,7 +244,7 @@ pub mod terms {
             let mut maxima = col;
             let mut bounds = in_bounds.clone();
             advance_item_bounds::<Terms>(in_layers, &mut bounds[..], 0, col);
-            let (mut groups, mut indexs): (Vec<_>, Vec<_>) = in_groups.iter().copied().zip(bounds.iter().copied()).flat_map(|((g,_i),(l,u))| (l..u).map(move |i| (g,i))).unzip();
+            let (mut groups, mut indexs): (Vec<_>, Vec<_>) = groups.iter().copied().zip(bounds.iter().copied()).flat_map(|(g,(l,u))| (l..u).map(move |i| (g,i))).unzip();
             layers.push(Layer { list: crate::facts::trie::layers::sort_terms(in_layers[col], &mut groups, &indexs, last) });
 
             while let Some(col) = columns.next() {
@@ -287,9 +288,9 @@ pub mod terms {
     ///
     /// Each projection should contain each column at most once. Repeated columns can be introduced afterwards,
     /// for example by the `Forest::embellish` method.
-    fn join_cols<'a>(
-        this: &[<Lists<Terms> as Container>::Borrowed<'a>],
-        that: &[<Lists<Terms> as Container>::Borrowed<'a>],
+    fn join_cols(
+        this: &[<Lists<Terms> as Container>::Borrowed<'_>],
+        that: &[<Lists<Terms> as Container>::Borrowed<'_>],
         arity: usize,
         projection: &[usize],
     ) -> FactLSM<Forest<Terms>> {
@@ -297,22 +298,13 @@ pub mod terms {
         if this.len() < arity || that.len() < arity { return Default::default(); }
         if this.last().is_some_and(|l| l.is_empty()) || that.last().is_some_and(|l| l.is_empty()) { return Default::default(); }
 
-        // Introduce empty lists for prefix columns we must retain.
-        use std::collections::BTreeMap;
-        let mut both_need: BTreeMap<usize, Rc<Vec<usize>>> = Default::default();
-        for column in projection.iter().copied() {
-            if column < arity { both_need.insert(column, Default::default()); }
-            else if column >= this.len() && column < this.len() + arity { both_need.insert(column - this.len(), Default::default()); }
-        }
-
         // Determine the alignments of shared prefixes.
-        // `aligned` will contain all pairs of matching path prefixes, from `this` and `that`.
         let mut aligned = (Rc::new(vec![0]), Rc::new(vec![0]));
-        for (index, (layer0, layer1)) in this[..arity].iter().zip(that[..arity].iter()).enumerate() {
+        let mut aligneds = Vec::with_capacity(arity);
+        for (layer0, layer1) in this[..arity].iter().zip(that[..arity].iter()) {
             let results = crate::facts::trie::layers::intersection::<Terms>(*layer0, *layer1, &aligned.0, &aligned.1);
             aligned = (Rc::new(results.0), Rc::new(results.1));
-            // If we need to retain the column, then record the aligned indexes in the `this` layer.
-            both_need.get_mut(&index).map(|a| *a = aligned.0.clone());
+            aligneds.push(aligned.0.clone());
         }
 
         // Introduce columns one-by-one.
@@ -327,8 +319,8 @@ pub mod terms {
         let mut this_order = Vec::default();
         for col in projection.iter().copied() { if arity <= col && col < this.len() && !this_order.contains(&(col - arity)) { this_order.push(col - arity); } }
         if this_order != (0 .. this_order.len()).collect::<Vec<_>>() {
-            let groups = aligned.0.iter().copied().enumerate().collect::<Vec<_>>();
-            let layers = permute_subset(&this[arity..], &this_order[..], &groups[..]);
+            let groups = (0 .. aligned.0.len()).collect::<Vec<_>>();
+            let layers = permute_subset(&this[arity..], &this_order[..], &groups, &aligned.0[..]);
             this_values = Some(Forest { layers });
             let this_i = Rc::make_mut(&mut this_i);
             for i in 0 .. this_i.len() { this_i[i] = i; }
@@ -338,8 +330,8 @@ pub mod terms {
         let mut that_order = Vec::default();
         for col in projection.iter().copied() { if this.len() + arity <= col && !that_order.contains(&(col - arity - this.len())) { that_order.push(col - arity - this.len()); } }
         if that_order != (0 .. that_order.len()).collect::<Vec<_>>() {
-            let groups = aligned.1.iter().copied().enumerate().collect::<Vec<_>>();
-            let layers = permute_subset(&that[arity..], &that_order[..], &groups[..]);
+            let groups = (0 .. aligned.1.len()).collect::<Vec<_>>();
+            let layers = permute_subset(&that[arity..], &that_order[..], &groups, &aligned.1[..]);
             that_values = Some(Forest { layers });
             let that_j = Rc::make_mut(&mut that_j);
             for j in 0 .. that_j.len() { that_j[j] = j; }
@@ -368,7 +360,7 @@ pub mod terms {
                 crate::facts::trie::advance_bounds::<Terms>(&that_values[0 .. that_cursor], &mut that_bounds[..]);
 
                 // Now let's project forward from `both_need[column]`.
-                let mut bounds = both_need[&column].iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
+                let mut bounds = aligneds[column].iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
                 crate::facts::trie::advance_bounds::<Terms>(&this[column+1 .. arity], &mut bounds);
 
                 let mut products = this_bounds.iter().zip(that_bounds.iter()).map(|((l0,u0), (l1,u1))| (u0-l0)*(u1-l1))
@@ -382,7 +374,8 @@ pub mod terms {
                 });
 
                 // Flatten the (index, count) into repetitions.
-                let flat = both_need[&column].iter().zip(counts).flat_map(|(i,c)| std::iter::repeat(*i).take(c)).collect::<Vec<_>>();
+                let mut flat = Vec::with_capacity(groups.len());
+                flat.extend(aligneds[column].iter().zip(counts).flat_map(|(i,c)| std::iter::repeat(*i).take(c)));
                 sort_terms(this[column], &mut groups, &flat, last)
             }
             else if column < this.len() {
@@ -413,6 +406,44 @@ pub mod terms {
         }
 
         Forest { layers }.into()
+    }
+
+    /// For a list of tries with the same shape, extract lists at `[index]` and merge by `[group]`, yielding one sequence of layers in `projection` order.
+    ///
+    /// The first layer of the result should have as many lists as there are distinct values of `group`, with the implied correspondence.
+    fn restrict_project_merge<'a>(
+        layers: &[&[<Lists<Terms> as Container>::Borrowed<'a>]],
+        groups: &[&[usize]],
+        indexs: &[&[usize]],
+        projection: &[usize],
+    ) -> Vec<Layer<Terms>> {
+
+        assert!(!layers.is_empty());
+        assert_eq!(layers.len(), groups.len());
+        assert_eq!(layers.len(), indexs.len());
+
+        if layers.len() == 1 {
+            permute_subset(&layers[0][..], &projection[..], &groups[0], &indexs[0])
+        }
+        else {
+            let mut extracted = FactLSM::default();
+            for index in 0 .. layers.len() {
+
+                let mut layers = permute_subset(&layers[index][..], &projection[..], &groups[index], &indexs[index]);
+                let mut base: Layer<Terms> = Default::default();
+                use columnar::Push;
+                // TODO: rework layers to allow this to be something akin to `&groups[index]` without the copy.
+                base.list.values.extend(groups[index].iter().map(|g| (*g as u32).to_be_bytes()));
+                base.list.bounds.push(groups[index].len() as u64);
+                layers.insert(0, base);
+                extracted.layers.push(Forest { layers });
+
+            }
+
+            let mut merged = extracted.flatten().unwrap().layers;
+            merged.remove(0);
+            merged
+        }
     }
 
     /// Expand vectors to track the bounds found in `lists` using indexes in `index`.
