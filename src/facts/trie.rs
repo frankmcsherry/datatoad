@@ -183,9 +183,8 @@ pub mod terms {
         /// Produces columns in the order indicated by `projection`. Each column should appear at most once.
         #[inline(never)]
         fn permute(&self, projection: &[usize]) -> Self {
-            let groups = std::iter::repeat(0).take(self.layers[0].list.len()).collect::<Vec<_>>();
             let indexs = (0 .. self.layers[0].list.len()).collect::<Vec<_>>();
-            Self { layers: permute_subset(&self.borrow()[..], projection, &groups, &indexs) }
+            Self { layers: permute_subset(&self.borrow()[..], projection, &indexs) }
         }
         /// Introduces repeated and literal columns.
         ///
@@ -229,7 +228,7 @@ pub mod terms {
     /// constrain the permutation to distinguish lists with different groups, merge lists with equal groups,
     /// and discard lists that are not referenced at all.
     #[inline(never)]
-    fn permute_subset(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], groups: &[usize], indexs: &[usize]) -> Vec<Layer<Terms>> {
+    fn permute_subset(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Layer<Terms>> {
 
         use crate::facts::trie::advance_item_bounds;
 
@@ -244,7 +243,7 @@ pub mod terms {
             let mut maxima = col;
             let mut bounds = in_bounds.clone();
             advance_item_bounds::<Terms>(in_layers, &mut bounds[..], 0, col);
-            let (mut groups, mut indexs): (Vec<_>, Vec<_>) = groups.iter().copied().zip(bounds.iter().copied()).flat_map(|(g,(l,u))| (l..u).map(move |i| (g,i))).unzip();
+            let (mut groups, mut indexs): (Vec<_>, Vec<_>) = bounds.iter().copied().enumerate().flat_map(|(g,(l,u))| (l..u).map(move |i| (g,i))).unzip();
             layers.push(Layer { list: crate::facts::trie::layers::sort_terms(in_layers[col], &mut groups, &indexs, last) });
 
             while let Some(col) = columns.next() {
@@ -319,8 +318,7 @@ pub mod terms {
         let mut this_order = Vec::default();
         for col in projection.iter().copied() { if arity <= col && col < this.len() && !this_order.contains(&(col - arity)) { this_order.push(col - arity); } }
         if this_order != (0 .. this_order.len()).collect::<Vec<_>>() {
-            let groups = (0 .. aligned.0.len()).collect::<Vec<_>>();
-            let layers = permute_subset(&this[arity..], &this_order[..], &groups, &aligned.0[..]);
+            let layers = permute_subset(&this[arity..], &this_order[..], &aligned.0[..]);
             this_values = Some(Forest { layers });
             let this_i = Rc::make_mut(&mut this_i);
             for i in 0 .. this_i.len() { this_i[i] = i; }
@@ -330,8 +328,7 @@ pub mod terms {
         let mut that_order = Vec::default();
         for col in projection.iter().copied() { if this.len() + arity <= col && !that_order.contains(&(col - arity - this.len())) { that_order.push(col - arity - this.len()); } }
         if that_order != (0 .. that_order.len()).collect::<Vec<_>>() {
-            let groups = (0 .. aligned.1.len()).collect::<Vec<_>>();
-            let layers = permute_subset(&that[arity..], &that_order[..], &groups, &aligned.1[..]);
+            let layers = permute_subset(&that[arity..], &that_order[..], &aligned.1[..]);
             that_values = Some(Forest { layers });
             let that_j = Rc::make_mut(&mut that_j);
             for j in 0 .. that_j.len() { that_j[j] = j; }
@@ -422,14 +419,12 @@ pub mod terms {
         assert_eq!(layers.len(), groups.len());
         assert_eq!(layers.len(), indexs.len());
 
-        if layers.len() == 1 {
-            permute_subset(&layers[0][..], &projection[..], &groups[0], &indexs[0])
-        }
+        if layers.len() == 1 { permute_subset(&layers[0][..], &projection[..], &indexs[0]) }
         else {
             let mut extracted = FactLSM::default();
             for index in 0 .. layers.len() {
 
-                let mut layers = permute_subset(&layers[index][..], &projection[..], &groups[index], &indexs[index]);
+                let mut layers = permute_subset(&layers[index][..], &projection[..], &indexs[index]);
                 let mut base: Layer<Terms> = Default::default();
                 use columnar::Push;
                 // TODO: rework layers to allow this to be something akin to `&groups[index]` without the copy.
