@@ -44,7 +44,7 @@ fn implement_action(head: &[Atom], body: &Atom, stable: bool, facts: &mut Relati
 /// The complicated implementation case where these is at least one join.
 fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relations) {
 
-    let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body);
+    let (plans, loads) = plan::plan_rule::<plan::ByAtom>(head, body);
 
     let plan_atoms = if stable { 1 } else { body.len() };
 
