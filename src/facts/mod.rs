@@ -160,7 +160,7 @@ pub trait FactContainer : Length + Merge + Default + Sized + Clone {
     /// Applies an action to the facts, building the corresponding output.
     fn act_on(&self, action: &Action<String>) -> FactLSM<Self>;
     /// Joins `self` and `other` on the first `arity` columns, putting projected results in `builders`.
-    fn join<'a>(&'a self, other: &'a Self, arity: usize, projection: &[usize]) -> FactLSM<Self>;
+    fn join<'a>(&'a self, other: &'a Self, arity: usize, projection: &[usize]) -> FactLSM<Self> { self.join_many([other].into_iter(), arity, projection) }
     /// The subset of `self` whose facts do not start with any prefix in `others`.
     fn antijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a { unimplemented!() }
     /// The subset of `self` whose facts start with some prefix in `others`.
@@ -171,9 +171,7 @@ pub trait FactContainer : Length + Merge + Default + Sized + Clone {
     /// The default implementation processes `others` in order, but more thoughtful implementations exist.
     fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize]) -> FactLSM<Self> {
         let mut result = FactLSM::default();
-        for other in others {
-            result.extend(&mut self.join(other, arity, projection));
-        }
+        for other in others { result.extend(&mut self.join(other, arity, projection)); }
         result
     }
 }
