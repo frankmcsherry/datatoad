@@ -36,7 +36,7 @@ impl<C: Container> Forest<C> {
     pub fn len(&self) -> usize { self.layers.last().map(|l| l.list.values.len()).unwrap_or(0) }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 
-    fn borrow<'a>(&'a self) -> Vec<<Lists<C> as Container>::Borrowed<'a>> {
+    pub fn borrow<'a>(&'a self) -> Vec<<Lists<C> as Container>::Borrowed<'a>> {
         self.layers.iter().map(|x| x.list.borrow()).collect::<Vec<_>>()
     }
 
@@ -72,7 +72,7 @@ fn advance_item_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed
 pub struct Layer<C> { pub list: Lists<C> }
 
 impl<C: Container> Layer<C> {
-    fn borrow(&self) -> <Lists<C> as Container>::Borrowed<'_> { self.list.borrow() }
+    pub fn borrow(&self) -> <Lists<C> as Container>::Borrowed<'_> { self.list.borrow() }
 }
 
 /// Implementations for `Forest<Terms>`, for generic byte slices.
@@ -169,13 +169,13 @@ pub mod terms {
             if result.layers.len() > cursor {
                 let mut include = include.clone();
                 for layer in result.layers[cursor..].iter_mut().skip(1) {
-                    layer.retain_lists(&mut include);
+                    *layer = layer.retain_lists(&mut include);
                 }
             }
             // In any case, update prior layers from `other_arity` back to the first.
             for layer in result.layers[..cursor+1].iter_mut().rev() {
                 if include.iter().all(|x| *x) { return result; }  // TODO: make this test cheaper.
-                layer.retain_items(&mut include);
+                *layer = layer.retain_items(&mut include);
             }
 
             result
@@ -582,24 +582,32 @@ pub mod terms {
         ///
         /// All of `others` should have the same number of layers, and no more than `self`.
          #[inline(never)]
-        pub fn retain_join<'a>(mut self, others: impl Iterator<Item = &'a Self>, semi: bool) -> Self {
+        pub fn retain_join<'a>(self, others: impl Iterator<Item = &'a Self>, semi: bool) -> Self {
+            let others = others.map(|o| o.borrow()).collect::<Vec<_>>();
+            self.retain_inner(others.iter().map(|o| &o[..]), semi)
+        }
+
+        #[inline(never)]
+        pub fn retain_inner<'a>(mut self, others: impl Iterator<Item = &'a [<Lists<Terms> as Container>::Borrowed<'a>]>, semi: bool) -> Self {
+
+            if self.is_empty() { return self; }
 
             use std::collections::VecDeque;
 
             let others = others.collect::<Vec<_>>();
             if others.is_empty() { return if semi { Self::default() } else { self }; }
-            let other_arity = others[0].layers.len();
+            let other_arity = others[0].len();
             others.iter().for_each(|other| {
-                assert!(self.layers.len() >= other.layers.len());
-                assert_eq!(other.layers.len(), other_arity);
+                assert!(self.layers.len() >= other.len());
+                assert_eq!(other.len(), other_arity);
             });
 
             // First, collect reports to determine paths to retain to `self`.
             let mut include = std::iter::repeat(!semi).take(self.layers[other_arity-1].list.values.len()).collect::<VecDeque<_>>();
             for other in others.iter() {
                 let mut reports = (vec![0], vec![0]);
-                for (layer0, layer1) in self.layers.iter().zip(other.layers.iter()) {
-                    reports = layer0.intersection(layer1, &reports.0, &reports.1);
+                for (layer0, layer1) in self.layers.iter().zip(other.iter()) {
+                    reports = crate::facts::trie::layers::terms::intersection(layer0.borrow(), *layer1, &reports.0, &reports.1);
                 }
                 // Mark shared paths appropriately.
                 for index in reports.0.iter().copied() {
@@ -614,13 +622,13 @@ pub mod terms {
                 if self.layers.len() > other_arity {
                     let mut include = include.clone();
                     for layer in self.layers[other_arity..].iter_mut() {
-                        layer.retain_lists(&mut include);
+                        *layer = layer.retain_lists(&mut include);
                     }
                 }
                 // In any case, update prior layers from `other_arity` back to the first.
                 for layer in self.layers[..other_arity].iter_mut().rev() {
                     if include.iter().all(|x| *x) { return self; }  // TODO: make this test cheaper.
-                    layer.retain_items(&mut include);
+                    *layer = layer.retain_items(&mut include);
                 }
             }
             self
@@ -663,57 +671,70 @@ pub mod layers {
     /// These sizes are not specifically important, but we do want to support this sort of thing.
     impl Layer<Terms> {
         /// Unions two layers, aligned through `reports`, which is refilled if `next` is set.
-        pub fn union(&self, other: &Self, reports: &mut VecDeque<Report>, next: bool) -> Self {
-            let lists0 = self.borrow();
-            let lists1 = other.borrow();
-            let list = match (upgrade_hint(lists0), upgrade_hint(lists1)) {
-                (Some(1), Some(1)) => { downgrade(union(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), reports, next)) }
-                (Some(2), Some(2)) => { downgrade(union(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), reports, next)) }
-                (Some(3), Some(3)) => { downgrade(union(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), reports, next)) }
-                (Some(4), Some(4)) => { downgrade(union(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), reports, next)) }
-                _ => { union(lists0, lists1, reports, next) }
-            };
-            Layer { list }
-        }
+        pub fn union(&self, other: &Self, reports: &mut VecDeque<Report>, next: bool) -> Self { Self { list: terms::union(self.borrow(), other.borrow(), reports, next) } }
+
         /// Intersects two layers, aligned through `aligns`.
-        pub fn intersection(&self, other: &Self, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) {
-            // Borrow the layers for read-only access.
-            let lists0 = self.borrow();
-            let lists1 = other.borrow();
-            // Update `aligns` for the next layer, or output.
-            match (upgrade_hint(lists0), upgrade_hint(lists1)) {
-                (Some(1), Some(1)) => { intersection::<Vec<[u8; 1]>>(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), both0, both1) }
-                (Some(2), Some(2)) => { intersection::<Vec<[u8; 2]>>(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), both0, both1) }
-                (Some(3), Some(3)) => { intersection::<Vec<[u8; 3]>>(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), both0, both1) }
-                (Some(4), Some(4)) => { intersection::<Vec<[u8; 4]>>(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), both0, both1) }
-                _ => { intersection::<Terms>(lists0, lists1, both0, both1) }
-            }
-        }
+        pub fn intersection(&self, other: &Self, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) { terms::intersection(self.borrow(), other.borrow(), both0, both1) }
+
         /// Retains lists indicated by `retain`, which is refilled.
-        pub fn retain_lists(&mut self, retain: &mut VecDeque<bool>) {
-            let lists = self.borrow();
-            self.list = match upgrade_hint(lists) {
-                Some(1) => { downgrade(retain_lists(upgrade::<1>(lists).unwrap(), retain)) }
-                Some(2) => { downgrade(retain_lists(upgrade::<2>(lists).unwrap(), retain)) }
-                Some(3) => { downgrade(retain_lists(upgrade::<3>(lists).unwrap(), retain)) }
-                Some(4) => { downgrade(retain_lists(upgrade::<4>(lists).unwrap(), retain)) }
-                _______ => { retain_lists(lists, retain) }
-            };
-        }
+        pub fn retain_lists(&self, retain: &mut VecDeque<bool>) -> Self { Self { list: terms::retain_lists(self.borrow(), retain) } }
+
         /// Retains items indicated by `retain`, which is refilled.
-        pub fn retain_items(&mut self, retain: &mut VecDeque<bool>) {
-            let lists = self.borrow();
-            self.list = match upgrade_hint(lists) {
-                Some(1) => { downgrade(retain_items(upgrade::<1>(lists).unwrap(), retain)) }
-                Some(2) => { downgrade(retain_items(upgrade::<2>(lists).unwrap(), retain)) }
-                Some(3) => { downgrade(retain_items(upgrade::<3>(lists).unwrap(), retain)) }
-                Some(4) => { downgrade(retain_items(upgrade::<4>(lists).unwrap(), retain)) }
-                _______ => { retain_items(lists, retain) }
-            };
-        }
+        pub fn retain_items(&self, retain: &mut VecDeque<bool>) -> Self { Self { list: terms::retain_items(self.borrow(), retain) } }
 
         pub fn sort(&self, groups: &mut [usize], indexs: &[usize], last: bool) -> Self {
             Self { list: sort_terms(self.borrow(), groups, indexs, last) }
+        }
+    }
+
+    pub mod terms {
+
+        use std::collections::VecDeque;
+        use columnar::Container;
+        use crate::facts::{Lists, Terms};
+        use crate::facts::trie::layers::Report;
+        use crate::facts::{upgrade_hint, upgrade, downgrade};
+
+        /// Unions two layers, aligned through `reports`, which is refilled if `next` is set.
+        pub fn union(lists0: <Lists<Terms> as Container>::Borrowed<'_>, lists1: <Lists<Terms> as Container>::Borrowed<'_>, reports: &mut VecDeque<Report>, next: bool) -> Lists<Terms> {
+            match (upgrade_hint(lists0), upgrade_hint(lists1)) {
+                (Some(1), Some(1)) => { downgrade(super::union(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), reports, next)) }
+                (Some(2), Some(2)) => { downgrade(super::union(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), reports, next)) }
+                (Some(3), Some(3)) => { downgrade(super::union(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), reports, next)) }
+                (Some(4), Some(4)) => { downgrade(super::union(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), reports, next)) }
+                _ => { super::union(lists0, lists1, reports, next) }
+            }
+        }
+        /// Intersects two layers, aligned through `aligns`.
+        pub fn intersection(lists0: <Lists<Terms> as Container>::Borrowed<'_>, lists1: <Lists<Terms> as Container>::Borrowed<'_>, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) {
+            // Update `aligns` for the next layer, or output.
+            match (upgrade_hint(lists0), upgrade_hint(lists1)) {
+                (Some(1), Some(1)) => { super::intersection::<Vec<[u8; 1]>>(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), both0, both1) }
+                (Some(2), Some(2)) => { super::intersection::<Vec<[u8; 2]>>(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), both0, both1) }
+                (Some(3), Some(3)) => { super::intersection::<Vec<[u8; 3]>>(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), both0, both1) }
+                (Some(4), Some(4)) => { super::intersection::<Vec<[u8; 4]>>(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), both0, both1) }
+                _ => { super::intersection::<Terms>(lists0, lists1, both0, both1) }
+            }
+        }
+        /// Retains lists indicated by `retain`, which is refilled.
+        pub fn retain_lists(lists: <Lists<Terms> as Container>::Borrowed<'_>, retain: &mut VecDeque<bool>) -> Lists<Terms> {
+            match upgrade_hint(lists) {
+                Some(1) => { downgrade(super::retain_lists(upgrade::<1>(lists).unwrap(), retain)) }
+                Some(2) => { downgrade(super::retain_lists(upgrade::<2>(lists).unwrap(), retain)) }
+                Some(3) => { downgrade(super::retain_lists(upgrade::<3>(lists).unwrap(), retain)) }
+                Some(4) => { downgrade(super::retain_lists(upgrade::<4>(lists).unwrap(), retain)) }
+                _______ => { super::retain_lists(lists, retain) }
+            }
+        }
+        /// Retains items indicated by `retain`, which is refilled.
+        pub fn retain_items(lists: <Lists<Terms> as Container>::Borrowed<'_>, retain: &mut VecDeque<bool>) -> Lists<Terms> {
+            match upgrade_hint(lists) {
+                Some(1) => { downgrade(super::retain_items(upgrade::<1>(lists).unwrap(), retain)) }
+                Some(2) => { downgrade(super::retain_items(upgrade::<2>(lists).unwrap(), retain)) }
+                Some(3) => { downgrade(super::retain_items(upgrade::<3>(lists).unwrap(), retain)) }
+                Some(4) => { downgrade(super::retain_items(upgrade::<4>(lists).unwrap(), retain)) }
+                _______ => { super::retain_items(lists, retain) }
+            }
         }
     }
 
