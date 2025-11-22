@@ -499,11 +499,11 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
 
     let mut delta = delta_lsm.flatten().unwrap_or_default();
 
-    let values = vec![255u8; 2 * delta.len()];
+    let values = vec![255u8; 4 * delta.len()];
     delta.layers.push(Layer { list: Lists {
         bounds: Strides::new(1, delta.len() as u64),
         values: Lists {
-            bounds: Strides::new(2, delta.len() as u64),
+            bounds: Strides::new(4, delta.len() as u64),
             values,
         },
     }});
@@ -534,9 +534,9 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
         for (count, range) in counts.iter().zip(ranges.iter()) {
             let order = (count+1).ilog2() as u8;
             for index in range.0 .. range.1 {
-                if notes[2 * index] > order {
-                    notes[2 * index] = order;
-                    notes[2 * index + 1] = other_index as u8;
+                if notes[4 * index] > order {
+                    notes[4 * index] = order;
+                    notes[4 * index + 1] = other_index as u8;
                 }
             }
         }
@@ -560,7 +560,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
     for (other_index, (other_facts, other_terms)) in others.iter().enumerate().rev() {
 
         bools.clear();
-        bools.extend((0 .. notes.len()/2).map(|i| notes[2*i] > 0 && notes[2*i+1] == other_index as u8));
+        bools.extend((0 .. notes.len()/4).map(|i| notes[4*i] > 0 && notes[4*i+1] == other_index as u8));
         let mut layers = Vec::default();
         for index in (0 .. delta_terms.len()).rev() { layers.insert(0, delta.layers[index].retain_items(&mut bools)); }
         let mut delta_shard: FactLSM<_> = crate::facts::Forest { layers }.into();
