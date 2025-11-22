@@ -45,7 +45,7 @@ fn implement_action(head: &[Atom], body: &Atom, stable: bool, facts: &mut Relati
 /// The complicated implementation case where these is at least one join.
 fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relations) {
 
-    let (plans, loads) = plan::plan_rule::<plan::ByAtom>(head, body);
+    let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body);
 
     let plan_atoms = if stable { 1 } else { body.len() };
 
@@ -62,14 +62,14 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         let mut delta_terms = terms.clone();
         let mut delta_lsm = FactLSM::default();
         if stable {
-            let facts = &facts.get(atom.name.as_str()).unwrap();
+            let facts = &facts.get_action(atom.name.as_str(), action).unwrap();
             for layer in facts.stable.contents().chain([&facts.recent]) {
-                delta_lsm.extend(&mut layer.act_on(action));
+                delta_lsm.push(layer.clone());
             }
         }
         else {
-            let facts = &facts.get(atom.name.as_str()).unwrap();
-            delta_lsm.extend(&mut facts.recent.act_on(action));
+            let facts = &facts.get_action(atom.name.as_str(), action).unwrap();
+            delta_lsm.push(facts.recent.clone());
         };
 
         if delta_lsm.is_empty() { continue; }
@@ -201,10 +201,28 @@ pub mod plan {
         let mut load_actions = load_actions(&plans, &atoms_to_terms, &base_actions);
 
         // Insert loading actions for plan atoms themselves.
-        for (plan_atom, atom) in body.iter().enumerate() {
-            let action = Action::from_body(atom);
-            let terms = action.projection.iter().flatten().map(|c| atom.terms[*c].as_var().unwrap()).collect::<Vec<_>>();
-            load_actions.get_mut(&plan_atom).map(|l| l.insert(plan_atom, (action, terms)));
+        for (plan_atom, _atom) in body.iter().enumerate() {
+            // We would like to order the terms by the order they'll be used in the next stage, which will be
+            // by atom foremost, breaking ties by T::cmp. Only really appropriate if the first stage is empty,
+            // other than the plan atom (e.g. if we must semijoin, this order likely won't say put).
+            let mut order = Vec::new();
+            if plans[&plan_atom].len() > 1 {
+                for atom in plans[&plan_atom][1].0.iter() {
+                    for term in atoms_to_terms[&plan_atom].iter() {
+                        if atoms_to_terms[atom].contains(term) && !order.contains(term) { order.push(*term); }
+                    }
+                }
+            }
+            for term in  atoms_to_terms[&plan_atom].iter() { if !order.contains(term) { order.push(*term); } }
+
+            let mut action = base_actions[&plan_atom].clone();
+            action.projection =
+            order.iter()
+                 .flat_map(|t1| atoms_to_terms[&plan_atom].iter().position(|t2| t1 == t2))
+                 .map(|p| base_actions[&plan_atom].projection[p].clone())
+                 .collect();
+
+            load_actions.get_mut(&plan_atom).map(|l| l.insert(plan_atom, (action, order)));
         }
 
         (plans, load_actions)
@@ -283,12 +301,19 @@ pub mod plan {
                 // Plan outgoing projections, based on demand and ending with `head_terms`.
                 for index in 1 .. atom_plan.len() {
                     let (this, rest) = atom_plan.split_at_mut(index);
-                    let present = this.iter().flat_map(|(_, terms, _)| terms.iter()).collect::<BTreeSet<_>>();
-                    let demanded = rest.iter().flat_map(|(atoms, _, _)| atoms.iter()).flat_map(|a| atoms_to_terms[a].iter()).chain(head_terms.iter()).filter(|t| present.contains(t)).collect::<BTreeSet<_>>();
+                    let present = this.iter().flat_map(|(_, terms, _)| terms.iter()).copied().collect::<Vec<_>>();
+                    let demanded = present.iter().copied().filter(|t| rest.iter().any(|(atoms,_,_)| atoms.iter().any(|a| atoms_to_terms[a].contains(t)) || head_terms.contains(t))).collect::<Vec<_>>();
+
+                    // Set the target order by the terms in common with atoms of the next stage, in atom order, then uninvolved terms.
                     let order = &mut this[index-1].2;
                     order.clear();
-                    order.extend(demanded.iter().filter(|t| rest[0].0.iter().any(|a| atoms_to_terms[a].contains(t))).copied());
-                    order.extend(demanded.iter().filter(|t| !rest[0].0.iter().any(|a| atoms_to_terms[a].contains(t))).copied());
+                    for atom in rest[0].0.iter() {
+                        for term in demanded.iter() {
+                            if atoms_to_terms[atom].contains(term) && !order.contains(term) { order.push(*term); }
+                        }
+                    }
+                    for term in demanded.iter() { if !order.contains(term) { order.push(*term); } }
+
                 }
                 atom_plan.last_mut().unwrap().2 = head_terms.to_vec();
 
@@ -322,7 +347,6 @@ pub mod plan {
                 // Choose the term incident on the most atoms.
                 next_terms.sort_by_key(|t| atoms_to_terms.iter().filter(|(_,v)| v.contains(t)).count());
                 let next_term = *next_terms.last().unwrap();
-                // let next_term = next_terms.next().unwrap_or_else(|| terms_to_atoms.keys().find(|t| !terms.contains(t)).unwrap());
                 let next_atoms = terms_to_atoms[next_term].iter().filter(|a| atoms_to_terms[a].iter().any(|t| terms.contains(t))).copied().collect();
 
                 terms.insert(*next_term);
@@ -386,6 +410,7 @@ fn permute_delta<F: FactContainer, T: Ord + Copy>(
 }
 
 /// Join `delta` with `other`, by permuting `delta` to match columns in `other`.
+#[inline(never)]
 fn join_delta<F: FactContainer, T: Ord + Copy + std::fmt::Debug>(
     delta: &mut FactLSM<F>,
     delta_terms: &mut Vec<T>,
