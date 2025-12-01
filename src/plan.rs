@@ -87,7 +87,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             let load_terms = load_terms.iter().take_while(|t| delta_terms.contains(t)).copied().collect::<Vec<_>>().into_iter();
             permute_delta(&mut delta_lsm, &mut delta_terms, load_terms);
             let delta = delta_lsm.flatten().unwrap_or_default();
-            delta_lsm.push(delta.semijoin(other.stable.contents().chain(to_chain)));
+            delta_lsm.push(delta.semijoin(other.stable.contents().chain(to_chain).filter(|l| !l.is_empty())));
         }
         // We may need to produce the result in a different order.
         permute_delta(&mut delta_lsm, &mut delta_terms, init_order.iter().copied());
@@ -459,14 +459,16 @@ fn wco_join<T: Ord + Copy + std::fmt::Debug>(
 
         if active.len() == delta_terms.len() {
             delta_lsm.push(delta);
-            wco_join_inner(delta_lsm, delta_terms, terms, others, potato);
+            wco_join_inner(delta_lsm, delta_terms, terms, others, potato, target);
         }
         else {
             assert_eq!(&active[..], &delta_terms[..active.len()]);
             let delta_clone = Forest { layers: delta.layers[..active.len()].to_vec() };
             delta_lsm.push(delta_clone);
             let mut active_clone = active.clone();
-            wco_join_inner(delta_lsm, &mut active_clone, terms, others, potato);
+            let mut active_target = active.clone();
+            active_target.extend(terms.iter().copied());
+            wco_join_inner(delta_lsm, &mut active_clone, terms, others, potato, &active_target);
             permute_delta(delta_lsm, &mut active_clone, delta_terms[..active.len()].iter().copied());
 
             let mut crossed_terms = delta_terms.clone();
@@ -488,6 +490,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
     terms: &BTreeSet<T>,
     others: &[(Vec<&Forest<Terms>>, &Vec<T>)],
     potato: T,
+    target: &[T],
 ) {
 
     use columnar::Len;
@@ -495,7 +498,6 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
 
     use crate::facts::{trie::Layer, Lists, Terms};
     use crate::facts::trie::layers::{advance_bounds, intersection};
-
 
     let mut delta = delta_lsm.flatten().unwrap_or_default();
 
@@ -517,6 +519,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
         let prefix = other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
         permute_delta(delta_lsm, delta_terms, other_terms[..prefix].iter().copied());
         let mut delta = delta_lsm.flatten().unwrap_or_default();
+        if !delta.is_empty() {
         let mut counts = vec![0; delta.layers[prefix-1].list.values.len()];
         for other_part in other_facts.iter() {
             let mut delta_idxs = vec![0];
@@ -527,6 +530,38 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
             for layer in prefix .. (prefix + terms.len()) { advance_bounds::<Terms>(other_part.layers[layer].borrow(), &mut ranges); }
             for (delta_idx, range) in delta_idxs.iter().zip(ranges.iter()) { counts[*delta_idx] += range.1-range.0; }
         }
+
+        // We now project `counts` forward through `delta` to the `potato` column.
+        // If any of `counts` are zero, we have the option to first restrict `delta` to only those prefixes.
+        // We don't have to do this, can choose to avoid if there are only *few* zeros, and generally don't expect this is semijoins have already happened.
+        let remove_zeros = counts.iter().filter(|c| c == &&0).count() > 0;
+        if remove_zeros {
+            let mut bools = std::collections::VecDeque::with_capacity(counts.len());
+            bools.extend(counts.iter().map(|c| c > &0));
+            counts.retain(|c| c > &0);
+
+            let mut layers = Vec::with_capacity(delta_terms.len());
+            if delta_terms.len() > prefix {
+
+                let mut prev = None;
+                let mut bounds = Vec::default();
+                for (idx, retain) in bools.iter().chain([&false]).enumerate() {
+                    match (retain, &mut prev) {
+                        (true, None) => { prev = Some(idx); },
+                        (false, Some(lower) ) => { bounds.push((*lower, idx)); prev = None; }
+                        _ => { },
+                    }
+                }
+
+                for layer in delta.layers[prefix..].iter() { layers.push(layer.retain_lists(&mut bounds)); }
+            }
+            for layer in delta.layers[..prefix].iter().rev() { layers.insert(0, layer.retain_items(&mut bools)); }
+
+            assert_eq!(counts.len(), layers[prefix-1].list.values.len());
+            delta = Forest { layers };
+        }
+
+
         // Must now project `counts` forward to leaves of `delta`, where we expect to find installed counts.
         let mut ranges = (0 .. counts.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
         for layer in prefix .. delta.layers.len() { advance_bounds::<Terms>(delta.layers[layer].borrow(), &mut ranges); }
@@ -534,7 +569,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
         for (count, range) in counts.iter().zip(ranges.iter()) {
             let order = (count+1).ilog2() as u8;
             for index in range.0 .. range.1 {
-                if notes[4 * index] > order {
+                if notes[4 * index] >= order {
                     notes[4 * index] = order;
                     notes[4 * index + 1] = other_index as u8;
                 }
@@ -542,53 +577,60 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
         }
         delta_lsm.push(delta);
     }
+}
+
 
     //  2.  Partition `delta_lsm` by atom index, and join to get proposals.
     let mut delta = delta_lsm.flatten().unwrap_or_default();
-    let notes = delta.layers.pop().unwrap().list.values.values;
-    let mut bools = std::collections::VecDeque::with_capacity(notes.len()/2);
+    let notes = delta.layers.pop().unwrap_or_default().list.values.values;
+    let mut bools = std::collections::VecDeque::with_capacity(notes.len()/4);
     delta_terms.pop();
 
-    //let mut delta_terms_new = delta_terms.clone();
-    // delta_terms_new.extend(terms.iter().copied());
-    // Target an order that matches `others[0]`.
-    let mut delta_terms_new = Vec::default();
-    delta_terms_new.extend(others[0].1.iter().take_while(|t| delta_terms.contains(t) || terms.contains(t)));
-    delta_terms_new.extend(delta_terms.iter().filter(|t| !others[0].1.contains(t)));
+    if !delta.is_empty() {
+        for (other_index, (other_facts, other_terms)) in others.iter().enumerate().rev() {
 
+            bools.clear();
+            bools.extend((0 .. notes.len()/4).map(|i| notes[4*i] > 0 && notes[4*i+1] == other_index as u8));
+            let mut layers = Vec::default();
+            for index in (0 .. delta_terms.len()).rev() { layers.insert(0, delta.layers[index].retain_items(&mut bools)); }
+            let delta_shard = crate::facts::Forest { layers };
+            let mut delta_shard: FactLSM<_> = delta_shard.into();
+            // join with atom: permute `delta_shard` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
+            let mut delta_shard_terms = delta_terms.clone();
+            let prefix = other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
+            permute_delta(&mut delta_shard, &mut delta_shard_terms, other_terms[..prefix].iter().copied());
+            let delta_shard = delta_shard.flatten().unwrap_or_default();
+            let join_terms = delta_shard_terms.iter().chain(delta_shard_terms[..prefix].iter()).chain(terms.iter()).copied().collect::<Vec<_>>();
 
-    for (other_index, (other_facts, other_terms)) in others.iter().enumerate().rev() {
+            // Our output join order (until we learn how to do FDB shapes) is the first of `others` not equal to ourself.
+            let next_other_idx = (0 .. others.len()).filter(|i| i != &other_index).next().unwrap();
+            delta_shard_terms.clear();
+            delta_shard_terms.extend(others[next_other_idx].1.iter().take_while(|t| delta_terms.contains(t) || terms.contains(t)));
+            delta_shard_terms.extend(delta_terms.iter().filter(|t| !others[next_other_idx].1.contains(t)));
+            let projection = delta_shard_terms.iter().map(|t| join_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
+            let mut delta_shard = delta_shard.join_many(other_facts.iter().copied(), prefix, &projection[..]);
+            let delta = delta_shard.flatten().unwrap_or_default();
+            delta_shard.push(delta);
 
-        bools.clear();
-        bools.extend((0 .. notes.len()/4).map(|i| notes[4*i] > 0 && notes[4*i+1] == other_index as u8));
-        let mut layers = Vec::default();
-        for index in (0 .. delta_terms.len()).rev() { layers.insert(0, delta.layers[index].retain_items(&mut bools)); }
-        let mut delta_shard: FactLSM<_> = crate::facts::Forest { layers }.into();
-        // join with atom: permute `delta_shard` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
-        let mut delta_terms_clone = delta_terms.clone();
-        let prefix = other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
-        permute_delta(&mut delta_shard, &mut delta_terms_clone, other_terms[..prefix].iter().copied());
-        let delta_shard = delta_shard.flatten().unwrap_or_default();
-        let join_terms = delta_terms_clone.iter().chain(delta_terms_clone[..prefix].iter()).chain(terms.iter()).copied().collect::<Vec<_>>();
-        let projection = delta_terms_new.iter().map(|t| join_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
-        let mut delta_shard = delta_shard.join_many(other_facts.iter().copied(), prefix, &projection[..]);
-        let delta = delta_shard.flatten().unwrap_or_default();
-        delta_shard.push(delta);
-        delta_lsm.extend(&mut delta_shard);
+            // Now semijoin with other atoms.
+            for (next_other_index, (next_other_facts, next_other_terms)) in others.iter().enumerate() {
+                if next_other_index != other_index {
+                    let prefix = next_other_terms.iter().take_while(|t| delta_shard_terms.contains(t)).count();
+                    permute_delta(&mut delta_shard, &mut delta_shard_terms, next_other_terms[..prefix].iter().copied());
+                    let mut delta = delta_shard.flatten().unwrap_or_default();
+                    let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
+                    delta = delta.retain_inner(others.iter().map(|o| &o[..prefix]), true);
+                    delta_shard.push(delta);
+                }
+            }
+
+            permute_delta(&mut delta_shard, &mut delta_shard_terms, target.iter().copied());
+
+            delta_lsm.extend(&mut delta_shard);
+        }
     }
 
-    *delta_terms = delta_terms_new;
+    delta_terms.clear();
+    delta_terms.extend_from_slice(target);
 
-    //  3.  Semijoin with all atoms to intersect their proposals (or defer?)
-    for (other_facts, other_terms) in others.iter() {
-        let prefix = other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
-        permute_delta(delta_lsm, delta_terms, other_terms[..prefix].iter().copied());
-        let mut delta = delta_lsm.flatten().unwrap_or_default();
-        let others = other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
-        delta = delta.retain_inner(others.iter().map(|o| &o[..prefix]), true);
-        delta_lsm.push(delta);
-    }
-
-    let delta = delta_lsm.flatten().unwrap_or_default();
-    delta_lsm.push(delta);
 }
