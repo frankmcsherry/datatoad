@@ -53,6 +53,8 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
 
     for (plan_atom, atom) in body[..plan_atoms].iter().enumerate() {
 
+        if !plans.contains_key(&plan_atom) { continue; }
+
         let plan = &plans[&plan_atom];
 
         // Stage 0: Load the recently added facts.
@@ -84,10 +86,10 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             let (load_action, load_terms) = &loads[&plan_atom][load_atom];
             let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
             let to_chain = if load_atom > &plan_atom { Some(&other.recent) } else { None };
-            let load_terms = load_terms.iter().take_while(|t| delta_terms.contains(t)).copied().collect::<Vec<_>>().into_iter();
-            exec::permute_delta(&mut delta_lsm, &mut delta_terms, load_terms);
-            let delta = delta_lsm.flatten().unwrap_or_default();
-            delta_lsm.push(delta.semijoin(other.stable.contents().chain(to_chain).filter(|l| !l.is_empty())));
+            let other_facts = other.stable.contents().chain(to_chain).filter(|l| !l.is_empty()).collect::<Vec<_>>();
+            use exec::ExecAtom;
+            if body[*load_atom].anti { Anti((other_facts, load_terms)).join(&mut delta_lsm, &mut delta_terms, &Default::default(), &init_order); }
+            else { (other_facts, load_terms).join(&mut delta_lsm, &mut delta_terms, &Default::default(), &init_order); }
         }
         // We may need to produce the result in a different order.
         exec::permute_delta(&mut delta_lsm, &mut delta_terms, init_order.iter().copied());
@@ -100,7 +102,8 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
                 let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
                 let to_chain = if load_atom > &plan_atom && !other.recent.is_empty() { Some(&other.recent) } else { None };
                 let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
-                Box::new((other_facts, load_terms)) as Box::<dyn exec::ExecAtom<&String>+'_>
+                if atom.anti { Box::new(Anti((other_facts, load_terms))) as Box::<dyn exec::ExecAtom<&String>+'_> }
+                else { Box::new((other_facts, load_terms)) as Box::<dyn exec::ExecAtom<&String>+'_> }
             }).collect::<Vec<_>>();
 
             exec::wco_join(&mut delta_lsm, &mut delta_terms, &terms, &others[..], &potato, &order[..]);
@@ -182,7 +185,8 @@ pub mod plan {
         // Map from atom identifier to boxed `PlanAtom`, containing term and grounding information.
         let atoms = body.iter().enumerate().map(|(index, atom)| {
             let terms = atom.terms.iter().filter_map(|term| term.as_var()).collect::<BTreeSet<_>>();
-            (index, Box::new(terms) as Box::<dyn PlanAtom<&'a String> + 'a>)
+            if !atom.anti { (index, Box::new(terms) as Box::<dyn PlanAtom<&'a String> + 'a>) }
+            else { (index, Box::new(crate::plan::Anti(terms)) as Box::<dyn PlanAtom<&'a String> + 'a>) }
         }).collect::<BTreeMap<_,_>>();
 
         // We'll want to pre-plan the term orders for each atom update rule, so that we can
@@ -203,29 +207,31 @@ pub mod plan {
 
         // Insert loading actions for plan atoms themselves.
         for (plan_atom, _atom) in body.iter().enumerate() {
-            // We would like to order the terms by the order they'll be used in the next stage, which will be
-            // by atom foremost, breaking ties by T::cmp. Only really appropriate if the first stage is empty,
-            // other than the plan atom (e.g. if we must semijoin, this order likely won't say put).
-            let plan_terms = atoms[&plan_atom].terms();
-            let mut order = Vec::new();
-            if plans[&plan_atom].len() > 1 {
-                for atom in plans[&plan_atom][1].0.iter() {
-                    let atom_terms = atoms[&atom].terms();
-                    for term in plan_terms.iter() {
-                        if atom_terms.contains(term) && !order.contains(term) { order.push(*term); }
+            if plans.contains_key(&plan_atom) {
+                // We would like to order the terms by the order they'll be used in the next stage, which will be
+                // by atom foremost, breaking ties by T::cmp. Only really appropriate if the first stage is empty,
+                // other than the plan atom (e.g. if we must semijoin, this order likely won't say put).
+                let plan_terms = atoms[&plan_atom].terms();
+                let mut order = Vec::new();
+                if plans[&plan_atom].len() > 1 {
+                    for atom in plans[&plan_atom][1].0.iter() {
+                        let atom_terms = atoms[&atom].terms();
+                        for term in plan_terms.iter() {
+                            if atom_terms.contains(term) && !order.contains(term) { order.push(*term); }
+                        }
                     }
                 }
+                for term in plan_terms.iter() { if !order.contains(term) { order.push(*term); } }
+
+                let mut action = base_actions[&plan_atom].clone();
+                action.projection =
+                order.iter()
+                    .flat_map(|t1| plan_terms.iter().position(|t2| t1 == t2))
+                    .map(|p| base_actions[&plan_atom].projection[p].clone())
+                    .collect();
+
+                load_actions.get_mut(&plan_atom).map(|l| l.insert(plan_atom, (action, order)));
             }
-            for term in plan_terms.iter() { if !order.contains(term) { order.push(*term); } }
-
-            let mut action = base_actions[&plan_atom].clone();
-            action.projection =
-            order.iter()
-                 .flat_map(|t1| plan_terms.iter().position(|t2| t1 == t2))
-                 .map(|p| base_actions[&plan_atom].projection[p].clone())
-                 .collect();
-
-            load_actions.get_mut(&plan_atom).map(|l| l.insert(plan_atom, (action, order)));
         }
 
         (plans, load_actions)
@@ -351,11 +357,11 @@ pub mod plan {
             let mut plan: Plan<A, T> = vec![(init_atoms, init_terms, Vec::new())];
             while terms.len() < terms_to_atoms.len() {
 
-                // Terms that can be reached through an atom from `output`, but not yet in `output`.
+                // Terms that can be ground through an atom from `terms`, but not yet in `terms`.
                 let mut next_terms =
                 terms.iter()
                      .flat_map(|term| terms_to_atoms[term].iter())
-                     .flat_map(|atom| atoms_to_terms[atom].terms())
+                     .flat_map(|atom| atoms_to_terms[atom].ground(&terms))
                      .filter(|term| !terms.contains(term))
                      .collect::<Vec<_>>();
 
@@ -384,19 +390,21 @@ pub mod plan {
 
             // One approach: grow terms through adjacent atoms.
             let mut atoms: BTreeSet<A> = init_atoms.clone();
+            let mut terms = init_terms.clone();
             let mut plan: Plan<A, T> = vec![(init_atoms, init_terms, Vec::new())];
             while atoms.len() < atoms_to_terms.len() {
 
-                // Atoms that can be reached through an atom's terms.
+                // Atoms are available if they can be fully enumerated from the bound terms.
                 let mut next_atoms =
                 atoms.iter()
                      .flat_map(|atom| atoms_to_terms[atom].terms())
                      .flat_map(|term| terms_to_atoms[&term].iter())
-                     .filter(|atom| !atoms.contains(atom));
+                     .filter(|atom| !atoms.contains(atom) && atoms_to_terms[atom].terms().difference(&atoms_to_terms[atom].ground(&terms)).all(|t| terms.contains(t)));
 
                 // Choose the first available atom. This can be dramatically improved.
                 let next_atom = next_atoms.next().unwrap_or_else(|| atoms_to_terms.keys().find(|a| !atoms.contains(a)).unwrap());
-                let next_terms = atoms_to_terms[next_atom].terms().iter().filter(|t| terms_to_atoms[t].iter().all(|a| !atoms.contains(a))).copied().collect();
+                let next_terms: BTreeSet<_> = atoms_to_terms[next_atom].terms().iter().filter(|t| terms_to_atoms[t].iter().all(|a| !atoms.contains(a))).copied().collect();
+                terms.extend(next_terms.iter().copied());
 
                 atoms.insert(*next_atom);
                 plan.push(([*next_atom].into_iter().collect(), next_terms, Vec::new()));
@@ -725,5 +733,47 @@ impl<'a, T: Ord + Copy> exec::ExecAtom<T> for (Vec<&'a Forest<Terms>>, &'a Vec<T
             delta = delta.retain_inner(others.iter().map(|o| &o[..prefix]), true);
             delta_shard.push(delta);
         }
+    }
+}
+
+/// Wrapper type for antijoins.
+struct Anti<T>(T);
+
+impl <T: Ord + Copy> plan::PlanAtom<T> for Anti<BTreeSet<T>> {
+    fn terms(&self) -> BTreeSet<T> { self.0.clone() }
+    fn ground(&self, _terms: &BTreeSet<T>) -> BTreeSet<T> { Default::default() }
+}
+
+impl<'a, T: Ord + Copy> exec::ExecAtom<T> for Anti<(Vec<&'a Forest<Terms>>, &'a Vec<T>)> {
+
+    fn terms(&self) -> &[T] { self.0.1 }
+
+    fn count(
+        &self,
+        _delta_lsm: &mut FactLSM<Forest<Terms>>,
+        _delta_terms: &mut Vec<T>,
+        _terms: &BTreeSet<T>,
+        _other_index: u8,
+    ) {
+        // Antijoins propose nothing
+    }
+
+    fn join(
+        &self,
+        delta_shard: &mut FactLSM<Forest<Terms>>,
+        delta_terms: &mut Vec<T>,
+        terms: &BTreeSet<T>,
+        _after: &[T],
+    ) {
+        assert!(terms.is_empty());
+
+        let (next_other_facts, next_other_terms) = &self.0;
+
+        let prefix = next_other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
+        exec::permute_delta(delta_shard, delta_terms, next_other_terms[..prefix].iter().copied());
+        let mut delta = delta_shard.flatten().unwrap_or_default();
+        let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
+        delta = delta.retain_inner(others.iter().map(|o| &o[..prefix]), false);
+        delta_shard.push(delta);
     }
 }
