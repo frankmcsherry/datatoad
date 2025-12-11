@@ -92,7 +92,6 @@ fn parse_atom<I: Iterator<Item=Token>>(tokens: &mut Peekable<I>) -> Option<Atom>
 
     // Names starting with an `!` indicate an antijoin, which suppresses records that match.
     let (anti, name) = name.strip_prefix("!").map(|n| (true, n)).unwrap_or((false, name.as_str()));
-    if anti { panic!("antijoins ('!') not correctly supported yet"); }
 
     Some(Atom { name: name.to_owned(), anti, terms })
 }
