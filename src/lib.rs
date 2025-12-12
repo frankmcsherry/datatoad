@@ -64,7 +64,7 @@ pub mod types {
         pub fn push(&mut self, rule: Rule) {
             if rule.body.is_empty() {
                 for atom in rule.head.iter() {
-                    use columnar::{Container, Push};
+                    use columnar::{Borrow, Push};
                     use crate::facts::{Forest, Terms};
                     let mut lits = Vec::with_capacity(atom.terms.len());
                     for term in atom.terms.iter() {

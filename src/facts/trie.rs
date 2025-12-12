@@ -16,7 +16,7 @@
 //! recording the number of occurrences of each duplicate and using it to group
 //! the extracted column of values (forming runs of sorted values for prefixes).
 
-use columnar::Container;
+use columnar::{Borrow, Container};
 use crate::facts::Lists;
 
 /// A sequence of layers, each a list of extensions for items of the prior layer.
@@ -36,7 +36,7 @@ impl<C: Container> Forest<C> {
     pub fn len(&self) -> usize { self.layers.last().map(|l| l.list.values.len()).unwrap_or(0) }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 
-    pub fn borrow<'a>(&'a self) -> Vec<<Lists<C> as Container>::Borrowed<'a>> {
+    pub fn borrow<'a>(&'a self) -> Vec<<Lists<C> as Borrow>::Borrowed<'a>> {
         self.layers.iter().map(|x| x.list.borrow()).collect::<Vec<_>>()
     }
 
@@ -49,7 +49,7 @@ impl<C: Container> Forest<C> {
 }
 
 /// Advances pairs of lower and upper bounds on lists through each presented layer, to lower and upper bounds on items.
-fn advance_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed<'_>], bounds: &mut[(usize, usize)]) {
+fn advance_bounds<C: Container>(layers: &[<Lists<C> as Borrow>::Borrowed<'_>], bounds: &mut[(usize, usize)]) {
     for layer in layers.iter() { crate::facts::trie::layers::advance_bounds::<C>(*layer, bounds); }
 }
 
@@ -62,14 +62,14 @@ fn advance_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed<'_>]
 pub struct Layer<C> { pub list: Lists<C> }
 
 impl<C: Container> Layer<C> {
-    pub fn borrow(&self) -> <Lists<C> as Container>::Borrowed<'_> { self.list.borrow() }
+    pub fn borrow(&self) -> <Lists<C> as Borrow>::Borrowed<'_> { self.list.borrow() }
 }
 
 /// Implementations for `Forest<Terms>`, for generic byte slices.
 pub mod terms {
 
     use std::rc::Rc;
-    use columnar::{Container, Index, Len};
+    use columnar::{Borrow, Container, Index, Len};
     use crate::facts::{FactContainer, FactLSM, Lists, Terms};
     use crate::facts::trie::layers::Report;
     use crate::types::Action;
@@ -214,7 +214,7 @@ pub mod terms {
 
     /// Produces columns in the order indicated by `projection`, for the subset of indexes in `indexs`.
     #[inline(never)]
-    fn permute_subset(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Layer<Terms>> {
+    fn permute_subset(in_layers: &[<Lists<Terms> as Borrow>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Layer<Terms>> {
         // Determine a leading prefix of the form `0 ..`. These columns can be extracted efficiently.
         let mut prefix = 0;
         while projection.get(prefix) == Some(&prefix) { prefix += 1; }
@@ -251,7 +251,7 @@ pub mod terms {
     /// expand the number of paths under discussion by moving indexes forward to the indicated column, and in the latter we
     /// only need to advance corresponding values of a prior column forward 1:1 to the current indexes.
     #[inline(never)]
-    fn permute_subset_inner(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Layer<Terms>> {
+    fn permute_subset_inner(in_layers: &[<Lists<Terms> as Borrow>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Layer<Terms>> {
 
         if projection.is_empty() { return Vec::default(); }
 
@@ -324,8 +324,8 @@ pub mod terms {
     /// for example by the `Forest::embellish` method.
     #[inline(never)]
     fn join_cols(
-        this: &[<Lists<Terms> as Container>::Borrowed<'_>],
-        thats: &[&[<Lists<Terms> as Container>::Borrowed<'_>]],
+        this: &[<Lists<Terms> as Borrow>::Borrowed<'_>],
+        thats: &[&[<Lists<Terms> as Borrow>::Borrowed<'_>]],
         arity: usize,
         projection: &[usize],
     ) -> FactLSM<Forest<Terms>> {
@@ -469,7 +469,7 @@ pub mod terms {
     /// The first layer of the result should have as many lists as there are distinct values of `group`, with the implied correspondence.
     #[inline(never)]
     fn restrict_project_merge<'a>(
-        layers: &[&[<Lists<Terms> as Container>::Borrowed<'a>]],
+        layers: &[&[<Lists<Terms> as Borrow>::Borrowed<'a>]],
         groups: &[&[usize]],
         indexs: &[&[usize]],
         projection: &[usize],
@@ -511,7 +511,7 @@ pub mod terms {
     /// In principle the explicit representation of the ranges and repetitions could be avoided, by updating `index` and reporting the range lengths.
     /// This would avoid resizing any of the vectors, only rewriting `index`, and pushing the work of unpacking any until later when actually needed.
     #[inline(never)]
-    fn expand<'a>(index: &mut Vec<usize>, lists: <Lists<Terms> as Container>::Borrowed<'a>, others: &mut [&mut Vec<usize>]) {
+    fn expand<'a>(index: &mut Vec<usize>, lists: <Lists<Terms> as Borrow>::Borrowed<'a>, others: &mut [&mut Vec<usize>]) {
 
         // Map out the number of repetitions for each position, and tally the total for pre-allocation.
         let mut total = 0;
@@ -592,7 +592,7 @@ pub mod terms {
         }
 
         #[inline(never)]
-        pub fn retain_inner<'a>(mut self, others: impl Iterator<Item = &'a [<Lists<Terms> as Container>::Borrowed<'a>]>, semi: bool) -> Self {
+        pub fn retain_inner<'a>(mut self, others: impl Iterator<Item = &'a [<Lists<Terms> as Borrow>::Borrowed<'a>]>, semi: bool) -> Self {
 
             if self.is_empty() { return self; }
 
@@ -658,7 +658,7 @@ pub mod terms {
 pub mod layers {
 
     use std::collections::VecDeque;
-    use columnar::{Columnar, Container, Index, Len};
+    use columnar::{Borrow, Columnar, Container, Index, Len};
 
     use crate::facts::{Lists, Terms};
     use crate::facts::{upgrade_hint, upgrade, downgrade};
@@ -704,13 +704,13 @@ pub mod layers {
     pub mod terms {
 
         use std::collections::VecDeque;
-        use columnar::Container;
+        use columnar::Borrow;
         use crate::facts::{Lists, Terms};
         use crate::facts::trie::layers::Report;
         use crate::facts::{upgrade_hint, upgrade, downgrade};
 
         /// Unions two layers, aligned through `reports`, which is refilled if `next` is set.
-        pub fn union(lists0: <Lists<Terms> as Container>::Borrowed<'_>, lists1: <Lists<Terms> as Container>::Borrowed<'_>, reports: &mut VecDeque<Report>, next: bool) -> Lists<Terms> {
+        pub fn union(lists0: <Lists<Terms> as Borrow>::Borrowed<'_>, lists1: <Lists<Terms> as Borrow>::Borrowed<'_>, reports: &mut VecDeque<Report>, next: bool) -> Lists<Terms> {
             match (upgrade_hint(lists0), upgrade_hint(lists1)) {
                 (Some(1), Some(1)) => { downgrade(super::union(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), reports, next)) }
                 (Some(2), Some(2)) => { downgrade(super::union(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), reports, next)) }
@@ -720,7 +720,7 @@ pub mod layers {
             }
         }
         /// Intersects two layers, aligned through `aligns`.
-        pub fn intersection(lists0: <Lists<Terms> as Container>::Borrowed<'_>, lists1: <Lists<Terms> as Container>::Borrowed<'_>, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) {
+        pub fn intersection(lists0: <Lists<Terms> as Borrow>::Borrowed<'_>, lists1: <Lists<Terms> as Borrow>::Borrowed<'_>, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) {
             // Update `aligns` for the next layer, or output.
             match (upgrade_hint(lists0), upgrade_hint(lists1)) {
                 (Some(1), Some(1)) => { super::intersection::<Vec<[u8; 1]>>(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), both0, both1) }
@@ -731,7 +731,7 @@ pub mod layers {
             }
         }
         /// Retains lists indicated by `retain`, which is refilled.
-        pub fn retain_lists(lists: <Lists<Terms> as Container>::Borrowed<'_>, bounds: &mut [(usize, usize)]) -> Lists<Terms> {
+        pub fn retain_lists(lists: <Lists<Terms> as Borrow>::Borrowed<'_>, bounds: &mut [(usize, usize)]) -> Lists<Terms> {
             match upgrade_hint(lists) {
                 Some(1) => { downgrade(super::retain_lists(upgrade::<1>(lists).unwrap(), bounds)) }
                 Some(2) => { downgrade(super::retain_lists(upgrade::<2>(lists).unwrap(), bounds)) }
@@ -741,7 +741,7 @@ pub mod layers {
             }
         }
         /// Retains items indicated by `retain`, which is refilled.
-        pub fn retain_items(lists: <Lists<Terms> as Container>::Borrowed<'_>, retain: &mut VecDeque<bool>) -> Lists<Terms> {
+        pub fn retain_items(lists: <Lists<Terms> as Borrow>::Borrowed<'_>, retain: &mut VecDeque<bool>) -> Lists<Terms> {
             match upgrade_hint(lists) {
                 Some(1) => { downgrade(super::retain_items(upgrade::<1>(lists).unwrap(), retain)) }
                 Some(2) => { downgrade(super::retain_items(upgrade::<2>(lists).unwrap(), retain)) }
@@ -759,8 +759,8 @@ pub mod layers {
     /// layer to prepare reports for, and the cost can be higher there than for prior layers.
     #[inline(never)]
     pub fn union<'a, C: Container<Ref<'a>: Ord>>(
-        lists0: <Lists<C> as Container>::Borrowed<'a>,
-        lists1: <Lists<C> as Container>::Borrowed<'a>,
+        lists0: <Lists<C> as Borrow>::Borrowed<'a>,
+        lists1: <Lists<C> as Borrow>::Borrowed<'a>,
         reports: &mut VecDeque<Report>,
         next: bool,
     ) -> Lists<C> {
@@ -841,8 +841,8 @@ pub mod layers {
     /// in the reverse direction, from aligned indexes back to prefixes that gave rise to them.
     #[inline(never)]
     pub fn intersection<'a, C: Container<Ref<'a>: Ord>>(
-        list0: <Lists<C> as Container>::Borrowed<'a>,
-        list1: <Lists<C> as Container>::Borrowed<'a>,
+        list0: <Lists<C> as Borrow>::Borrowed<'a>,
+        list1: <Lists<C> as Borrow>::Borrowed<'a>,
         both0: &[usize],
         both1: &[usize],
     ) -> (Vec<usize>, Vec<usize>) {
@@ -889,7 +889,7 @@ pub mod layers {
     //       we can re-use an argument `&mut [(usize, usize)]` to house the output bounds.
     /// Restrict lists based on per-list bools, producing a new layer and updating `bools` for the items.
     #[inline(never)]
-    pub fn retain_lists<'a, C: Container>(lists: <Lists<C> as Container>::Borrowed<'a>, bounds: &mut [(usize, usize)]) -> Lists<C> {
+    pub fn retain_lists<'a, C: Container>(lists: <Lists<C> as Borrow>::Borrowed<'a>, bounds: &mut [(usize, usize)]) -> Lists<C> {
 
         // In principle we can copy runs described in `bools` for bulk copying.
         let mut output = <Lists::<C> as Container>::with_capacity_for([lists].into_iter());
@@ -909,7 +909,7 @@ pub mod layers {
     //       we can re-use an argument `&mut [(usize, usize)]` to house the output bounds.
     /// Restrict lists based on per-item bools, producing a new layer and updating `bools` for the lists.
     #[inline(never)]
-    pub fn retain_items<'a, C: Container>(lists: <Lists<C> as Container>::Borrowed<'a>, bools: &mut VecDeque<bool>) -> Lists<C> {
+    pub fn retain_items<'a, C: Container>(lists: <Lists<C> as Borrow>::Borrowed<'a>, bools: &mut VecDeque<bool>) -> Lists<C> {
 
         // In principle we can copy runs described in `bools` for bulk copying.
         let mut output = <Lists::<C> as Container>::with_capacity_for([lists].into_iter());
@@ -936,7 +936,7 @@ pub mod layers {
     }
 
     /// Advances (lower, upper] bounds on lists to the corresponding bounds on items.
-    pub fn advance_bounds<'a, C: Container>(lists: <Lists<C> as Container>::Borrowed<'a>, bounds: &mut [(usize, usize)]) {
+    pub fn advance_bounds<'a, C: Container>(lists: <Lists<C> as Borrow>::Borrowed<'a>, bounds: &mut [(usize, usize)]) {
         if let Some(stride) = lists.bounds.strided() {
             let stride = stride as usize;
             if stride > 1 { for (lower, upper) in bounds.iter_mut() { *lower *= stride; *upper *= stride; } }
@@ -950,13 +950,13 @@ pub mod layers {
     }
 
     /// Restricts `active` to indexes that equal the corresponding element in `other[aligned]`.
-    pub fn filter_items<'a, C: Container<Ref<'a>: Ord>>(lists: <Lists<C> as Container>::Borrowed<'a>, active: &mut Vec<usize>, other: C::Borrowed<'a>, aligned: &[usize]) {
+    pub fn filter_items<'a, C: Container<Ref<'a>: Ord>>(lists: <Lists<C> as Borrow>::Borrowed<'a>, active: &mut Vec<usize>, other: C::Borrowed<'a>, aligned: &[usize]) {
         assert_eq!(active.len(), aligned.len());
         let mut aligned = aligned.iter().copied();
         active.retain(|i| lists.values.get(*i) == other.get(aligned.next().unwrap()));
     }
 
-    pub fn sort_terms(lists: <Lists<Terms> as Container>::Borrowed<'_>, groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Terms> {
+    pub fn sort_terms(lists: <Lists<Terms> as Borrow>::Borrowed<'_>, groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Terms> {
         match upgrade_hint(lists) {
             Some(1) => { downgrade(col_sort(upgrade::<1>(lists).unwrap().values, groups, indexs, last)) }
             Some(2) => { downgrade(col_sort(upgrade::<2>(lists).unwrap().values, groups, indexs, last)) }
