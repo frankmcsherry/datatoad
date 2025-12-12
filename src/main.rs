@@ -24,7 +24,9 @@ fn main() {
     let _ = std::io::stdout().flush();
 
     let mut text = String::new();
-    while let Ok(_size) = std::io::stdin().read_line(&mut text) {
+    while let Ok(size) = std::io::stdin().read_line(&mut text) {
+        // Handle EOF.
+        if size == 0 { break; }
 
         handle_command(text.as_str(), &mut state, &mut timer);
 
@@ -64,7 +66,7 @@ fn handle_command(text: &str, state: &mut types::State, timer: &mut std::time::I
                             let names = regex.capture_names().map(|x| x.to_owned()).collect::<Vec<_>>();
                             if let Ok(file) = File::open(filename) {
                                 let file = BufReader::new(file);
-                                use columnar::{Container, Push};
+                                use columnar::{Borrow, Push};
                                 use datatoad::facts::{Forest, Terms};
                                 let mut columns = vec![Terms::default(); names.len()-1];
                                 for readline in file.lines() {

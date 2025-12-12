@@ -1,7 +1,7 @@
 //! Methods and types to support building and maintaining ordered sets of facts.
 
 use std::collections::BTreeMap;
-use columnar::{Container, Index};
+use columnar::{Borrow, Index};
 use columnar::Vecs;
 use columnar::primitive::offsets::Strides;
 
@@ -111,10 +111,10 @@ pub type FactCollection = Forest<Terms>;
 ///
 /// The upgraded form is a distinct type, and this method cannot produce it alone.
 /// It requires help to observe the possibility, and invoke the specialized code.
-pub fn upgrade_hint(terms: <Lists<Terms> as Container>::Borrowed<'_>) -> Option<u64> { terms.values.bounds.strided() }
+pub fn upgrade_hint(terms: <Lists<Terms> as Borrow>::Borrowed<'_>) -> Option<u64> { terms.values.bounds.strided() }
 
 /// Attempts to recast a general term list as one of fixed width byte slices.
-pub fn upgrade<'a, const K: usize>(terms: <Lists<Terms> as Container>::Borrowed<'a>) -> Option<<Lists<Vec<[u8; K]>> as Container>::Borrowed<'a>> {
+pub fn upgrade<'a, const K: usize>(terms: <Lists<Terms> as Borrow>::Borrowed<'a>) -> Option<<Lists<Vec<[u8; K]>> as Borrow>::Borrowed<'a>> {
     if upgrade_hint(terms)? as usize == K {
         let (most, rest) = terms.values.values.as_chunks::<K>();
         assert!(rest.is_empty());
