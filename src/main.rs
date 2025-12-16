@@ -3,8 +3,6 @@ use std::io::{BufReader, BufRead};
 
 use datatoad::{parse, types};
 
-
-
 fn main() {
 
     let mut state = types::State::default();
@@ -49,6 +47,44 @@ fn handle_command(text: &str, state: &mut types::State, timer: &mut std::time::I
             match word {
                 ".exec" => { for filename in words { exec_file(filename, state, timer); } }
                 ".list" => { state.facts.list() }
+                ".flow" => {
+
+                    use std::io::{BufRead, BufReader};
+                    use std::fs::File;
+
+                    let args: Result<[_;3],_> = words.take(3).collect::<Vec<_>>().try_into();
+                    if let Ok(args) = args {
+                        let name = args[0].to_string();
+                        let arity = args[1].len();
+                        let filename = args[2];
+                        if let Ok(file) = File::open(filename) {
+                            let mut file = BufReader::new(file);
+                            use columnar::Push;
+                            use datatoad::facts::{Forest, Terms};
+                            let mut columns = vec![Terms::default(); arity];
+                            let mut readline = String::default();
+                            while file.read_line(&mut readline).unwrap() > 0 {
+                                let line = readline.trim();
+                                for (term, col) in line.split(',').zip(columns.iter_mut()) {
+                                    col.push(&term.parse::<u32>().unwrap().to_be_bytes());
+                                }
+                                readline.clear();
+                                use columnar::Len;
+                                if columns[0].len() > 100_000_000 {
+                                    // Pass ownership of columns so the method can drop them as they are processed.
+                                    let trie = Forest::from_columns(columns);
+                                    state.facts.entry(name.clone()).extend([trie]);
+                                    columns = vec![Terms::default(); arity];
+                                }
+                            }
+                            let trie = Forest::from_columns(columns);
+                            state.facts.entry(name).extend([trie]);
+                            state.update();
+                        }
+                        else { println!("file not found: {:?}", filename); }
+                    }
+                    else { println!(".flow command requires arguments: <name> <patt> <file>"); }
+                }
                 ".load" => {
 
                     use std::io::{BufRead, BufReader};
@@ -63,12 +99,14 @@ fn handle_command(text: &str, state: &mut types::State, timer: &mut std::time::I
                         if let Ok(regex) = regex::Regex::new(pattern) {
                             let names = regex.capture_names().map(|x| x.to_owned()).collect::<Vec<_>>();
                             if let Ok(file) = File::open(filename) {
-                                let file = BufReader::new(file);
-                                use columnar::{Container, Push};
+                                let mut file = BufReader::new(file);
+                                use columnar::Push;
                                 use datatoad::facts::{Forest, Terms};
-                                let mut columns = vec![Terms::default(); names.len()-1];
-                                for readline in file.lines() {
-                                    let line = readline.expect("read error");
+                                let arity = names.len()-1;
+                                let mut columns = vec![Terms::default(); arity];
+                                let mut readline = String::default();
+                                while file.read_line(&mut readline).unwrap() > 0 {
+                                    let line = readline.trim();
                                     if let Some(captures) = regex.captures(&line) {
                                         for ((term, name), col) in captures.iter().zip(names.iter()).skip(1).zip(columns.iter_mut()) {
                                             let term = term.unwrap().as_str();
@@ -80,8 +118,16 @@ fn handle_command(text: &str, state: &mut types::State, timer: &mut std::time::I
                                             }
                                         }
                                     }
+                                    readline.clear();
+                                    use columnar::Len;
+                                    if columns[0].len() > 100_000_000 {
+                                        // Pass ownership of columns so the method can drop them as they are processed.
+                                        let trie = Forest::from_columns(columns);
+                                        state.facts.entry(name.clone()).extend([trie]);
+                                        columns = vec![Terms::default(); arity];
+                                    }
                                 }
-                                let trie = Forest::from_columns(&columns.iter().map(|c| c.borrow()).collect::<Vec<_>>()[..]);
+                                let trie = Forest::from_columns(columns);
                                 state.facts.entry(name).extend([trie]);
                                 state.update();
                             }
@@ -91,12 +137,13 @@ fn handle_command(text: &str, state: &mut types::State, timer: &mut std::time::I
                     }
                     else { println!(".load command requires arguments: <name> <patt> <file>"); }
                 }
-                ".save" => { println!("unimplemnted: {:?}", word); }
-                ".time" => { *timer = std::time::Instant::now(); }
-                ".wipe" => { *state = Default::default(); }
-                _ => {
-                    println!("Parse failure: {:?}", text);
+                ".save" => { println!("unimplemented: {:?}", word); }
+                ".time" => {
+                    println!("time:\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());
+                    *timer = std::time::Instant::now();
                 }
+                ".wipe" => { *state = Default::default(); }
+                _ => { println!("Parse failure: {:?}", text); }
             }
         }
     }

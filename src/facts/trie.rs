@@ -39,13 +39,6 @@ impl<C: Container> Forest<C> {
     pub fn borrow<'a>(&'a self) -> Vec<<Lists<C> as Container>::Borrowed<'a>> {
         self.layers.iter().map(|x| x.list.borrow()).collect::<Vec<_>>()
     }
-
-    /// Forms a forest trie from a sequence of columns of identical lengths.
-    pub fn from_columns<'a>(columns: &[C::Borrowed<'a>]) -> Self where C::Ref<'a>: Ord {
-        let (mut groups, indexs): (Vec<_>, Vec<_>) = (0 .. columns.first().map(columnar::Len::len).unwrap_or(0)).map(|i| (0, i)).unzip();
-        let layers = columns.iter().map(|column| Layer { list: crate::facts::trie::layers::col_sort(*column, &mut groups[..], &indexs[..], false) }).collect();
-        Self { layers }
-    }
 }
 
 /// Advances pairs of lower and upper bounds on lists through each presented layer, to lower and upper bounds on items.
@@ -96,6 +89,29 @@ pub mod terms {
 
     impl crate::facts::Length for Forest<Terms> {
         fn len(&self) -> usize { self.layers.last().map(|x| x.list.values.len()).unwrap_or(0) }
+    }
+
+    impl Forest<Terms> {
+        /// Forms a forest trie from a sequence of columns of identical lengths.
+        ///
+        /// This method takes ownership of the columns in order to drop them as they are processed.
+        /// It could be generalized to `Vec<C>` for any `C` that can be borrowed as `Terms` can be.
+        pub fn from_columns<'a>(columns: Vec<Terms>) -> Self {
+            let (mut groups, indexs): (Vec<_>, Vec<_>) = (0 .. columns.first().map(columnar::Len::len).unwrap_or(0)).map(|i| (0, i)).unzip();
+            let columns_len = columns.len();
+            let layers = columns.into_iter().enumerate().map(|(index, column)| {
+
+                use columnar::{Vecs, primitive::offsets::Strides};
+                let bounds = Strides::new(1, column.len() as u64);
+                let lists = Vecs {
+                    bounds: bounds.borrow(),
+                    values: column.borrow(),
+                };
+                // TODO: Figure out how to avoid `indexs` being literally just `0 .. len`.
+                Layer { list: crate::facts::trie::layers::sort_terms(lists, &mut groups[..], &indexs[..], index == columns_len-1) }
+            }).collect();
+            Self { layers }
+        }
     }
 
     // Support methods for `<Forest<Terms> as FactContainer>::act_on`.
@@ -381,87 +397,121 @@ pub mod terms {
         }
         let that_values = that_values.as_ref().map(|x| x.borrow()).unwrap_or(thats[0][arity..].to_vec());
 
-        // The reference `this` indexes, used as a hand-off for pre-`arity` columns.
-        let old_aligned = aligneds.last().unwrap().clone();
-
-        // Going in to the next phase, we'll need the following variables in scope:
-        // 1. `this_i` and `this_values`: indexes of one into the other; same length as `that_j`. columns in order of appearance in `projection`.
-        // 2. `that_j` and `that_values`: indexes of one into the other; same length as `this_i`. columns in order of appearance in `projection`.
-        // 3. `old_aligned`: `this_i` for `this[arity..]` (not always `this_values`).
-        // 4. `aligneds`: values of `this_i` for pre-`arity` layers.
+        // At this point we can see the work we have to do, and may want to stage it to avoid doing everything at once.
+        // We'll scan forward from `this_i` and `that_j` to assess the cardinality we'll produce, and only peel off as
+        // much work as we feel comfortable doing before taking a beat to deduplicate (forming and pushing into an LSM).
+        // We can work on an arbitrary subset of the aligned indexes, as long as we copy the indexes for manipulation.
 
         // Restarting points for counting sizes for pre-`arity` columns.
         let aligned = (this_i.clone(), that_j.clone());
 
-        // Constraints on the grouping of the lists of the remaining columns to produce.
-        let mut groups = std::iter::repeat(0).take(this_i.len()).collect::<Vec<_>>();
+        // A list of counts of the numbers of outputs for each aligned index.
+        // We will reference this in determining how many aligned indexes to pull off at a time.
+        let counts = {
+            let mut this_bounds = aligned.0.iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
+            crate::facts::trie::advance_bounds::<Terms>(&this_values[..], &mut this_bounds[..]);
+            let mut that_bounds = aligned.1.iter().map(|j| (*j,*j+1)).collect::<Vec<_>>();
+            crate::facts::trie::advance_bounds::<Terms>(&that_values[..], &mut that_bounds[..]);
+            this_bounds.iter().zip(that_bounds.iter()).map(|((l0,u0),(l1,u1))| (u0-l0) * (u1-l1)).collect::<Vec<_>>()
+        };
 
-        // Cursors into `this_i` and `that_j`, respectively.
-        let mut this_cursor = 0;
-        let mut that_cursor = 0;
+        // println!("About to produce {} facts", counts.iter().sum::<usize>());
 
-        // Layers correspond to the columns of `projection`, which we produce in turn.
-        let layers = projection.iter().copied().enumerate().map(|(idx, column)| {
+        let mut output_lsm: FactLSM<Forest<Terms>> = Default::default();
+        let mut aligned_pos = 0;
+        while aligned_pos < counts.len() {
 
-            use crate::facts::trie::layers::sort_terms;
+            // Assess the size of the output we'll produce, in order to judge if we should parcel out the work.
+            let aligned_prev = aligned_pos;
+            let mut aligned_sum = 0;
+            while aligned_pos < counts.len() && aligned_sum < 100_000_000 { aligned_sum += counts[aligned_pos]; aligned_pos += 1; }
+            // println!("\tproducing chunk of {}", aligned_sum);
 
-            let last = idx+1 == projection.len();
+            // Going in to the next phase, we'll need the following variables in scope:
+            // 1. `this_i` and `this_values`: indexes of one into the other; same length as `that_j`. columns in order of appearance in `projection`.
+            // 2. `that_j` and `that_values`: indexes of one into the other; same length as `this_i`. columns in order of appearance in `projection`.
+            // 3. `old_aligned`: `this_i` for `this[arity..]` (not always `this_values`).
+            // 4. `aligneds`: initial values of `this_i` for pre-`arity` layers.
 
-            let list = if column < arity {
-                // Flow the column bounds forward to `aligned`, then count.
+            let mut this_i = Rc::new(this_i[aligned_prev .. aligned_pos].to_vec());
+            let mut that_j = Rc::new(that_j[aligned_prev .. aligned_pos].to_vec());
+            let old_aligned = Rc::new(aligneds.last().unwrap()[aligned_prev .. aligned_pos].to_vec());
 
-                // First, let's determine the counts for each of `this` and `that` at `aligned`.
-                let mut this_bounds = aligned.0.iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
-                crate::facts::trie::advance_bounds::<Terms>(&this_values[0 .. this_cursor], &mut this_bounds[..]);
-                let mut that_bounds = aligned.1.iter().map(|j| (*j,*j+1)).collect::<Vec<_>>();
-                crate::facts::trie::advance_bounds::<Terms>(&that_values[0 .. that_cursor], &mut that_bounds[..]);
+            // The reference `this` indexes, used as a hand-off for pre-`arity` columns.
+            // let old_aligned = aligneds.last().unwrap().clone();
 
-                // Now let's project forward from `both_need[column]`.
-                let mut bounds = aligneds[column].iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
-                crate::facts::trie::advance_bounds::<Terms>(&this[column+1 .. arity], &mut bounds);
+            // Constraints on the grouping of the lists of the remaining columns to produce.
+            let mut groups = std::iter::repeat(0).take(this_i.len()).collect::<Vec<_>>();
 
-                let mut products = this_bounds.iter().zip(that_bounds.iter()).map(|((l0,u0), (l1,u1))| (u0-l0)*(u1-l1))
-                                                    .zip(old_aligned.iter().copied()).peekable();
+            // Cursors into `this_i` and `that_j`, respectively.
+            let mut this_cursor = 0;
+            let mut that_cursor = 0;
 
-                let counts = bounds.iter().map(|(l,u)| {
-                    let mut count = 0;
-                    while products.next_if(|(_,x)| x < l).is_some() { }
-                    while let Some((c,_)) = products.next_if(|(_,x)| x < u) { count += c; }
-                    count
-                });
+            // Layers correspond to the columns of `projection`, which we produce in turn.
+            let layers = projection.iter().copied().enumerate().map(|(idx, column)| {
 
-                // Flatten the (index, count) into repetitions.
-                let mut flat = Vec::with_capacity(groups.len());
-                flat.extend(aligneds[column].iter().zip(counts).flat_map(|(i,c)| std::iter::repeat(*i).take(c)));
-                sort_terms(this[column], &mut groups, &flat, last)
-            }
-            else if column < this.len() {
-                // We expect this to be the next column in `this_values`.
-                let values = this_values[this_cursor];
-                this_cursor += 1;
+                use crate::facts::trie::layers::sort_terms;
 
-                // Expand `this_i`, and corresponding repetitions in `groups` and `that_j`.
-                let mut others = if that_cursor < that_values.len() { vec![&mut groups, Rc::make_mut(&mut that_j)] } else { vec![&mut groups] };
-                expand(Rc::make_mut(&mut this_i), values, &mut others);
-                sort_terms(values, &mut groups, &this_i, last)
-            }
-            else if column < this.len() + arity {
-                unimplemented!("reference equated column of first join argument")
-            }
-            else {
-                // We expect this to be the next column in `that_values`.
-                let values = that_values[that_cursor];
-                that_cursor += 1;
+                let last = idx+1 == projection.len();
 
-                // Expand `that_j`, and corresponding repetitions in `groups` and `this_i`.
-                let mut others = if this_cursor < this_values.len() { vec![&mut groups, Rc::make_mut(&mut this_i)] } else { vec![&mut groups] };
-                expand(Rc::make_mut(&mut that_j), values, &mut others);
-                sort_terms(values, &mut groups, &that_j, last)
-            };
-            Layer { list }
-        }).collect();
+                let list = if column < arity {
+                    // Flow the column bounds forward to `aligned`, then count.
 
-        Forest { layers }.into()
+                    // First, let's determine the counts for each of `this` and `that` at `aligned`.
+                    let mut this_bounds = aligned.0.iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
+                    crate::facts::trie::advance_bounds::<Terms>(&this_values[0 .. this_cursor], &mut this_bounds[..]);
+                    let mut that_bounds = aligned.1.iter().map(|j| (*j,*j+1)).collect::<Vec<_>>();
+                    crate::facts::trie::advance_bounds::<Terms>(&that_values[0 .. that_cursor], &mut that_bounds[..]);
+
+                    // Now let's project forward from `both_need[column]`.
+                    let mut bounds = aligneds[column].iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
+                    crate::facts::trie::advance_bounds::<Terms>(&this[column+1 .. arity], &mut bounds);
+
+                    let mut products = this_bounds.iter().zip(that_bounds.iter()).map(|((l0,u0), (l1,u1))| (u0-l0)*(u1-l1))
+                                                        .zip(old_aligned.iter().copied()).peekable();
+
+                    let counts = bounds.iter().map(|(l,u)| {
+                        let mut count = 0;
+                        while products.next_if(|(_,x)| x < l).is_some() { }
+                        while let Some((c,_)) = products.next_if(|(_,x)| x < u) { count += c; }
+                        count
+                    });
+
+                    // Flatten the (index, count) into repetitions.
+                    let mut flat = Vec::with_capacity(groups.len());
+                    flat.extend(aligneds[column].iter().zip(counts).flat_map(|(i,c)| std::iter::repeat(*i).take(c)));
+                    sort_terms(this[column], &mut groups, &flat, last)
+                }
+                else if column < this.len() {
+                    // We expect this to be the next column in `this_values`.
+                    let values = this_values[this_cursor];
+                    this_cursor += 1;
+
+                    // Expand `this_i`, and corresponding repetitions in `groups` and `that_j`.
+                    let mut others = if that_cursor < that_values.len() { vec![&mut groups, Rc::make_mut(&mut that_j)] } else { vec![&mut groups] };
+                    expand(Rc::make_mut(&mut this_i), values, &mut others);
+                    sort_terms(values, &mut groups, &this_i, last)
+                }
+                else if column < this.len() + arity {
+                    unimplemented!("reference equated column of first join argument")
+                }
+                else {
+                    // We expect this to be the next column in `that_values`.
+                    let values = that_values[that_cursor];
+                    that_cursor += 1;
+
+                    // Expand `that_j`, and corresponding repetitions in `groups` and `this_i`.
+                    let mut others = if this_cursor < this_values.len() { vec![&mut groups, Rc::make_mut(&mut this_i)] } else { vec![&mut groups] };
+                    expand(Rc::make_mut(&mut that_j), values, &mut others);
+                    sort_terms(values, &mut groups, &that_j, last)
+                };
+                Layer { list }
+            }).collect();
+
+            output_lsm.push(Forest { layers });
+        }
+
+        output_lsm
     }
 
     /// For a list of tries with the same shape, extract lists at `[index]` and merge by `[group]`, yielding one sequence of layers in `projection` order.
