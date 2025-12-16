@@ -64,7 +64,7 @@ pub mod types {
         pub fn push(&mut self, rule: Rule) {
             if rule.body.is_empty() {
                 for atom in rule.head.iter() {
-                    use columnar::{Container, Push};
+                    use columnar::Push;
                     use crate::facts::{Forest, Terms};
                     let mut lits = Vec::with_capacity(atom.terms.len());
                     for term in atom.terms.iter() {
@@ -78,7 +78,7 @@ pub mod types {
                             continue;
                         }
                     }
-                    let facts = Forest::<Terms>::from_columns(&lits.iter().map(|l| l.borrow()).collect::<Vec<_>>()[..]);
+                    let facts = Forest::<Terms>::from_columns(lits);
                     self.facts
                         .entry(atom.name.to_owned())
                         .extend([facts]);
