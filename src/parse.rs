@@ -104,6 +104,12 @@ fn parse_term<I: Iterator<Item=Token>>(tokens: &mut Peekable<I>) -> Option<Term>
     }
     else {
         let Token::Text(term) = tokens.next()? else { None? };
-        Some(Term::Lit(term.as_bytes().to_vec()))
+        // For the moment, parse literals only as hex strings of even length.
+        if term.len() % 2 == 0 && &term[0..2] == "0x" {
+            let bytes: Result<Vec<u8>, std::num::ParseIntError> = (2..term.len()).step_by(2).map(|i| u8::from_str_radix(&term[i..i + 2], 16)).collect();
+            if let Ok(bytes) = bytes { return Some(Term::Lit(bytes)); }
+        }
+        println!("Literal {:?} not recognized as a hexidecimal of even length", term);
+        None
     }
 }
