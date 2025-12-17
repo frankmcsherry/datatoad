@@ -16,7 +16,6 @@ enum Token {
     LParen,
     RParen,
     Turnstile,
-    Question,
     Text(String),
 }
 
@@ -27,7 +26,7 @@ fn tokenize(text: &str) -> Option<Vec<Token>> {
 
     let mut result = Vec::new();
 
-    let pattern = ['.', ',', '(', ')', '←', '?'];
+    let pattern = ['.', ',', '(', ')', '←'];
     for token in text.split_inclusive(&pattern) {
         let mut split = token.split(&pattern);
         let prev = split.next().unwrap();
@@ -42,7 +41,6 @@ fn tokenize(text: &str) -> Option<Vec<Token>> {
                 '(' => Token::LParen,
                 ')' => Token::RParen,
                 '←' => Token::Turnstile,
-                '?' => Token::Question,
                 _ => { None? }
             }
         );
@@ -97,19 +95,18 @@ fn parse_atom<I: Iterator<Item=Token>>(tokens: &mut Peekable<I>) -> Option<Atom>
 }
 
 fn parse_term<I: Iterator<Item=Token>>(tokens: &mut Peekable<I>) -> Option<Term> {
-    if let Token::Question = tokens.peek()? {
-        tokens.next()?;
-        let Token::Text(term) = tokens.next()? else { None? };
-        Some(Term::Var(term.clone()))
+    let Token::Text(term) = tokens.next()? else { None? };
+    if let Some(bytes) = parse_lit(term.as_str()) { Some(Term::Lit(bytes)) }
+    else { Some(Term::Var(term.clone())) }
+}
+
+/// Attempt to parse `term` as a hexadecimal representation of a byte sequence.
+///
+/// Strings starting with `0x` and continuing with an even number of hex digits are accepted.
+fn parse_lit(term: &str) -> Option<Vec<u8>> {
+    if term.len() % 2 == 0 && &term[0..2] == "0x" {
+        let bytes: Result<Vec<u8>, std::num::ParseIntError> = (2..term.len()).step_by(2).map(|i| u8::from_str_radix(&term[i..i + 2], 16)).collect();
+        if let Ok(bytes) = bytes { return Some(bytes); }
     }
-    else {
-        let Token::Text(term) = tokens.next()? else { None? };
-        // For the moment, parse literals only as hex strings of even length.
-        if term.len() % 2 == 0 && &term[0..2] == "0x" {
-            let bytes: Result<Vec<u8>, std::num::ParseIntError> = (2..term.len()).step_by(2).map(|i| u8::from_str_radix(&term[i..i + 2], 16)).collect();
-            if let Ok(bytes) = bytes { return Some(Term::Lit(bytes)); }
-        }
-        println!("Literal {:?} not recognized as a hexidecimal of even length", term);
-        None
-    }
+    None
 }
