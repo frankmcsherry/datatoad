@@ -54,6 +54,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
     for (plan_atom, atom) in body[..plan_atoms].iter().enumerate() {
 
         if !plans.contains_key(&plan_atom) { continue; }
+        if !stable && facts.get(atom.name.as_str()).unwrap().recent.is_empty() { continue; }
 
         let plan = &plans[&plan_atom];
 

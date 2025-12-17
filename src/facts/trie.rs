@@ -425,7 +425,6 @@ pub mod terms {
             let aligned_prev = aligned_pos;
             let mut aligned_sum = 0;
             while aligned_pos < counts.len() && aligned_sum < 100_000_000 { aligned_sum += counts[aligned_pos]; aligned_pos += 1; }
-            // println!("\tproducing chunk of {}", aligned_sum);
 
             // Going in to the next phase, we'll need the following variables in scope:
             // 1. `this_i` and `this_values`: indexes of one into the other; same length as `that_j`. columns in order of appearance in `projection`.
@@ -458,9 +457,9 @@ pub mod terms {
                     // Flow the column bounds forward to `aligned`, then count.
 
                     // First, let's determine the counts for each of `this` and `that` at `aligned`.
-                    let mut this_bounds = aligned.0.iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
+                    let mut this_bounds = aligned.0[aligned_prev .. aligned_pos].iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
                     crate::facts::trie::advance_bounds::<Terms>(&this_values[0 .. this_cursor], &mut this_bounds[..]);
-                    let mut that_bounds = aligned.1.iter().map(|j| (*j,*j+1)).collect::<Vec<_>>();
+                    let mut that_bounds = aligned.1[aligned_prev .. aligned_pos].iter().map(|j| (*j,*j+1)).collect::<Vec<_>>();
                     crate::facts::trie::advance_bounds::<Terms>(&that_values[0 .. that_cursor], &mut that_bounds[..]);
 
                     // Now let's project forward from `both_need[column]`.
@@ -745,10 +744,6 @@ pub mod layers {
 
         /// Retains items indicated by `retain`, which is refilled.
         pub fn retain_items(&self, retain: &mut VecDeque<bool>) -> Self { Self { list: terms::retain_items(self.borrow(), retain) } }
-
-        pub fn sort(&self, groups: &mut [usize], indexs: &[usize], last: bool) -> Self {
-            Self { list: sort_terms(self.borrow(), groups, indexs, last) }
-        }
     }
 
     pub mod terms {
