@@ -23,7 +23,7 @@ pub mod types {
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Term {
         Var(String),
-        Lit(String),
+        Lit(Vec<u8>),
     }
 
     impl Term {
@@ -70,7 +70,7 @@ pub mod types {
                     for term in atom.terms.iter() {
                         if let Term::Lit(text) = term {
                             let mut term = Terms::default();
-                            term.push(text.as_bytes());
+                            term.push(text);
                             lits.push(term);
                         }
                         else {
@@ -104,7 +104,7 @@ pub mod types {
         pub input_arity: usize,
     }
 
-    impl Action<String> {
+    impl Action<Vec<u8>> {
         /// Converts a body `Atom` to an `Action`.
         ///
         /// The names of the output columns can be read from `atom.terms`

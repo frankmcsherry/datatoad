@@ -25,7 +25,7 @@ fn implement_action(head: &[Atom], body: &Atom, stable: bool, facts: &mut Relati
         action.projection = atom.terms.iter().map(|term| {
             match term {
                 Term::Var(____) => { action.projection[body.terms.iter().position(|t| t == term).unwrap()].clone() },
-                Term::Lit(data) => { Err(data.to_string()) },
+                Term::Lit(data) => { Err(data.to_vec()) },
             }
         }).collect();
         action
@@ -174,7 +174,7 @@ pub mod plan {
     /// the last plan stage ensures that the order matches that of the rule head.
     pub type Plan<A, T> = Vec<(BTreeSet<A>, BTreeSet<T>, Vec<T>)>;
     pub type Plans<A, T> = BTreeMap<A, Plan<A, T>>;
-    pub type Load<T> = (Action<String>, Vec<T>);
+    pub type Load<T> = (Action<Vec<u8>>, Vec<T>);
     pub type Loads<A, T> = BTreeMap<A, BTreeMap<A, Load<T>>>;
 
     pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a [Atom]) -> (Plans<usize, &'a String>, Loads<usize, &'a String>) {
@@ -246,7 +246,7 @@ pub mod plan {
     pub fn load_actions<A: Ord + Copy, T: Ord + Copy>(
         plans: &BTreeMap<A, Plan<A, T>>,
         atoms_to_terms: &BTreeMap<A, BTreeSet<T>>,
-        base_actions: &BTreeMap<A, Action<String>>,
+        base_actions: &BTreeMap<A, Action<Vec<u8>>>,
     ) -> Loads<A, T> {
 
         // This could be quite general, and use an arbitrary action for each atom in each stage.

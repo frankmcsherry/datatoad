@@ -104,6 +104,6 @@ fn parse_term<I: Iterator<Item=Token>>(tokens: &mut Peekable<I>) -> Option<Term>
     }
     else {
         let Token::Text(term) = tokens.next()? else { None? };
-        Some(Term::Lit(term.clone()))
+        Some(Term::Lit(term.as_bytes().to_vec()))
     }
 }

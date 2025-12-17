@@ -124,10 +124,10 @@ pub mod terms {
         /// Each column should occur in at most one constraint, as otherwise they could be strengthened.
         /// For the moment, this is the caller's responsibility.
         #[inline(never)]
-        fn filter(&self, lit_filters: &[(usize, String)], var_filters: &[Vec<usize>]) -> Self {
+        fn filter(&self, lit_filters: &[(usize, Vec<u8>)], var_filters: &[Vec<usize>]) -> Self {
 
             // Plan the constraints applied to each column, to visit them in order.
-            let mut constraints = std::collections::BTreeMap::<usize, Result<usize, &String>>::default();
+            let mut constraints = std::collections::BTreeMap::<usize, Result<usize, &[u8]>>::default();
             for (col, lit) in lit_filters.iter() { constraints.insert(*col, Err(lit)); }
             for group in var_filters.iter().filter(|g| g.len() > 1) {
                 let min = group.iter().min().unwrap();
@@ -160,7 +160,7 @@ pub mod terms {
                     }
                     Err(lit) => {
                         let mut literal = Lists::<Terms>::default();
-                        use columnar::Push; literal.push([lit.as_bytes()]);
+                        use columnar::Push; literal.push([lit]);
                         let aligned = std::iter::repeat(0).take(active.len()).collect::<Vec<_>>();
                         crate::facts::trie::layers::filter_items::<Terms>(self.layers[col].borrow(), &mut active, literal.values.borrow(), &aligned[..])
                     }
@@ -197,7 +197,7 @@ pub mod terms {
         /// It is important that `projection` introduce columns in strict numeric order, but it can repeat
         /// an introduced column or a introduce a literal column at any point.
         #[inline(never)]
-        fn embellish(&mut self, projection: &[Result<usize, String>]) {
+        fn embellish(&mut self, projection: &[Result<usize, Vec<u8>>]) {
 
             let mut layers = Vec::with_capacity(projection.len());
             for (pos, col) in projection.iter().enumerate().rev() {
@@ -218,7 +218,7 @@ pub mod terms {
                     Err(lit) => {
                         let count = self.layers.last().map(|l| l.list.values.len()).expect("prepending literals isn't yet correct");
                         let mut list = Lists::<Terms>::default();
-                        for _ in 0 .. count { use columnar::Push; list.push([lit.as_bytes()]); }
+                        for _ in 0 .. count { use columnar::Push; list.push([lit]); }
                         Layer { list }
                     },
                 });
@@ -586,7 +586,7 @@ pub mod terms {
     impl FactContainer for Forest<Terms> {
 
         #[inline(never)]
-        fn act_on(&self, action: &Action<String>) -> FactLSM<Self> {
+        fn act_on(&self, action: &Action<Vec<u8>>) -> FactLSM<Self> {
 
             if self.is_empty() { return FactLSM::default(); }
             if action.is_identity() { return self.clone().into(); }

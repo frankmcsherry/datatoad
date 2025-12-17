@@ -34,7 +34,7 @@ pub struct Relations {
 }
 
 /// An alias for a map from actions to fact sets, one for each relation.
-pub type Forms = BTreeMap<Action<String>, FactSet<FactCollection>>;
+pub type Forms = BTreeMap<Action<Vec<u8>>, FactSet<FactCollection>>;
 
 impl Relations {
     pub fn get(&self, name: &str) -> Option<&FactSet<FactCollection>> {
@@ -74,7 +74,7 @@ impl Relations {
     }
 
     /// Ensures that we have an entry for this name and the associated action.
-    pub fn ensure_action(&mut self, name: &str, action: &Action<String>){
+    pub fn ensure_action(&mut self, name: &str, action: &Action<Vec<u8>>){
         let (base, transforms) = self.relations.entry(name.to_string()).or_default();
         if !action.is_identity() && !transforms.contains_key(action) {
             let mut fact_set = FactSet::default();
@@ -97,7 +97,7 @@ impl Relations {
     /// Gets a fact set by name, and by an action that is applied to them.
     ///
     /// This will only be non-`None` once `ensure_action` has been called with this name and action.
-    pub fn get_action(&self, name: &str, action: &Action<String>) -> Option<&FactSet<FactCollection>> {
+    pub fn get_action(&self, name: &str, action: &Action<Vec<u8>>) -> Option<&FactSet<FactCollection>> {
         if action.is_identity() { self.relations.get(name).map(|(base,_)| base) }
         else { self.relations.get(name).and_then(|(_base, transforms)| transforms.get(action)) }
     }
@@ -158,7 +158,7 @@ pub trait Merge {
 pub trait FactContainer : Length + Merge + Default + Sized + Clone {
 
     /// Applies an action to the facts, building the corresponding output.
-    fn act_on(&self, action: &Action<String>) -> FactLSM<Self>;
+    fn act_on(&self, action: &Action<Vec<u8>>) -> FactLSM<Self>;
     /// Joins `self` and `other` on the first `arity` columns, putting projected results in `builders`.
     fn join<'a>(&'a self, other: &'a Self, arity: usize, projection: &[usize]) -> FactLSM<Self> { self.join_many([other].into_iter(), arity, projection) }
     /// The subset of `self` whose facts do not start with any prefix in `others`.
