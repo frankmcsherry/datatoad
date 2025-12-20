@@ -88,9 +88,12 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
             let to_chain = if load_atom > &plan_atom { Some(&other.recent) } else { None };
             let other_facts = other.stable.contents().chain(to_chain).filter(|l| !l.is_empty()).collect::<Vec<_>>();
-            use exec::ExecAtom;
-            if body[*load_atom].anti { Anti((other_facts, load_terms)).join(&mut delta_lsm, &mut delta_terms, &Default::default(), &init_order); }
-            else { (other_facts, load_terms).join(&mut delta_lsm, &mut delta_terms, &Default::default(), &init_order); }
+            let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
+                if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
+                else if body[*load_atom].anti { Box::new(Anti((other_facts, load_terms))) }
+                else { Box::new((other_facts, load_terms)) }
+            };
+            boxed_atom.join(&mut delta_lsm, &mut delta_terms, &Default::default(), &init_order);
         }
         // We may need to produce the result in a different order.
         exec::permute_delta(&mut delta_lsm, &mut delta_terms, init_order.iter().copied());
@@ -103,8 +106,12 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
                 let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
                 let to_chain = if load_atom > &plan_atom && !other.recent.is_empty() { Some(&other.recent) } else { None };
                 let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
-                if atom.anti { Box::new(Anti((other_facts, load_terms))) as Box::<dyn exec::ExecAtom<&String>+'_> }
-                else { Box::new((other_facts, load_terms)) as Box::<dyn exec::ExecAtom<&String>+'_> }
+                let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
+                    if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
+                    else if body[*load_atom].anti { Box::new(Anti((other_facts, load_terms))) }
+                    else { Box::new((other_facts, load_terms)) }
+                };
+                boxed_atom
             }).collect::<Vec<_>>();
 
             exec::wco_join(&mut delta_lsm, &mut delta_terms, &terms, &others[..], &potato, &order[..]);
@@ -186,7 +193,8 @@ pub mod plan {
         // Map from atom identifier to boxed `PlanAtom`, containing term and grounding information.
         let atoms = body.iter().enumerate().map(|(index, atom)| {
             let terms = atom.terms.iter().filter_map(|term| term.as_var()).collect::<BTreeSet<_>>();
-            if !atom.anti { (index, Box::new(terms) as Box::<dyn PlanAtom<&'a String> + 'a>) }
+            if let Some(logic) = crate::plan::logic::resolve(atom) { (index, Box::new(logic) as Box::<dyn PlanAtom<&'a String> + 'a>) }
+            else if !atom.anti { (index, Box::new(terms) as Box::<dyn PlanAtom<&'a String> + 'a>) }
             else { (index, Box::new(crate::plan::Anti(terms)) as Box::<dyn PlanAtom<&'a String> + 'a>) }
         }).collect::<BTreeMap<_,_>>();
 
@@ -494,7 +502,6 @@ pub mod exec {
         potato: T,
         target: &[T],
     ) {
-
         if others.len() == 1 {
             others[0].join(delta_lsm, delta_terms, terms, target);
             return;
@@ -751,10 +758,10 @@ impl<'a, T: Ord + Copy> exec::ExecAtom<T> for Anti<(Vec<&'a Forest<Terms>>, &'a 
 
     fn count(
         &self,
-        _delta_lsm: &mut FactLSM<Forest<Terms>>,
-        _delta_terms: &mut Vec<T>,
-        _terms: &BTreeSet<T>,
-        _other_index: u8,
+        _: &mut FactLSM<Forest<Terms>>,
+        _: &mut Vec<T>,
+        _: &BTreeSet<T>,
+        _: u8,
     ) {
         // Antijoins propose nothing
     }
@@ -776,5 +783,321 @@ impl<'a, T: Ord + Copy> exec::ExecAtom<T> for Anti<(Vec<&'a Forest<Terms>>, &'a 
         let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
         delta = delta.retain_inner(others.iter().map(|o| &o[..prefix]), false);
         delta_shard.push(delta);
+    }
+}
+
+/// Types and traits for relations implemented by computation rather than data.
+pub mod logic {
+
+    use std::collections::BTreeSet;
+
+    use columnar::{Container, Index, Len, Push, Clear};
+
+    use crate::types::{Atom, Term};
+    use crate::facts::FactLSM;
+    use crate::facts::{Forest, Lists, Terms};
+    use crate::facts::trie::Layer;
+    use crate::facts::trie::layers::advance_bounds;
+    use crate::plan::{exec, plan};
+
+    /// Looks for the atom's name in a known list, and returns an implementation if found.
+    ///
+    /// The implementation is a type that implements both `PlanAtom` and `ExecAtom`, and can be boxed as either.
+    pub fn resolve<'a>(atom: &'a Atom) -> Option<LogicRel<&'a String>> {
+        match atom.name.as_str() {
+            ":range" => {
+                let logic: Box<dyn BatchLogic> = Box::new(BatchedLogic { logic: Range } );
+                let bound = atom.terms.iter().map(|t| match t { Term::Var(name) => Ok(name), Term::Lit(data) => Err(data.clone()) }).collect::<Vec<_>>();
+                let terms = bound.iter().flatten().collect::<BTreeSet<_>>().into_iter().copied().collect::<Vec<_>>();
+                Some(LogicRel { logic, bound, terms })
+            },
+            _ => None,
+        }
+    }
+
+
+    /// A type that can behave as a relation in the context of join planning.
+    pub trait Logic {
+        /// The number of columns in the relation.
+        fn arity(&self) -> usize;
+        /// Non-input columns such that for any fixed setting of the input columns, the number of values in the output column is finite.
+        fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize>;
+        /// For a subset of arguments, an upper bound on the number of distinct set of values for arguments in `output`.
+        ///
+        /// When `output` is empty, it is important to emit either `Some(0)` or `Some(1)` to indicate respectively absence or presence.
+        fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: &BTreeSet<usize>) -> Option<usize>;
+        /// For a subset of arguments, populate distinct values for arguments in `output`.
+        fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms));
+    }
+
+    pub trait BatchLogic {
+        /// The number of arguments the logic expects.
+        fn arity(&self) -> usize;
+        /// For concrete values of the supplied arguments, which other arguments can be produced as concrete values.
+        fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize>;
+        /// For a subset of arguments, an upper bound on the number of distinct set of values for arguments in `output`.
+        ///
+        /// When `output` is empty, it is important to emit variously `Some(0)` or `Some(1)` to indicate respectively absence or presence.
+        fn count(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: &BTreeSet<usize>) -> Vec<Option<usize>>;
+        /// For a subset of arguments, populate distinct values for arguments in `output`.
+        fn delve(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: usize) ->Lists<Terms>;
+    }
+
+    /// Relation containing triples lower <= value < upper, all of the same length.
+    pub struct LogicRel<T> {
+        pub logic: Box<dyn super::logic::BatchLogic>,
+        /// In order: `[lower, value, upper]`.
+        ///
+        /// Each are either a term name, or a literal.
+        pub bound: Vec<Result<T, Vec<u8>>>,
+        /// Terms of `bound` in some order, used by exec to lay out records "favorably".
+        pub terms: Vec<T>,
+    }
+
+    impl <T: Ord + Copy> plan::PlanAtom<T> for LogicRel<T> {
+        fn terms(&self) -> BTreeSet<T> { self.terms.iter().cloned().collect() }
+        fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T> {
+            // If `lower` and `upper` are given, we can generate `value`.
+            let lower = match &self.bound[0] { Ok(term) => terms.contains(term), Err(_) => true };
+            let upper = match &self.bound[2] { Ok(term) => terms.contains(term), Err(_) => true };
+            let mut result = BTreeSet::default();
+            if lower && upper { if let Ok(value) = &self.bound[1] { result.insert(value.clone()); } }
+            result
+        }
+    }
+
+    impl<'a, T: Ord + Copy> exec::ExecAtom<T> for LogicRel<T> {
+
+        // Lightly odd, in that we have no preference on term order.
+        fn terms(&self) -> &[T] { &self.terms }
+
+        fn count(
+            &self,
+            facts: &mut FactLSM<Forest<Terms>>,
+            terms: &mut Vec<T>,
+            added: &BTreeSet<T>,
+            my_index: u8,
+        ) {
+            //  Flatten the input, to make our life easier.
+            let mut delta = facts.flatten().unwrap_or_default();
+            if delta.is_empty() { return; }
+
+            //  1.  Prepare the function arguments, a `Vec<Option<(Borrowed, Vec<usize>)>>` indicating present elements of `self.bound`.
+            //      Each present element of `self.bound` presents as a pair of borrowed container and list of counts for each element.
+            //      All present pairs should have the same sum of counts, indicating the total number of argument tuples.
+            let max = self.bound.iter().flatten().flat_map(|term| terms.iter().position(|t| t == term)).max();
+            let cnt = max.map(|col| delta.layers[col].list.values.len()).unwrap_or(1);
+
+            //  Long-lived containers for literal values.
+            //  In an FDB world, we would put these at the root, independent of any input data, rather than to the side.
+            let mut lits = vec![Terms::default(); self.bound.len()];
+            for (index, arg) in self.bound.iter().enumerate() { if let Err(lit) = arg { lits[index].push(lit); } }
+
+            //  The arguments themselves, from indicated layers with counts projected forward to `max` layer.
+            let args: Vec<Option<(<Terms as Container>::Borrowed<'_>, Vec<usize>)>> =
+            self.bound.iter().enumerate().map(|(index, arg)| {
+                match arg {
+                    Ok(term) => {
+                        terms.iter().position(|t| t == term).map(|col| {
+                            let mut bounds = (0 .. delta.layers[col].list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
+                            for i in col+1 .. max.unwrap()+1 { advance_bounds::<Terms>(delta.layers[i].borrow(), &mut bounds)};
+                            let counts = bounds.into_iter().map(|(l, u)| u-l).collect::<Vec<_>>();
+                            (delta.layers[col].list.values.borrow(), counts)
+                        })
+                    },
+                    Err(_) => { Some((lits[index].borrow(), vec![cnt] )) },
+                }
+            }).collect();
+
+            //  2.  Evaluate the function for each setting of the arguments.
+            let added = added.iter().map(|term| self.bound.iter().position(|t| t.as_ref() == Ok(term)).unwrap()).collect::<BTreeSet<_>>();
+            let output = self.logic.count(&args, &added);
+
+            //  3.  Project the output forward to the count column, potentially update count and index.
+            let orders = match max {
+                Some(col) => {
+                    let mut bounds = (0 .. delta.layers[col].list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
+                    for i in col+1 .. delta.layers.len() { advance_bounds::<Terms>(delta.layers[i].borrow(), &mut bounds)};
+                    bounds.into_iter().map(|(l,u)| u-l).collect::<Vec<_>>()
+                },
+                None => { vec![delta.layers.last().unwrap().list.values.len()] }
+            };
+
+            let notes = &mut delta.layers.last_mut().unwrap().list.values.values;
+            for (index, order) in orders.into_iter().enumerate().flat_map(|(i,c)| std::iter::repeat(output[i]).take(c)).enumerate() {
+                if let Some(order) = order {
+                    let order: u8 = (order+1).ilog2() as u8;
+                    if notes[4 * index] >= order {
+                        notes[4 * index] = order;
+                        notes[4 * index + 1] = my_index as u8;
+                    }
+                }
+            }
+
+            facts.push(delta);
+        }
+
+        fn join(
+            &self,
+            facts: &mut FactLSM<Forest<Terms>>,
+            terms: &mut Vec<T>,
+            added: &BTreeSet<T>,
+            _after: &[T],
+        ) {
+            //  Flatten the input, to make our life easier.
+            let mut delta = facts.flatten().unwrap_or_default();
+            if delta.is_empty() { return; }
+
+            //  1.  Prepare the function arguments, a `Vec<Option<(Borrowed, Vec<usize>)>>` indicating present elements of `self.bound`.
+            //      Each present element of `self.bound` presents as a pair of borrowed container and list of counts for each element.
+            //      All present pairs should have the same sum of counts, indicating the total number of argument tuples.
+            let max = self.bound.iter().flatten().flat_map(|term| terms.iter().position(|t| t == term)).max();
+            let cnt = max.map(|col| delta.layers[col].list.values.len()).unwrap_or(1);
+
+            //  Long-lived containers for literal values.
+            //  In an FDB world, we would put these at the root, independent of any input data, rather than to the side.
+            let mut lits = vec![Terms::default(); self.bound.len()];
+            for (index, arg) in self.bound.iter().enumerate() { if let Err(lit) = arg { lits[index].push(lit); } }
+
+            //  The arguments themselves, from indicated layers with counts projected forward to `max` layer.
+            let args: Vec<Option<(<Terms as Container>::Borrowed<'_>, Vec<usize>)>> =
+            self.bound.iter().enumerate().map(|(index, arg)| {
+                match arg {
+                    Ok(term) => {
+                        terms.iter().position(|t| t == term).map(|col| {
+                            let mut bounds = (0 .. delta.layers[col].list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
+                            for i in col+1 .. max.unwrap()+1 { advance_bounds::<Terms>(delta.layers[i].borrow(), &mut bounds)};
+                            let counts = bounds.into_iter().map(|(l, u)| u-l).collect::<Vec<_>>();
+                            (delta.layers[col].list.values.borrow(), counts)
+                        })
+                    },
+                    Err(_) => { Some((lits[index].borrow(), vec![cnt] )) },
+                }
+            }).collect();
+
+            if added.is_empty() {
+                // Semijoin case.
+                let added = added.iter().map(|term| self.bound.iter().position(|t| t.as_ref() == Ok(term)).unwrap()).collect::<BTreeSet<_>>();
+                let keep = self.logic.count(&args, &added).into_iter().map(|x| x != Some(0)).collect::<std::collections::VecDeque<_>>();
+                if let Some(col) = max { delta = delta.retain_core(col, keep); }
+                else if !keep[0] { delta = Default::default(); }
+            }
+            else {
+                let colidx = added.iter().map(|term| self.bound.iter().position(|t| t.as_ref() == Ok(term)).unwrap()).next().unwrap();
+                let column = self.logic.delve(&args, colidx);
+                assert_eq!(added.len(), 1);
+                // TODO: Need to advance to the last layer; in an FDB we could just branch at `max`.
+                let pos = max.map(|c| c+1).unwrap_or(0);
+                //  We are initially 1:1 with the lists of layer pos, or items of layer pos-1.
+                //  We'll want to advance through each of the layers `pos..`.
+                let mut bounds = (0 .. column.len()).map(|i| (i, i+1)).collect::<Vec<_>>();
+                for idx in pos .. delta.layers.len() { advance_bounds::<Terms>(delta.layers[idx].borrow(), &mut bounds); }
+                let mut colnew: Lists<Terms> = Default::default();
+                for idx in 0 .. column.len() {
+                    for _ in bounds[idx].0 .. bounds[idx].1 {
+                        colnew.push(column.borrow().get(idx));
+                    }
+                }
+                delta.layers.push(Layer { list: colnew });//insert(pos, Layer { list: column });
+                terms.push(added.iter().next().unwrap().clone());
+            }
+
+            facts.push(delta);
+        }
+    }
+
+    /// The relation R(x,y,z) : x <= y < z, for terms all of the same length (up to eight bytes).
+    pub struct Range;
+    impl Logic for Range {
+        fn arity(&self) -> usize { 3 }
+        fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { if args.contains(&0) && args.contains(&2) && !args.contains(&1) { [1].into_iter().collect() } else { Default::default() } }
+        fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
+            let result = match (&args[0], &args[1], &args[2]) {
+                (Some(l), None, Some(u)) => {
+                    let mut count = 0;
+                    if l.len() == u.len() {
+                        let l = as_u64(l.as_slice())?;
+                        let u = as_u64(u.as_slice())?;
+                        if l < u { count = u - l; }
+                    }
+                    Some(count as usize)
+                },
+                (Some(l), Some(v), Some(u)) => {
+                    let mut count = 0;
+                    if l.len() == v.len() && l.len() == u.len() {
+                        let l = as_u64(l.as_slice())?;
+                        let v = as_u64(v.as_slice())?;
+                        let u = as_u64(u.as_slice())?;
+                        if l <= v && v < u { count = 1; }
+                    }
+                    Some(count as usize)
+                },
+                _ => None,
+            };
+            result
+        }
+        fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms)) {
+            assert_eq!(output.0, 1);
+            let length = args[0].unwrap().as_slice().len();
+            let lower: u64 = as_u64(args[0].unwrap().as_slice()).unwrap();
+            let upper: u64 = as_u64(args[2].unwrap().as_slice()).unwrap();
+            for value in lower .. upper {
+                output.1.push(&value.to_be_bytes()[(8-length)..]);
+            }
+        }
+    }
+
+    fn as_u64(bytes: &[u8]) -> Option<u64> {
+        if bytes.len() > 8 { None }
+        else {
+            let mut slice = [0u8; 8];
+            slice[8-bytes.len() ..].copy_from_slice(bytes);
+            Some(u64::from_be_bytes(slice))
+        }
+    }
+
+    pub struct BatchedLogic<L: Logic> { pub logic: L }
+
+    impl<L: Logic> BatchLogic for BatchedLogic<L> {
+        fn arity(&self) -> usize { self.logic.arity() }
+        fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { self.logic.bound(args) }
+        fn count(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: &BTreeSet<usize>) -> Vec<Option<usize>> {
+
+            assert!(output.len() < 2);
+
+            // Panic if no arguments are bound; figure out those functions later (how many outputs to produce? one?)
+            // The following is .. neither clear nor performant. It should be at least one of those two things.
+            let length = args.iter().flatten().next().unwrap().1.iter().sum();
+            let mut counts = Vec::with_capacity(length);
+            let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().copied().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
+            let mut values: Vec<Option<<Terms as columnar::Container>::Ref<'_>>> = Vec::default();
+            for _ in 0 .. length {
+                values.clear();
+                Extend::extend(&mut values, indexs.iter_mut().enumerate().map(|(col, i)| i.as_mut().map(|j| args[col].as_ref().unwrap().0.get(j.next().unwrap()))));
+                counts.push(self.logic.count(&values, output));
+            }
+
+            counts
+        }
+        fn delve(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: usize) -> Lists<Terms> {
+
+            // Panic if no arguments are bound; figure out those functions later (how many outputs to produce? one?)
+            // The following is .. neither clear nor performant. It should be at least one of those two things.
+            let length = args.iter().flatten().next().unwrap().1.iter().sum();
+            let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().copied().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
+            let mut values: Vec<Option<<Terms as columnar::Container>::Ref<'_>>> = Vec::default();
+            let mut terms = Terms::default();
+            let mut result: Lists<Terms> = Default::default();
+            for _ in 0 .. length {
+                values.clear();
+                Extend::extend(&mut values, indexs.iter_mut().enumerate().map(|(col, i)| i.as_mut().map(|j| args[col].as_ref().unwrap().0.get(j.next().unwrap()))));
+                self.logic.delve(&values, (output, &mut terms));
+                result.push(terms.borrow().into_index_iter());
+                terms.clear();
+            }
+            assert_eq!(result.len(), length);
+            result
+        }
+
     }
 }

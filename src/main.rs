@@ -137,6 +137,7 @@ fn handle_command(text: &str, state: &mut types::State, timer: &mut std::time::I
                     }
                     else { println!(".load command requires arguments: <name> <patt> <file>"); }
                 }
+                ".note" => { }
                 ".save" => { println!("unimplemented: {:?}", word); }
                 ".time" => {
                     println!("time:\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());
