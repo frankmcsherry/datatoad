@@ -51,13 +51,17 @@ pub trait ExecAtom<T: Ord> {
 /// The method updates both `delta` and `delta_terms`.
 /// The method assumes that some prefix of `other_terms` is present in `delta_terms`, and no further terms
 /// from `other_terms` around found there. The caller must restrict `other_terms` to make this the case.
+///
+/// The `align` argument indicates that columns in `delta_terms` absent from `other_terms` should be added afterwards.
+/// When `align` is not set, only those terms present in both `delta_terms` and `other_terms` are produced.
 pub fn permute_delta<F: FactContainer, T: Ord + Copy>(
     delta: &mut FactLSM<F>,
     delta_terms: &mut Vec<T>,
     other_terms: impl Iterator<Item = T>,
+    align: bool,
 ) {
     let mut permutation: Vec<usize> = other_terms.flat_map(|t1| delta_terms.iter().position(|t2| &t1 == t2)).collect();
-    for index in 0 .. delta_terms.len() { if !permutation.contains(&index) { permutation.push(index); }}
+    if align { for index in 0 .. delta_terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
 
     if permutation.iter().enumerate().any(|(index, i)| &index != i) {
         let mut flattened = delta.flatten().unwrap_or_default().act_on(&Action::permutation(permutation.iter().copied()));
@@ -102,7 +106,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
             let mut active_target = active.clone();
             active_target.extend(terms.iter().copied());
             wco_join_inner(delta_lsm, &mut active_clone, terms, others, potato, &active_target);
-            permute_delta(delta_lsm, &mut active_clone, delta_terms[..active.len()].iter().copied());
+            permute_delta(delta_lsm, &mut active_clone, delta_terms[..active.len()].iter().copied(), true);
 
             let mut crossed_terms = delta_terms.clone();
             crossed_terms.extend(delta_terms[..active.len()].iter().copied());
@@ -181,8 +185,10 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
             }
 
             // Put in common layout (`target`) then merge.
-            permute_delta(&mut delta_shard, &mut delta_shard_terms, target.iter().copied());
-            delta_lsm.extend(&mut delta_shard);
+            permute_delta(&mut delta_shard, &mut delta_shard_terms, target.iter().copied(), false);
+            let mut delta_shard = delta_shard.flatten().unwrap_or_default();
+            delta_shard.layers.truncate(target.len());
+            delta_lsm.push(delta_shard);
         }
     }
 

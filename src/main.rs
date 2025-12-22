@@ -3,6 +3,11 @@ use std::io::{BufReader, BufRead};
 
 use datatoad::{parse, types};
 
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 fn main() {
 
     let mut state = types::State::default();

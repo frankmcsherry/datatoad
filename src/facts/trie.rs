@@ -420,8 +420,6 @@ pub mod terms {
             this_bounds.iter().zip(that_bounds.iter()).map(|((l0,u0),(l1,u1))| (u0-l0) * (u1-l1)).collect::<Vec<_>>()
         };
 
-        // println!("About to produce {} facts", counts.iter().sum::<usize>());
-
         let mut output_lsm: FactLSM<Forest<Terms>> = Default::default();
         let mut aligned_pos = 0;
         while aligned_pos < counts.len() {
@@ -676,7 +674,13 @@ pub mod terms {
             self.retain_core(other_arity, include)
         }
 
+        /// Retains facts based on a bitmap for a layer of the trie.
+        ///
+        /// The bitmap is inserted between layer_index - 1 and layer_index, restricting either the items of layer_index-1 or the lists of layer_index.
         pub fn retain_core(mut self, layer_index: usize, mut include: std::collections::VecDeque<bool>) -> Self {
+
+            if layer_index > 0 { assert_eq!(include.len(), self.layers[layer_index-1].list.values.len()); }
+            if layer_index < self.layers.len() { assert_eq!(include.len(), self.layers[layer_index].list.len()); }
 
             // If not all items are included, restrict layers of `self`.
             if include.iter().all(|x| *x) { return self; }

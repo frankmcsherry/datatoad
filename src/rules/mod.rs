@@ -117,7 +117,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             boxed_atom.join(&mut delta_lsm, &mut delta_terms, &Default::default(), &init_order);
         }
         // We may need to produce the result in a different order.
-        crate::rules::exec::permute_delta(&mut delta_lsm, &mut delta_terms, init_order.iter().copied());
+        crate::rules::exec::permute_delta(&mut delta_lsm, &mut delta_terms, init_order.iter().copied(), true);
 
         // Stage 2: Each other plan stage.
         for (atoms, terms, order) in plan.iter().skip(1) {
@@ -136,7 +136,6 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             }).collect::<Vec<_>>();
 
             exec::wco_join(&mut delta_lsm, &mut delta_terms, &terms, &others[..], &potato, &order[..]);
-
         }
 
         // Stage 3: We now need to form up the facts to commit back to `facts`.
@@ -196,7 +195,7 @@ pub mod data {
             let (other_facts, other_terms) = self;
 
             let prefix = other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
-            crate::rules::exec::permute_delta(delta_lsm, delta_terms, other_terms[..prefix].iter().copied());
+            crate::rules::exec::permute_delta(delta_lsm, delta_terms, other_terms[..prefix].iter().copied(), true);
             let mut delta = delta_lsm.flatten().unwrap_or_default();
             if !delta.is_empty() {
                 let mut counts = vec![0; delta.layers[prefix-1].list.values.len()];
@@ -271,7 +270,7 @@ pub mod data {
 
                 // join with atom: permute `delta_shard` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
                 let prefix = other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
-                crate::rules::exec::permute_delta(delta_shard, delta_terms, other_terms[..prefix].iter().copied());
+                crate::rules::exec::permute_delta(delta_shard, delta_terms, other_terms[..prefix].iter().copied(), true);
                 let delta = delta_shard.flatten().unwrap_or_default();
                 let join_terms = delta_terms.iter().chain(delta_terms[..prefix].iter()).chain(terms.iter()).copied().collect::<Vec<_>>();
                 // Our output join order (until we learn how to do FDB shapes) is the first of `others` not equal to ourself.
@@ -286,7 +285,7 @@ pub mod data {
                 let (next_other_facts, next_other_terms) = self;
 
                 let prefix = next_other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
-                crate::rules::exec::permute_delta(delta_shard, delta_terms, next_other_terms[..prefix].iter().copied());
+                crate::rules::exec::permute_delta(delta_shard, delta_terms, next_other_terms[..prefix].iter().copied(), true);
                 let mut delta = delta_shard.flatten().unwrap_or_default();
                 let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
                 delta = delta.retain_inner(others.iter().map(|o| &o[..prefix]), true);
@@ -333,13 +332,12 @@ pub mod antijoin {
             terms: &BTreeSet<T>,
             _after: &[T],
         ) {
-            assert!(terms.is_empty());
-
             let (next_other_facts, next_other_terms) = &self.0;
 
             let prefix = next_other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
-            crate::rules::exec::permute_delta(delta_shard, delta_terms, next_other_terms[..prefix].iter().copied());
+            crate::rules::exec::permute_delta(delta_shard, delta_terms, next_other_terms[..prefix].iter().copied(), true);
             let mut delta = delta_shard.flatten().unwrap_or_default();
+            assert!(terms.is_empty() || delta.is_empty());
             let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
             delta = delta.retain_inner(others.iter().map(|o| &o[..prefix]), false);
             delta_shard.push(delta);
@@ -372,12 +370,8 @@ pub mod logic {
     /// The implementation is a type that implements both `PlanAtom` and `ExecAtom`, and can be boxed as either.
     pub fn resolve<'a>(atom: &'a Atom) -> Option<LogicRel<&'a String>> {
         match atom.name.as_str() {
-            ":range" => {
-                let logic: Box<dyn BatchLogic> = Box::new(BatchedLogic { logic: relations::Range } );
-                let bound = atom.terms.iter().map(|t| match t { Term::Var(name) => Ok(name), Term::Lit(data) => Err(data.clone()) }).collect::<Vec<_>>();
-                let terms = bound.iter().flatten().collect::<BTreeSet<_>>().into_iter().copied().collect::<Vec<_>>();
-                Some(LogicRel { logic, bound, terms })
-            },
+            ":noteq" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::NotEq } ), &atom)),
+            ":range" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Range } ), &atom)),
             _ => None,
         }
     }
@@ -410,7 +404,7 @@ pub mod logic {
         fn delve(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: usize) ->Lists<Terms>;
     }
 
-    /// Relation containing triples lower <= value < upper, all of the same length.
+    /// A wrapper for general logic-backed relations that manages the terms in each position.
     pub struct LogicRel<T> {
         pub logic: Box<dyn super::logic::BatchLogic>,
         /// In order: `[lower, value, upper]`.
@@ -421,15 +415,23 @@ pub mod logic {
         pub terms: Vec<T>,
     }
 
+    impl<'a> LogicRel<&'a String> {
+        /// Create a new instance of `Self` from batch logic and the atom itself.
+        pub fn new(logic: Box<dyn super::logic::BatchLogic>, atom: &'a Atom) -> Self {
+            let bound = atom.terms.iter().map(|t| match t { Term::Var(name) => Ok(name), Term::Lit(data) => Err(data.clone()) }).collect::<Vec<_>>();
+            let terms = bound.iter().flatten().collect::<BTreeSet<_>>().into_iter().copied().collect::<Vec<_>>();
+            Self { logic, bound, terms }
+        }
+    }
+
     impl <T: Ord + Copy> plan::PlanAtom<T> for LogicRel<T> {
         fn terms(&self) -> BTreeSet<T> { self.terms.iter().cloned().collect() }
         fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T> {
-            // If `lower` and `upper` are given, we can generate `value`.
-            let lower = match &self.bound[0] { Ok(term) => terms.contains(term), Err(_) => true };
-            let upper = match &self.bound[2] { Ok(term) => terms.contains(term), Err(_) => true };
-            let mut result = BTreeSet::default();
-            if lower && upper { if let Ok(value) = &self.bound[1] { result.insert(value.clone()); } }
-            result
+            let indexes = self.bound.iter().enumerate().filter(|(_index, term)| match term {
+                Ok(name) => terms.contains(name),
+                Err(_) => true,
+            }).map(|(index,_term)| index).collect();
+            self.logic.bound(&indexes).into_iter().map(|index| self.bound[index].as_ref().unwrap()).copied().collect()
         }
     }
 
@@ -546,8 +548,7 @@ pub mod logic {
                 // Semijoin case.
                 let added = added.iter().map(|term| self.bound.iter().position(|t| t.as_ref() == Ok(term)).unwrap()).collect::<BTreeSet<_>>();
                 let keep = self.logic.count(&args, &added).into_iter().map(|x| x != Some(0)).collect::<std::collections::VecDeque<_>>();
-                if let Some(col) = max { delta = delta.retain_core(col, keep); }
-                else if !keep[0] { delta = Default::default(); }
+                delta = delta.retain_core(max.map(|c| c+1).unwrap_or(0), keep);
             }
             else {
                 let colidx = added.iter().map(|term| self.bound.iter().position(|t| t.as_ref() == Ok(term)).unwrap()).next().unwrap();
@@ -632,6 +633,20 @@ pub mod logic {
                 slice[8-bytes.len() ..].copy_from_slice(bytes);
                 Some(u64::from_be_bytes(slice))
             }
+        }
+
+        /// The relation R(x,y) : x != y.
+        pub struct NotEq;
+        impl super::Logic for NotEq {
+            fn arity(&self) -> usize { 2 }
+            fn bound(&self, _args: &BTreeSet<usize>) -> BTreeSet<usize> { Default::default() }
+            fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
+                match (&args[0], &args[1]) {
+                    (Some(x), Some(y)) => { if x.as_slice() == y.as_slice() { Some(0) } else { Some(1) } },
+                    _ => None,
+                }
+            }
+            fn delve(&self, _args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: (usize, &mut Terms)) { panic!("NotEq asked to enumerate values"); }
         }
 
         /// The relation R(x,y,z) : x <= y < z, for terms all of the same length (up to eight bytes).
