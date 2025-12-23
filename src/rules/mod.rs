@@ -600,8 +600,6 @@ pub mod logic {
         fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { self.logic.bound(args) }
         fn count(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: &BTreeSet<usize>) -> Vec<Option<usize>> {
 
-            assert!(output.len() < 2);
-
             // The following is .. neither clear nor performant. It should be at least one of those two things.
             let length = args.iter().flatten().next().map(|a| a.1.iter().sum()).unwrap_or(1);
             let mut counts = Vec::with_capacity(length);
