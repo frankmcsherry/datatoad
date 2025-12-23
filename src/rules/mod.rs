@@ -150,7 +150,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         for (_, atom) in head.iter().enumerate().filter(|(pos,_)| Some(*pos) != exact_match) {
             let mut action = Action::with_arity(delta_terms.len());
             action.projection = atom.terms.iter().map(|t| match t {
-                Term::Var(name) => Ok(delta_terms.iter().position(|t2| t2 == &name).unwrap()),
+                Term::Var(name) => Ok(delta_terms.iter().position(|t2| t2 == &name).expect(format!("Failed to find {:?} in {:?}", name, delta_terms).as_str())),
                 Term::Lit(data) => Err(data.clone()),
             }).collect();
             let delta = delta_lsm.flatten().unwrap_or_default();
@@ -372,6 +372,9 @@ pub mod logic {
         match atom.name.as_str() {
             ":noteq" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::NotEq } ), &atom)),
             ":range" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Range } ), &atom)),
+            ":plus"  => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Plus } ),  &atom)),
+            ":times" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Times } ), &atom)),
+            ":print" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Print(atom.terms.len()) } ), &atom)),
             _ => None,
         }
     }
@@ -381,13 +384,29 @@ pub mod logic {
     pub trait Logic {
         /// The number of columns in the relation.
         fn arity(&self) -> usize;
-        /// Non-input columns such that for any fixed setting of the input columns, the number of values in the output column is finite.
+
+        /// For input columns, any other columns the type can fully substantiate from concrete values of the input columns.
+        ///
+        /// Returning output columns introduces an obligation that the type can be relied on to substantiate concrete values.
+        /// The obligation means that `self.count` must be non-`None` for concrete values of these columns, and `self.delve`
+        /// must provide values for those columns (it can produce zero values, but cannot panic or otherwise nope out).
         fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize>;
-        /// For a subset of arguments, an upper bound on the number of distinct set of values for arguments in `output`.
+
+        /// For values of some input columns, an upper bound on the number of distinct corresponding tuples in `output`.
+        ///
+        /// This method may be invoked with input and output column pairs returned by `self.bound` and no others, and must return `Some`
+        /// values for concrete values of any input columns for which `self.bound` indicated the output columns.
+        /// If this method is called on input columns not advertised by `self.bound`, it may return either `Some` or `None` values.
         ///
         /// When `output` is empty, it is important to emit either `Some(0)` or `Some(1)` to indicate respectively absence or presence.
+        /// It is important that this result be accurate, as the type will not be given another chance to decline the records.
         fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: &BTreeSet<usize>) -> Option<usize>;
-        /// For a subset of arguments, populate distinct values for arguments in `output`.
+
+        /// For values of some input columns, populate distinct values for arguments in `output`.
+        ///
+        /// This method may be called for any concrete values for which `self.count` returned a specific non-zero value (neither `None` nor `Some(0)`).
+        /// The number of results should not exceed the value reported by `self.count`, though the only certain correctness requirement
+        /// is that it should not plan to return any values if the count was advertised as `Some(0)`, as it may not get the chance.
         fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms));
     }
 
@@ -635,6 +654,22 @@ pub mod logic {
             }
         }
 
+        /// Decodes a number of optional byte slices as correspondingly optional `u64` data.
+        ///
+        /// The method returns `None` if the number of arguments is not `K`, if the slice lengths differ, or if any exceed eight.
+        fn decode_u64<const K: usize>(args: &[Option<<Terms as columnar::Container>::Ref<'_>>]) -> Option<([Option<u64>; K], usize)> {
+            let mut width: Option<usize> = None;
+            let mut result: [Option<u64>; K] = [None; K];
+            for index in 0 .. K {
+                if let Some(bytes) = &args[index] {
+                    if width.is_some() && width != Some(bytes.len()) { None?; }
+                    width = Some(bytes.len());
+                    result[index] = Some(as_u64(bytes.as_slice())?);
+                }
+            }
+            Some((result, width?))
+        }
+
         /// The relation R(x,y) : x != y.
         pub struct NotEq;
         impl super::Logic for NotEq {
@@ -649,35 +684,92 @@ pub mod logic {
             fn delve(&self, _args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: (usize, &mut Terms)) { panic!("NotEq asked to enumerate values"); }
         }
 
+        /// The relation R(x,y,z) : x * y = z, for terms all of the same length (up to eight bytes).
+        pub struct Times;
+        impl super::Logic for Times {
+            fn arity(&self) -> usize { 3 }
+            fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> {
+                if args.len() > 1 || args.contains(&2) { (0 .. 2).filter(|i| !args.contains(i)).collect() } else { Default::default() }
+            }
+            fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
+                // Any two+ bound terms should lead to a `Some(0)` or `Some(1)` determination.
+                if let Some((decoded, width)) = decode_u64::<3>(args) {
+                    match decoded {
+                        [Some(x), Some(y), Some(z)] => { let (mul, ovr) = u64::overflowing_mul(x, y); if !ovr && mul == z { Some(1) } else { Some(0) }},
+                        [Some(x), Some(y),    None] => { let (mul, ovr) = u64::overflowing_mul(x, y); if !ovr && ((mul >> width) == 0) { Some(1) } else { Some(0) } },
+                        [None,    Some(y), Some(z)] => { if y > 0 && y <= z && (z / y) * y == z { Some(1) } else { Some(0) } },
+                        [Some(x), None,    Some(z)] => { if x > 0 && x <= z && (z / x) * x == z { Some(1) } else { Some(0) } },
+                        // If we only have z, we there are only so many products that can form `z`.
+                        [None,    None,    Some(z)] => { Some((z.isqrt() + 1) as usize) },
+                        _ => None
+                    }
+                }
+                else { Some(0) }
+            }
+            fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms)) {
+                if let Some((decoded, width)) = decode_u64::<3>(args) {
+                    match decoded {
+                        [Some(x), Some(y),    None] => { let (mul, ovr) = u64::overflowing_mul(x, y); if !ovr && ((mul >> width) == 0) { output.1.push(&mul.to_be_bytes()[(8-width)..]) } },
+                        [None,    Some(y), Some(z)] => { if y > 0 && y <= z && (z / y) * y == z { output.1.push(&(z/y).to_be_bytes()[(8-width)..]) } },
+                        [Some(x), None,    Some(z)] => { if x > 0 && x <= z && (z / x) * x == z { output.1.push(&(z/x).to_be_bytes()[(8-width)..]) } },
+                        // If we only have z, we there are only so many products that can form `z`.
+                        [None,    None,    Some(z)] => {
+                            for i in 0 .. z.isqrt()+1 {
+                                if (z / i) * i == z { output.1.push(&i.to_be_bytes()[(8-width)..]); }
+                            }
+                        },
+                        _ => { }
+                    }
+                }
+            }
+        }
+
+        /// The relation R(x,y,z) : x + y = z, for terms all of the same length (up to eight bytes).
+        pub struct Plus;
+        impl super::Logic for Plus {
+            fn arity(&self) -> usize { 3 }
+            fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { if args.len() > 1 { (0 .. 2).filter(|i| !args.contains(i)).collect() } else { Default::default() } }
+            fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
+                // Any two+ bound terms should lead to a `Some(0)` or `Some(1)` determination.
+                if let Some((decoded, width)) = decode_u64::<3>(args) {
+                    match decoded {
+                        [Some(x), Some(y), Some(z)] => { let (sum, ovr) = u64::overflowing_add(x, y); if !ovr && sum == z { Some(1) } else { Some(0) }},
+                        [Some(x), Some(y),    None] => { let (sum, ovr) = u64::overflowing_add(x, y); if !ovr && ((sum >> width) == 0) { Some(1) } else { Some(0) } },
+                        [Some(x),    None, Some(z)] => { if x <= z { Some(1) } else { Some(0) } },
+                        [None,    Some(y), Some(z)] => { if y <= z { Some(1) } else { Some(0) } },
+                        // TODO: There are some things that we could say more about, e.g. that a `z` has a count of `z+1` because there are that many ways to add up to `z`.
+                        //       Based on unsigned math, as signed integers would have unbounded options. Seems likely to be a bad idea to propose this, without a better upper bound.
+                        _ => None
+                    }
+                }
+                else { Some(0) }
+            }
+            fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms)) {
+                if let Some((decoded, width)) = decode_u64::<3>(args) {
+                    match decoded {
+                        [Some(x), Some(y),    None] => { let (sum, ovr) = u64::overflowing_add(x, y); if !ovr && ((sum >> width) == 0) { output.1.push(&sum.to_be_bytes()[(8-width)..]) } },
+                        [Some(x), None,    Some(z)] => { if x <= z { output.1.push(&(z-x).to_be_bytes()[(8-width)..]) } },
+                        [None,    Some(y), Some(z)] => { if y <= z { output.1.push(&(z-y).to_be_bytes()[(8-width)..]) } },
+                        _ => { }
+                    }
+                }
+            }
+        }
+
         /// The relation R(x,y,z) : x <= y < z, for terms all of the same length (up to eight bytes).
         pub struct Range;
         impl super::Logic for Range {
             fn arity(&self) -> usize { 3 }
             fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { if args.contains(&0) && args.contains(&2) && !args.contains(&1) { [1].into_iter().collect() } else { Default::default() } }
             fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
-                let result = match (&args[0], &args[1], &args[2]) {
-                    (Some(l), None, Some(u)) => {
-                        let mut count = 0;
-                        if l.len() == u.len() {
-                            let l = as_u64(l.as_slice())?;
-                            let u = as_u64(u.as_slice())?;
-                            if l < u { count = u - l; }
-                        }
-                        Some(count as usize)
-                    },
-                    (Some(l), Some(v), Some(u)) => {
-                        let mut count = 0;
-                        if l.len() == v.len() && l.len() == u.len() {
-                            let l = as_u64(l.as_slice())?;
-                            let v = as_u64(v.as_slice())?;
-                            let u = as_u64(u.as_slice())?;
-                            if l <= v && v < u { count = 1; }
-                        }
-                        Some(count as usize)
-                    },
-                    _ => None,
-                };
-                result
+                if let Some((decoded, _width)) = decode_u64::<3>(args) {
+                    match decoded {
+                        [Some(l), None,    Some(u)] => { if l < u { Some((u-l) as usize) } else { Some(0) } },
+                        [Some(l), Some(v), Some(u)] => { if l <= v && v < u { Some(1) } else { Some(0) } },
+                        _ => None,
+                    }
+                }
+                else { Some(0) }
             }
             fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms)) {
                 assert_eq!(output.0, 1);
@@ -688,6 +780,19 @@ pub mod logic {
                     output.1.push(&value.to_be_bytes()[(8-length)..]);
                 }
             }
+        }
+
+        /// The relation R(x,y,z) : x <= y < z, for terms all of the same length (up to eight bytes).
+        pub struct Print(pub usize);
+        impl super::Logic for Print {
+            fn arity(&self) -> usize { self.0 }
+            fn bound(&self, _args: &BTreeSet<usize>) -> BTreeSet<usize> { println!("asking Print"); Default::default() }
+            fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: &BTreeSet<usize>) -> Option<usize> { if output.is_empty() {
+                for arg in args.iter() { print!("0x"); for byte in arg.unwrap().as_slice().iter() { print!("{:0>2x}", byte); } print!("\t"); }
+                println!();
+                Some(1)
+            } else { None } }
+            fn delve(&self, _args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: (usize, &mut Terms)) { unimplemented!() }
         }
     }
 }
