@@ -233,7 +233,7 @@ impl<A: Ord+Copy, T: Ord+Copy> Strategy<A, T> for ByTerm {
             next_terms.sort_by_key(|t| terms_to_atoms[t].len());
             // If we can't find a term, we'll need to pick any groundable term (e.g. a cross join with a data-backed relation).
             let next_term = next_terms.last().copied().unwrap_or_else(|| atoms_to_terms.values().flat_map(|a| a.ground(&terms)).filter(|t| !terms.contains(t)).next().unwrap());
-            let next_atoms = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].terms().iter().any(|t| terms.contains(t))).copied().collect();
+            let next_atoms = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].terms().contains(&next_term)).copied().collect();
 
             terms.insert(next_term);
             plan.push((next_atoms, [next_term].into_iter().collect(), Vec::new()));

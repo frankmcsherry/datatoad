@@ -602,9 +602,8 @@ pub mod logic {
 
             assert!(output.len() < 2);
 
-            // Panic if no arguments are bound; figure out those functions later (how many outputs to produce? one?)
             // The following is .. neither clear nor performant. It should be at least one of those two things.
-            let length = args.iter().flatten().next().unwrap().1.iter().sum();
+            let length = args.iter().flatten().next().map(|a| a.1.iter().sum()).unwrap_or(1);
             let mut counts = Vec::with_capacity(length);
             let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().copied().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
             let mut values: Vec<Option<<Terms as columnar::Container>::Ref<'_>>> = Vec::default();
@@ -618,9 +617,8 @@ pub mod logic {
         }
         fn delve(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: usize) -> Lists<Terms> {
 
-            // Panic if no arguments are bound; figure out those functions later (how many outputs to produce? one?)
             // The following is .. neither clear nor performant. It should be at least one of those two things.
-            let length = args.iter().flatten().next().unwrap().1.iter().sum();
+            let length = args.iter().flatten().next().map(|a| a.1.iter().sum()).unwrap_or(1);
             let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().copied().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
             let mut values: Vec<Option<<Terms as columnar::Container>::Ref<'_>>> = Vec::default();
             let mut terms = Terms::default();
@@ -786,7 +784,7 @@ pub mod logic {
         pub struct Print(pub usize);
         impl super::Logic for Print {
             fn arity(&self) -> usize { self.0 }
-            fn bound(&self, _args: &BTreeSet<usize>) -> BTreeSet<usize> { println!("asking Print"); Default::default() }
+            fn bound(&self, _args: &BTreeSet<usize>) -> BTreeSet<usize> { Default::default() }
             fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: &BTreeSet<usize>) -> Option<usize> { if output.is_empty() {
                 for arg in args.iter() { print!("0x"); for byte in arg.unwrap().as_slice().iter() { print!("{:0>2x}", byte); } print!("\t"); }
                 println!();
