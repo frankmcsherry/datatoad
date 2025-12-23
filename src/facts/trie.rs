@@ -42,7 +42,7 @@ impl<C: Container> Forest<C> {
 }
 
 /// Advances pairs of lower and upper bounds on lists through each presented layer, to lower and upper bounds on items.
-fn advance_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed<'_>], bounds: &mut[(usize, usize)]) {
+pub fn advance_bounds<C: Container>(layers: &[<Lists<C> as Container>::Borrowed<'_>], bounds: &mut[(usize, usize)]) {
     for layer in layers.iter() { crate::facts::trie::layers::advance_bounds::<C>(*layer, bounds); }
 }
 
@@ -231,6 +231,11 @@ pub mod terms {
     /// Produces columns in the order indicated by `projection`, for the subset of indexes in `indexs`.
     #[inline(never)]
     fn permute_subset(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Layer<Terms>> {
+
+        for index in 1 .. in_layers.len() {
+            assert_eq!(in_layers[index-1].values.len(), in_layers[index].len());
+        }
+
         // Determine a leading prefix of the form `0 ..`. These columns can be extracted efficiently.
         let mut prefix = 0;
         while projection.get(prefix) == Some(&prefix) { prefix += 1; }
@@ -414,8 +419,6 @@ pub mod terms {
             crate::facts::trie::advance_bounds::<Terms>(&that_values[..], &mut that_bounds[..]);
             this_bounds.iter().zip(that_bounds.iter()).map(|((l0,u0),(l1,u1))| (u0-l0) * (u1-l1)).collect::<Vec<_>>()
         };
-
-        // println!("About to produce {} facts", counts.iter().sum::<usize>());
 
         let mut output_lsm: FactLSM<Forest<Terms>> = Default::default();
         let mut aligned_pos = 0;
@@ -641,7 +644,7 @@ pub mod terms {
         }
 
         #[inline(never)]
-        pub fn retain_inner<'a>(mut self, others: impl Iterator<Item = &'a [<Lists<Terms> as Container>::Borrowed<'a>]>, semi: bool) -> Self {
+        pub fn retain_inner<'a>(self, others: impl Iterator<Item = &'a [<Lists<Terms> as Container>::Borrowed<'a>]>, semi: bool) -> Self {
 
             if self.is_empty() { return self; }
 
@@ -668,11 +671,22 @@ pub mod terms {
                 }
             }
 
+            self.retain_core(other_arity, include)
+        }
+
+        /// Retains facts based on a bitmap for a layer of the trie.
+        ///
+        /// The bitmap is inserted between layer_index - 1 and layer_index, restricting either the items of layer_index-1 or the lists of layer_index.
+        pub fn retain_core(mut self, layer_index: usize, mut include: std::collections::VecDeque<bool>) -> Self {
+
+            if layer_index > 0 { assert_eq!(include.len(), self.layers[layer_index-1].list.values.len()); }
+            if layer_index < self.layers.len() { assert_eq!(include.len(), self.layers[layer_index].list.len()); }
+
             // If not all items are included, restrict layers of `self`.
             if include.iter().all(|x| *x) { return self; }
             else {
                 // If there are additional layers, clone `include` and update unexplored layers.
-                if self.layers.len() > other_arity {
+                if self.layers.len() > layer_index {
 
                     let mut prev = None;
                     let mut bounds = Vec::default();
@@ -684,12 +698,12 @@ pub mod terms {
                         }
                     }
 
-                    for layer in self.layers[other_arity..].iter_mut() {
+                    for layer in self.layers[layer_index..].iter_mut() {
                         *layer = layer.retain_lists(&mut bounds);
                     }
                 }
-                // In any case, update prior layers from `other_arity` back to the first.
-                for layer in self.layers[..other_arity].iter_mut().rev() {
+                // In any case, update prior layers from `layer_index` back to the first.
+                for layer in self.layers[..layer_index].iter_mut().rev() {
                     if include.iter().all(|x| *x) { return self; }  // TODO: make this test cheaper.
                     *layer = layer.retain_items(&mut include);
                 }
@@ -1012,6 +1026,7 @@ pub mod layers {
     }
 
     /// Sort the items of `lists` subject to the grouping/ordering of `group` of the lists.
+    #[inline(never)]
     pub fn col_sort<'a, C: Container<Ref<'a>: Ord>>(items: C::Borrowed<'a>, groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<C> {
 
         let mut output = Lists::<C>::default();

@@ -3,6 +3,11 @@ use std::io::{BufReader, BufRead};
 
 use datatoad::{parse, types};
 
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 fn main() {
 
     let mut state = types::State::default();
@@ -137,6 +142,7 @@ fn handle_command(text: &str, state: &mut types::State, timer: &mut std::time::I
                     }
                     else { println!(".load command requires arguments: <name> <patt> <file>"); }
                 }
+                ".note" => { }
                 ".save" => { println!("unimplemented: {:?}", word); }
                 ".time" => {
                     println!("time:\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());

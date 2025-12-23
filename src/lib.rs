@@ -1,7 +1,6 @@
 pub mod parse;
 pub mod facts;
-
-pub mod plan;
+pub mod rules;
 
 pub mod types {
 
@@ -43,7 +42,7 @@ pub mod types {
             self.advance();
             while self.active() {
                 for rule in self.rules.iter() {
-                    crate::plan::implement(rule, false, &mut self.facts);
+                    crate::rules::implement(rule, false, &mut self.facts);
                 }
                 self.advance();
             }
@@ -85,7 +84,7 @@ pub mod types {
                 }
             }
             else {
-                crate::plan::implement(&rule, true, &mut self.facts);
+                crate::rules::implement(&rule, true, &mut self.facts);
                 self.rules.push(rule);
             }
         }
