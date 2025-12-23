@@ -82,6 +82,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
 ) {
     if others.len() == 1 {
         others[0].join(delta_lsm, delta_terms, terms, target);
+        permute_delta(delta_lsm, delta_terms, target.iter().copied(), false);
         return;
     }
 

@@ -534,7 +534,7 @@ pub mod logic {
         ) {
             //  Flatten the input, to make our life easier.
             let mut delta = facts.flatten().unwrap_or_default();
-            if delta.is_empty() { return; }
+            if delta.is_empty() { terms.push(added.iter().next().unwrap().clone()); return; }
 
             //  1.  Prepare the function arguments, a `Vec<Option<(Borrowed, Vec<usize>)>>` indicating present elements of `self.bound`.
             //      Each present element of `self.bound` presents as a pair of borrowed container and list of counts for each element.
