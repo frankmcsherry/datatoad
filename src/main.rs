@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::{BufReader, BufRead};
+use std::collections::BTreeMap;
 
 use datatoad::{parse, types};
 
@@ -12,11 +13,12 @@ fn main() {
 
     let mut state = types::State::default();
     let mut timer = std::time::Instant::now();
+    let mut bytes = BTreeMap::default();
 
     // Command-line arguments are treated as files to execute.
     for filename in std::env::args().skip(1) {
         println!("> .exec {}", filename);
-        exec_file(filename.as_str(), &mut state, &mut timer);
+        exec_file(filename.as_str(), &mut state, &mut bytes, &mut timer);
         println!("{:?}", timer.elapsed());
         println!();
     }
@@ -29,7 +31,7 @@ fn main() {
     let mut text = String::new();
     while let Ok(_size) = std::io::stdin().read_line(&mut text) {
 
-        handle_command(text.as_str(), &mut state, &mut timer);
+        handle_command(text.as_str(), &mut state, &mut bytes, &mut timer);
 
         println!("{:?}", timer.elapsed());
         println!();
@@ -39,7 +41,7 @@ fn main() {
     }
 }
 
-fn handle_command(text: &str, state: &mut types::State, timer: &mut std::time::Instant) {
+fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec<u8>, usize>, timer: &mut std::time::Instant) {
 
     if let Some(parsed) = parse::datalog(&text) {
         state.extend(parsed);
@@ -50,7 +52,7 @@ fn handle_command(text: &str, state: &mut types::State, timer: &mut std::time::I
         let mut words = text.split_whitespace();
         if let Some(word) = words.next() {
             match word {
-                ".exec" => { for filename in words { exec_file(filename, state, timer); } }
+                ".exec" => { for filename in words { exec_file(filename, state, bytes, timer); } }
                 ".list" => { state.facts.list() }
                 ".flow" => {
 
@@ -115,14 +117,19 @@ fn handle_command(text: &str, state: &mut types::State, timer: &mut std::time::I
                                     if let Some(captures) = regex.captures(&line) {
                                         for ((term, name), col) in captures.iter().zip(names.iter()).skip(1).zip(columns.iter_mut()) {
                                             let term = term.unwrap().as_str();
-                                            if name.map(|x| x.starts_with("u32")).unwrap_or(false) {
+                                            if name.map(|x| x.starts_with("u32_")).unwrap_or(false) {
                                                 col.push(&term.parse::<u32>().unwrap().to_be_bytes());
+                                            }
+                                            else if name.map(|x| x.starts_with("h32_")).unwrap_or(false) {
+                                                if !bytes.contains_key(term.as_bytes()) { bytes.insert(term.as_bytes().to_vec(), bytes.len()); }
+                                                col.push(&(*bytes.get(term.as_bytes()).unwrap() as u32).to_be_bytes());
                                             }
                                             else {
                                                 col.push(term.as_bytes());
                                             }
                                         }
                                     }
+                                    else { println!("Regex missed line: {:?}", line); }
                                     readline.clear();
                                     use columnar::Len;
                                     if columns[0].len() > 100_000_000 {
@@ -148,18 +155,18 @@ fn handle_command(text: &str, state: &mut types::State, timer: &mut std::time::I
                     println!("time:\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());
                     *timer = std::time::Instant::now();
                 }
-                ".wipe" => { *state = Default::default(); }
+                ".wipe" => { *state = Default::default(); *bytes = Default::default(); }
                 _ => { println!("Parse failure: {:?}", text); }
             }
         }
     }
 }
 
-fn exec_file(filename: &str, state: &mut types::State, timer: &mut std::time::Instant) {
+fn exec_file(filename: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec<u8>, usize>, timer: &mut std::time::Instant) {
     if let Ok(file) = File::open(filename) {
         let file = BufReader::new(file);
         for readline in file.lines() {
-            handle_command(readline.expect("Read error").as_str(), state, timer);
+            handle_command(readline.expect("Read error").as_str(), state, bytes, timer);
         }
     }
 }
