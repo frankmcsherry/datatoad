@@ -164,20 +164,17 @@ pub mod types {
 
     impl<T: std::fmt::Debug> std::fmt::Debug for Action<T> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            if self.is_identity() {
-                write!(f, "Identity")
+            if self.is_identity() { write!(f, "Identity") }
+            else if self.is_permutation() {
+                write!(f, "Permute")?;
+                for col in self.projection.iter().flatten() { write!(f, "-{:?}", col)?; }
+                Ok(())
             }
             else {
                 let mut x = f.debug_struct("Action");
-                if !self.lit_filter.is_empty() {
-                    x.field("lit_filter", &self.lit_filter);
-                }
-                if !self.var_filter.is_empty() {
-                    x.field("var_filter", &self.var_filter);
-                }
-
-                x.field("proj", &self.projection)
-                .finish()
+                if !self.lit_filter.is_empty() { x.field("lit_filter", &self.lit_filter); }
+                if !self.var_filter.is_empty() { x.field("var_filter", &self.var_filter); }
+                x.field("proj", &self.projection).finish()
             }
         }
     }

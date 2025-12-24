@@ -65,11 +65,11 @@ impl Relations {
         self.relations.values().any(|x| x.0.active())
     }
     pub fn list(&self) {
+        let max_name_len = self.relations.keys().map(|name| name.len()).max().unwrap_or(0);
         for (name, facts) in self.relations.iter() {
-            println!("\t{}:\t{:?}\tIdentity", name, facts.0.len());
-            for (_action, facts) in facts.1.iter() {
-                println!("\t\t{:?}\t{:?}", facts.len(), _action);
-            }
+            print!("{:>10} {:<2$} [forms: Identity", facts.0.len(), name, max_name_len);
+            for (action, _facts) in facts.1.iter() { print!(", {:?}", action); }
+            println!("]");
         }
     }
 
