@@ -216,7 +216,7 @@ pub mod terms {
                         }
                     },
                     Err(lit) => {
-                        let count = self.layers.last().map(|l| l.list.values.len()).expect("prepending literals isn't yet correct");
+                        let count = self.layers.last().map(|l| l.list.values.len()).unwrap_or(1);
                         let mut list = Lists::<Terms>::default();
                         for _ in 0 .. count { use columnar::Push; list.push([lit]); }
                         Layer { list }
