@@ -43,7 +43,7 @@ fn main() {
 
 fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec<u8>, usize>, timer: &mut std::time::Instant) {
 
-    if let Some(parsed) = parse::datalog(&text) {
+    if let Some(parsed) = parse::datalog(text) {
         state.extend(parsed);
         state.update();
     }
@@ -127,7 +127,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                 let mut readline = String::default();
                                 while file.read_line(&mut readline).unwrap() > 0 {
                                     let line = readline.trim();
-                                    if let Some(captures) = regex.captures(&line) {
+                                    if let Some(captures) = regex.captures(line) {
                                         for ((term, name), col) in captures.iter().zip(names.iter()).skip(1).zip(columns.iter_mut()) {
                                             let term = term.unwrap().as_str();
                                             if name.map(|x| x.starts_with("u32_")).unwrap_or(false) {

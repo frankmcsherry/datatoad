@@ -108,7 +108,7 @@ pub mod terms {
         ///
         /// This method takes ownership of the columns in order to drop them as they are processed.
         /// It could be generalized to `Vec<C>` for any `C` that can be borrowed as `Terms` can be.
-        pub fn from_columns<'a>(columns: Vec<Terms>) -> Self {
+        pub fn from_columns(columns: Vec<Terms>) -> Self {
             let (mut groups, indexs): (Vec<_>, Vec<_>) = (0 .. columns.first().map(columnar::Len::len).unwrap_or(0)).map(|i| (0, i)).unzip();
             let columns_len = columns.len();
             let layers = columns.into_iter().enumerate().map(|(index, column)| {
@@ -567,12 +567,12 @@ pub mod terms {
 
         // TODO: can union from indexed layers without having to copy first.
 
-        if layers.len() == 1 { permute_subset(&layers[0][..], &projection[..], &indexs[0]) }
+        if layers.len() == 1 { permute_subset(layers[0], projection, indexs[0]) }
         else {
             let mut extracted = FactLSM::default();
             for index in 0 .. layers.len() {
 
-                let mut layers = permute_subset(&layers[index][..], &projection[..], &indexs[index]);
+                let mut layers = permute_subset(layers[index], projection, indexs[index]);
                 let mut base: Layer<Terms> = Default::default();
                 use columnar::Push;
                 // TODO: rework layers to allow this to be something akin to `&groups[index]` without the copy.
@@ -1089,7 +1089,7 @@ pub mod layers {
     }
 
     /// Sort the items of `lists` subject to the grouping/ordering of `group` of the lists.
-    pub fn u32_sort<'a>(items: &'a [[u8;4]], groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Vec<[u8;4]>> {
+    pub fn u32_sort(items: &[[u8;4]], groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Vec<[u8;4]>> {
 
         if last { return u32_sort_last(items, groups, indexs); }
 
@@ -1135,7 +1135,7 @@ pub mod layers {
         output
     }
 
-    pub fn u32_sort_last<'a>(items: &'a [[u8;4]], groups: &mut [usize], indexs: &[usize]) -> Lists<Vec<[u8;4]>> {
+    pub fn u32_sort_last(items: &[[u8;4]], groups: &mut [usize], indexs: &[usize]) -> Lists<Vec<[u8;4]>> {
 
         assert_eq!(groups.len(), indexs.len());
 

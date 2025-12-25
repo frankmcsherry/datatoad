@@ -8,9 +8,9 @@ use crate::facts::{FactContainer, FactLSM};
 /// An atom over terms `T` that supports execution.
 ///
 /// The things we'll ask an atom to do to a collection of facts are:
-/// 1.  appraise (count) the number of extensions the atom would propose for some grounded terms.
-/// 2.  propose (join) the actual extensions for some grounded terms.
-/// 3.  validate (join) proposed exensions using some grounded terms.
+///     1.  appraise (count) the number of extensions the atom would propose for some grounded terms.
+///     2.  propose (join) the actual extensions for some grounded terms.
+///     3.  validate (join) proposed exensions using some grounded terms.
 /// The methods `count` and `join` have further detail about their requirements.
 pub trait ExecAtom<T: Ord> {
 

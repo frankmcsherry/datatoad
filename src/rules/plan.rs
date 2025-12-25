@@ -79,7 +79,7 @@ pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a
             let mut order = Vec::new();
             if plans[&plan_atom].len() > 1 {
                 for atom in plans[&plan_atom][1].0.iter() {
-                    let atom_terms = atoms[&atom].terms();
+                    let atom_terms = atoms[atom].terms();
                     for term in plan_terms.iter() {
                         if atom_terms.contains(term) && !order.contains(term) { order.push(*term); }
                     }
@@ -170,7 +170,7 @@ pub trait Strategy<A: Ord+Copy, T: Ord+Copy> {
         let mut rule_plan = BTreeMap::default();
         for atom in boxed_atoms.keys().copied() {
             if boxed_atoms[&atom].terms() == boxed_atoms[&atom].ground(&Default::default()) {
-                let mut atom_plan = Self::plan_atom(atom, &boxed_atoms, &terms_to_atoms);
+                let mut atom_plan = Self::plan_atom(atom, boxed_atoms, &terms_to_atoms);
 
                 // Fuse plan stages with identical atoms.
                 for index in (1 .. atom_plan.len()).rev() {

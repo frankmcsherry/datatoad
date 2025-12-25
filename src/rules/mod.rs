@@ -114,7 +114,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
                 else if body[*load_atom].anti { Box::new(antijoin::Anti((other_facts, load_terms))) }
                 else { Box::new((other_facts, load_terms)) }
             };
-            boxed_atom.join(&mut delta_lsm, &mut delta_terms, &Default::default(), &init_order);
+            boxed_atom.join(&mut delta_lsm, &mut delta_terms, &Default::default(), init_order);
         }
         // We may need to produce the result in a different order.
         crate::rules::exec::permute_delta(&mut delta_lsm, &mut delta_terms, init_order.iter().copied(), true);
@@ -135,7 +135,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
                 boxed_atom
             }).collect::<Vec<_>>();
 
-            exec::wco_join(&mut delta_lsm, &mut delta_terms, &terms, &others[..], &potato, &order[..]);
+            exec::wco_join(&mut delta_lsm, &mut delta_terms, terms, &others[..], &potato, &order[..]);
         }
 
         // Stage 3: We now need to form up the facts to commit back to `facts`.
@@ -154,7 +154,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
                 Term::Lit(data) => Err(data.clone()),
             }).collect();
             if let Some(delta) = delta_lsm.flatten() {
-                facts.entry(&atom).extend(delta.act_on(&action));
+                facts.entry(atom).extend(delta.act_on(&action));
                 delta_lsm.push(delta);
             }
         }
@@ -204,7 +204,7 @@ pub mod data {
                 for other_part in other_facts.iter() {
                     let mut delta_idxs = vec![0];
                     let mut other_idxs = vec![0];
-                    for layer in 0 .. prefix { (delta_idxs, other_idxs) = intersection::<Terms>(delta.layers[layer].borrow(), other_part.layers[layer].borrow(), &mut delta_idxs, &mut other_idxs); }
+                    for layer in 0 .. prefix { (delta_idxs, other_idxs) = intersection::<Terms>(delta.layers[layer].borrow(), other_part.layers[layer].borrow(), &delta_idxs, &other_idxs); }
                     // The count derives from projecting `other_idxs` forward through `terms`.
                     let mut ranges = other_idxs.iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
                     for layer in prefix .. (prefix + terms.len()) { advance_bounds::<Terms>(other_part.layers[layer].borrow(), &mut ranges); }
@@ -252,7 +252,7 @@ pub mod data {
                     for index in range.0 .. range.1 {
                         if notes[4 * index] >= order {
                             notes[4 * index] = order;
-                            notes[4 * index + 1] = other_index as u8;
+                            notes[4 * index + 1] = other_index;
                         }
                     }
                 }
@@ -372,13 +372,13 @@ pub mod logic {
     /// Looks for the atom's name in a known list, and returns an implementation if found.
     ///
     /// The implementation is a type that implements both `PlanAtom` and `ExecAtom`, and can be boxed as either.
-    pub fn resolve<'a>(atom: &'a Atom) -> Option<LogicRel<&'a String>> {
+    pub fn resolve(atom: &Atom) -> Option<LogicRel<&String>> {
         match atom.name.as_str() {
-            ":noteq" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::NotEq } ), &atom)),
-            ":range" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Range } ), &atom)),
-            ":plus"  => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Plus } ),  &atom)),
-            ":times" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Times } ), &atom)),
-            ":print" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Print(atom.terms.len()) } ), &atom)),
+            ":noteq" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::NotEq } ), atom)),
+            ":range" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Range } ), atom)),
+            ":plus"  => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Plus } ),  atom)),
+            ":times" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Times } ), atom)),
+            ":print" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Print(atom.terms.len()) } ), atom)),
             _ => None,
         }
     }
@@ -458,7 +458,7 @@ pub mod logic {
         }
     }
 
-    impl<'a, T: Ord + Copy> exec::ExecAtom<T> for LogicRel<T> {
+    impl<T: Ord + Copy> exec::ExecAtom<T> for LogicRel<T> {
 
         // Lightly odd, in that we have no preference on term order.
         fn terms(&self) -> &[T] { &self.terms }
@@ -521,7 +521,7 @@ pub mod logic {
                         let order: u8 = (order+1).ilog2() as u8;
                         if notes[4 * index] >= order {
                             notes[4 * index] = order;
-                            notes[4 * index + 1] = my_index as u8;
+                            notes[4 * index + 1] = my_index;
                         }
                     }
                 }
@@ -590,7 +590,7 @@ pub mod logic {
                         }
                     }
                     delta.layers.push(Rc::new(Layer { list: colnew }));
-                    terms.push(added.iter().next().unwrap().clone());
+                    terms.push(*added.iter().next().unwrap());
                 }
 
                 facts.push(delta);
