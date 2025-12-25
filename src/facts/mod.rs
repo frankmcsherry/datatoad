@@ -50,7 +50,7 @@ impl Relations {
         for (facts, transforms) in self.relations.values_mut() {
             facts.advance();
             for (action, transform) in transforms.iter_mut() {
-                if let Some(recent) = transform.recent.take() { transform.stable.push(recent); }
+                transform.stable.extend(transform.recent.take());
                 if let Some(mut recent) = facts.recent.as_ref().and_then(|r| r.act_on(action).flatten()) {
                     // Non-permutations need to be deduplicated against existing facts.
                     if !action.is_permutation() { recent = recent.antijoin(transform.stable.contents()); }
@@ -82,9 +82,7 @@ impl Relations {
             }
             // Flattening deduplicates, which may be necessary as `action` may introduce collisions
             // across LSM layers.
-            if let Some(stable) = fact_set.stable.flatten() {
-                fact_set.stable.push(stable);
-            }
+            if let Some(stable) = fact_set.stable.flatten() { fact_set.stable.push(stable); }
             if let Some(recent) = base.recent.as_ref().and_then(|r| r.act_on(action).flatten()) {
                 fact_set.recent = Some(recent.antijoin(fact_set.stable.contents()));
             }
@@ -201,15 +199,11 @@ impl<F: FactContainer> FactSet<F> {
         self.recent.is_some() || !self.to_add.layers.is_empty()
     }
     /// Moves `facts` into `self.to_add`, with no assumptions on `facts`.
-    pub fn extend(&mut self, facts: impl IntoIterator<Item = F>) {
-        for facts in facts.into_iter() {
-            if !facts.is_empty() { self.to_add.push(facts); }
-        }
-    }
+    pub fn extend(&mut self, facts: impl IntoIterator<Item = F>) { self.to_add.extend(facts); }
 
     pub fn advance(&mut self) {
         // Move recent into stable
-        if let Some(recent) = self.recent.take() { self.stable.push(recent); }
+        self.stable.extend(self.recent.take());
 
         if let Some(to_add) = self.to_add.flatten() {
             // Tidy stable by an amount proportional to the work we are about to do.
@@ -237,14 +231,9 @@ impl<F: Merge + Length> FactLSM<F> {
         }
     }
 
-    pub fn append(&mut self, other: &mut FactLSM<F>) {
-        Extend::extend(&mut self.layers, other.layers.drain(..).filter(|f| !f.is_empty()));
-        self.tidy();
-    }
+    pub fn append(&mut self, other: &mut FactLSM<F>) { self.extend(other.layers.drain(..)); }
 
-    pub fn contents(&self) -> impl Iterator<Item = &F> {
-        self.layers.iter()
-    }
+    pub fn contents(&self) -> impl Iterator<Item = &F> { self.layers.iter() }
 
     /// Flattens the layers into one layer, and takes it.
     pub fn flatten(&mut self) -> Option<F> {
@@ -299,6 +288,13 @@ impl<F> IntoIterator for FactLSM<F> {
 impl<F: Length> From<F> for FactLSM<F> {
     fn from(item: F) -> Self {
         Self { layers: if item.is_empty() { Vec::default() } else { vec![item] } }
+    }
+}
+
+impl<F: Merge+Length> Extend<F> for FactLSM<F> {
+    fn extend<T: IntoIterator<Item=F>>(&mut self, iter: T) {
+        self.layers.extend(iter.into_iter().filter(|f| !f.is_empty()));
+        self.tidy();
     }
 }
 

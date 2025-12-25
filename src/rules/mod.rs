@@ -93,7 +93,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         }
         else {
             let facts = &facts.get_action(atom.name.as_str(), action).unwrap();
-            if let Some(recent) = facts.recent.as_ref() { delta_lsm.push(recent.clone()); }
+            delta_lsm.extend(facts.recent.clone());
         };
 
         if delta_lsm.is_empty() { continue; }
