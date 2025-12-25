@@ -198,7 +198,8 @@ pub mod data {
             crate::rules::exec::permute_delta(delta_lsm, delta_terms, other_terms[..prefix].iter().copied(), true);
             let mut delta = delta_lsm.flatten().unwrap_or_default();
             if !delta.is_empty() {
-                let mut counts = vec![0; delta.layers[prefix-1].list.values.len()];
+                let length = if prefix > 0 { delta.layers[prefix-1].list.values.len() } else { 1 };
+                let mut counts = vec![0; length];
                 for other_part in other_facts.iter() {
                     let mut delta_idxs = vec![0];
                     let mut other_idxs = vec![0];
@@ -534,7 +535,7 @@ pub mod logic {
         ) {
             //  Flatten the input, to make our life easier.
             let mut delta = facts.flatten().unwrap_or_default();
-            if delta.is_empty() { terms.push(added.iter().next().unwrap().clone()); return; }
+            if delta.is_empty() { Extend::extend(terms, added.iter().take(1).copied()); return; }
 
             //  1.  Prepare the function arguments, a `Vec<Option<(Borrowed, Vec<usize>)>>` indicating present elements of `self.bound`.
             //      Each present element of `self.bound` presents as a pair of borrowed container and list of counts for each element.

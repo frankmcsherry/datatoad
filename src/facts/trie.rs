@@ -351,11 +351,33 @@ pub mod terms {
         projection: &[usize],
     ) -> FactLSM<Forest<Terms>> {
 
+        if this.is_empty() { return Default::default(); }
         if thats.len() == 0 { return Default::default(); }
         if this.len() < arity { return Default::default(); }
         if this.last().is_some_and(|l| l.is_empty()){ return Default::default(); }
 
         assert!(thats.iter().all(|t| t.len() >= arity));
+
+        // TODO: This is a work-around due to arity 0 not working great due to edge cases.
+        //       Should totally fix the logic below, but need to avoid `last().unwrap()`.
+        if arity == 0 {
+            let mut unit: Lists<Terms> = Default::default();
+            let no_bytes: &[u8] = &[];
+            use columnar::Push;
+            unit.push(vec![no_bytes]);  //
+            let mut new_this = this.to_vec();
+            new_this.insert(0, unit.borrow());
+            let mut new_thats = Vec::with_capacity(thats.len());
+            for that in thats {
+                let mut new_that = that.to_vec();
+                new_that.insert(0, unit.borrow());
+                new_thats.push(new_that);
+            }
+            let new_thats = new_thats.iter().map(|x| &x[..]).collect::<Vec<_>>();
+            let new_proj = projection.iter().map(|c| if *c < this.len() { *c + 1 } else { *c + 2 }).collect::<Vec<_>>();
+            return join_cols(&new_this, &new_thats, arity+1, &new_proj);
+        }
+
 
         // Determine the alignments of shared prefixes.
         let mut aligned = vec![(Rc::new(vec![0]), Rc::new(vec![0])); thats.len()];
