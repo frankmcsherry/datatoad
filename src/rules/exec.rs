@@ -64,8 +64,9 @@ pub fn permute_delta<F: FactContainer, T: Ord + Copy>(
     if align { for index in 0 .. delta_terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
 
     if permutation.iter().enumerate().any(|(index, i)| &index != i) {
-        let mut flattened = delta.flatten().unwrap_or_default().act_on(&Action::permutation(permutation.iter().copied()));
-        delta.extend(&mut flattened);
+        if let Some(flattened) = delta.flatten() {
+            delta.extend(flattened.act_on(&Action::permutation(permutation.iter().copied())));
+        }
         *delta_terms = permutation.iter().map(|i| delta_terms[*i]).collect::<Vec<_>>();
     }
 }
@@ -87,9 +88,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
     }
 
     //  0.  Add a new column containing `[255u8, 255u8]` named `potato`, to house our by-atom count and index information.
-    let delta = delta_lsm.flatten().unwrap_or_default();
-    if delta.is_empty() { delta_terms.extend(terms.iter().copied()); }
-    else {
+    if let Some(delta) = delta_lsm.flatten() {
 
         use columnar::Len;
 
@@ -118,7 +117,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
             delta_terms.extend_from_slice(target);
         }
     }
-
+    else { delta_terms.extend(terms.iter().copied()); }
 }
 
 #[inline(never)]
@@ -136,64 +135,65 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
 
     use crate::facts::{trie::Layer, Lists};
 
-    let mut delta = delta_lsm.flatten().unwrap_or_default();
+    if let Some(mut delta) = delta_lsm.flatten() {
 
-    let values = vec![255u8; 4 * delta.len()];
-    delta.layers.push(Layer { list: Lists {
-        bounds: Strides::new(1, delta.len() as u64),
-        values: Lists {
-            bounds: Strides::new(4, delta.len() as u64),
-            values,
-        },
-    }});
-    delta_lsm.push(delta);
-    delta_terms.push(potato);
+        let values = vec![255u8; 4 * delta.len()];
+        delta.layers.push(Layer { list: Lists {
+            bounds: Strides::new(1, delta.len() as u64),
+            values: Lists {
+                bounds: Strides::new(4, delta.len() as u64),
+                values,
+            },
+        }});
+        delta_lsm.push(delta);
+        delta_terms.push(potato);
 
-    //  1.  For each atom, update proposals (count, index) for each path in `delta` to track the minimum count.
-    for (index, other) in others.iter().enumerate() { other.count(delta_lsm, delta_terms, terms, index as u8); }
+        //  1.  For each atom, update proposals (count, index) for each path in `delta` to track the minimum count.
+        for (index, other) in others.iter().enumerate() { other.count(delta_lsm, delta_terms, terms, index as u8); }
 
-    //  2.  Partition `delta_lsm` by atom index, and join to get proposals.
-    // Extract the (count, index) layer to shard paths by index.
-    let mut delta = delta_lsm.flatten().unwrap_or_default();
-    let notes = delta.layers.pop().unwrap_or_default().list.values.values;
-    let mut bools = std::collections::VecDeque::with_capacity(notes.len()/4);
-    delta_terms.pop();
+        //  2.  Partition `delta_lsm` by atom index, and join to get proposals.
+        // Extract the (count, index) layer to shard paths by index.
+        if let Some(mut delta) = delta_lsm.flatten() {
 
-    if !delta.is_empty() {
-        for (other_index, other) in others.iter().enumerate().rev() {
+            let notes = delta.layers.pop().unwrap_or_default().list.values.values;
+            let mut bools = std::collections::VecDeque::with_capacity(notes.len()/4);
+            delta_terms.pop();
 
-            // Extract the shard of `delta` marked for this index.
-            bools.clear();
-            bools.extend((0 .. notes.len()/4).map(|i| notes[4*i] > 0 && notes[4*i+1] == other_index as u8));
-            let mut layers = Vec::default();
-            for index in (0 .. delta_terms.len()).rev() { layers.insert(0, delta.layers[index].retain_items(&mut bools)); }
-            let delta_shard = crate::facts::Forest { layers };
-            let mut delta_shard: FactLSM<_> = delta_shard.into();
+            for (other_index, other) in others.iter().enumerate().rev() {
 
-            // join with atom: permute `delta_shard` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
-            let mut delta_shard_terms = delta_terms.clone();
-            let next_other_idx = if other_index == 0 { 1 } else { 0 };
-            let mut after = Vec::default();
-            after.extend(others[next_other_idx].terms().iter().take_while(|t| delta_terms.contains(t) || terms.contains(t)));
-            after.extend(delta_terms.iter().filter(|t| !others[next_other_idx].terms().contains(t)));
-            other.join(&mut delta_shard, &mut delta_shard_terms, terms, &after);
+                // Extract the shard of `delta` marked for this index.
+                bools.clear();
+                bools.extend((0 .. notes.len()/4).map(|i| notes[4*i] > 0 && notes[4*i+1] == other_index as u8));
+                let mut layers = Vec::default();
+                for index in (0 .. delta_terms.len()).rev() { layers.insert(0, delta.layers[index].retain_items(&mut bools)); }
+                let delta_shard = crate::facts::Forest { layers };
+                let mut delta_shard: FactLSM<_> = delta_shard.into();
 
-            // semijoin with other atoms.
-            for (next_other_index, next_other) in others.iter().enumerate() {
-                if next_other_index != other_index {
-                    next_other.join(&mut delta_shard, &mut delta_shard_terms, &Default::default(), Default::default());
+                // join with atom: permute `delta_shard` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
+                let mut delta_shard_terms = delta_terms.clone();
+                let next_other_idx = if other_index == 0 { 1 } else { 0 };
+                let mut after = Vec::default();
+                after.extend(others[next_other_idx].terms().iter().take_while(|t| delta_terms.contains(t) || terms.contains(t)));
+                after.extend(delta_terms.iter().filter(|t| !others[next_other_idx].terms().contains(t)));
+                other.join(&mut delta_shard, &mut delta_shard_terms, terms, &after);
+
+                // semijoin with other atoms.
+                for (next_other_index, next_other) in others.iter().enumerate() {
+                    if next_other_index != other_index {
+                        next_other.join(&mut delta_shard, &mut delta_shard_terms, &Default::default(), Default::default());
+                    }
+                }
+
+                // Put in common layout (`target`) then merge.
+                permute_delta(&mut delta_shard, &mut delta_shard_terms, target.iter().copied(), false);
+                if let Some(mut delta) = delta_shard.flatten() {
+                    delta.layers.truncate(target.len());
+                    delta_lsm.push(delta);
                 }
             }
-
-            // Put in common layout (`target`) then merge.
-            permute_delta(&mut delta_shard, &mut delta_shard_terms, target.iter().copied(), false);
-            let mut delta_shard = delta_shard.flatten().unwrap_or_default();
-            delta_shard.layers.truncate(target.len());
-            delta_lsm.push(delta_shard);
         }
+
+        delta_terms.clear();
+        delta_terms.extend_from_slice(target);
     }
-
-    delta_terms.clear();
-    delta_terms.extend_from_slice(target);
-
 }

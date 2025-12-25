@@ -29,16 +29,27 @@ use crate::facts::Lists;
 /// Although `Forest` will have many methods, the intent is that eventually all of
 /// these methods become relatively few calls into methods on the layers. When not
 /// the case, this is a bit of a bug.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Forest<C> { pub layers: Vec<Layer<C>> }
 
 impl<C: Container> Forest<C> {
+
+    pub fn new(arity: usize) -> Self { Self { layers: (0..arity).map(|_| Default::default()).collect() }}
+    pub fn arity(&self) -> usize { self.layers.len() }
+    pub fn take(&mut self) -> Self { let empty = Self::new(self.arity()); std::mem::replace(self, empty) }
+
     pub fn len(&self) -> usize { self.layers.last().map(|l| l.list.values.len()).unwrap_or(0) }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 
     pub fn borrow<'a>(&'a self) -> Vec<<Lists<C> as Container>::Borrowed<'a>> {
         self.layers.iter().map(|x| x.list.borrow()).collect::<Vec<_>>()
     }
+}
+
+impl<C: Container> crate::facts::Arity for Forest<C> {
+    fn new(arity: usize) -> Self { Self::new(arity) }
+    fn arity(&self) -> usize { self.arity() }
+    fn take(&mut self) -> Self { self.take() }
 }
 
 /// Advances pairs of lower and upper bounds on lists through each presented layer, to lower and upper bounds on items.
@@ -74,13 +85,13 @@ pub mod terms {
             if self.is_empty() { return other; }
             if other.is_empty() { return self; }
 
-            assert_eq!(self.layers.len(), other.layers.len());
+            assert_eq!(self.arity(), other.arity());
 
-            let mut layers = Vec::with_capacity(self.layers.len());
+            let mut layers = Vec::with_capacity(self.arity());
             let mut reports = std::collections::VecDeque::default();
             reports.push_back(Report::Both(0, 0));
             for (layer0, layer1) in self.layers.iter().zip(other.layers.iter()) {
-                layers.push(layer0.union(layer1, &mut reports, layers.len() + 1 < self.layers.len()));
+                layers.push(layer0.union(layer1, &mut reports, layers.len() + 1 < self.arity()));
             }
 
             Self { layers }
@@ -172,7 +183,7 @@ pub mod terms {
             for idx in active.iter().copied() { include[idx] = true; }
             let mut result = self.clone();
             // If there are additional layers, clone `include` and update unexplored layers.
-            if result.layers.len() > cursor {
+            if result.arity() > cursor {
                 let mut bounds = active.iter().copied().map(|i| (i,i+1)).collect::<Vec<_>>();
                 for layer in result.layers[cursor..].iter_mut().skip(1) {
                     *layer = layer.retain_lists(&mut bounds);
@@ -673,10 +684,10 @@ pub mod terms {
             use std::collections::VecDeque;
 
             let others = others.collect::<Vec<_>>();
-            if others.is_empty() { return if semi { Self::default() } else { self }; }
+            if others.is_empty() { return if semi { Self::new(self.arity()) } else { self }; }
             let other_arity = others[0].len();
             others.iter().for_each(|other| {
-                assert!(self.layers.len() >= other.len());
+                assert!(self.arity() >= other.len());
                 assert_eq!(other.len(), other_arity);
             });
 
@@ -702,13 +713,13 @@ pub mod terms {
         pub fn retain_core(mut self, layer_index: usize, mut include: std::collections::VecDeque<bool>) -> Self {
 
             if layer_index > 0 { assert_eq!(include.len(), self.layers[layer_index-1].list.values.len()); }
-            if layer_index < self.layers.len() { assert_eq!(include.len(), self.layers[layer_index].list.len()); }
+            if layer_index < self.arity() { assert_eq!(include.len(), self.layers[layer_index].list.len()); }
 
             // If not all items are included, restrict layers of `self`.
             if include.iter().all(|x| *x) { return self; }
             else {
                 // If there are additional layers, clone `include` and update unexplored layers.
-                if self.layers.len() > layer_index {
+                if self.arity() > layer_index {
 
                     let mut prev = None;
                     let mut bounds = Vec::default();

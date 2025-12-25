@@ -43,20 +43,18 @@ impl Relations {
     pub fn get_mut(&mut self, name: &str) -> Option<&mut FactSet<FactCollection>> {
         self.relations.get_mut (name).map(|(base, _)| base)
     }
-    pub fn entry(&mut self, name: String) -> &mut FactSet<FactCollection> {
-        &mut self.relations.entry(name).or_default().0
+    pub fn entry(&mut self, atom: &crate::types::Atom) -> &mut FactSet<FactCollection> {
+        &mut self.relations.entry(atom.name.clone()).or_default().0
     }
     pub fn advance(&mut self) {
         for (facts, transforms) in self.relations.values_mut() {
             facts.advance();
             for (action, transform) in transforms.iter_mut() {
-                if !transform.recent.is_empty() {
-                    transform.stable.push(std::mem::take(&mut transform.recent));
-                }
-                if let Some(mut recent) = facts.recent.act_on(action).flatten() {
+                transform.stable.extend(transform.recent.take());
+                if let Some(mut recent) = facts.recent.as_ref().and_then(|r| r.act_on(action).flatten()) {
                     // Non-permutations need to be deduplicated against existing facts.
                     if !action.is_permutation() { recent = recent.antijoin(transform.stable.contents()); }
-                    transform.recent = recent;
+                    transform.recent = Some(recent);
                 }
             }
         }
@@ -80,15 +78,13 @@ impl Relations {
             let mut fact_set = FactSet::default();
             // TODO: Can be more elegant if we see all columns retained, as it means no duplication.
             for layer in base.stable.contents() {
-                fact_set.stable.extend(&mut layer.act_on(action));
+                fact_set.stable.extend(layer.act_on(action));
             }
             // Flattening deduplicates, which may be necessary as `action` may introduce collisions
             // across LSM layers.
-            if let Some(stable) = fact_set.stable.flatten() {
-                fact_set.stable.push(stable);
-            }
-            if let Some(recent) = base.recent.act_on(action).flatten() {
-                fact_set.recent = recent.antijoin(fact_set.stable.contents());
+            if let Some(stable) = fact_set.stable.flatten() { fact_set.stable.push(stable); }
+            if let Some(recent) = base.recent.as_ref().and_then(|r| r.act_on(action).flatten()) {
+                fact_set.recent = Some(recent.antijoin(fact_set.stable.contents()));
             }
             transforms.insert(action.clone(), fact_set);
         }
@@ -154,8 +150,18 @@ pub trait Merge {
     fn merge(self, other: Self) -> Self;
 }
 
+/// A type with a specific number of columns.
+pub trait Arity {
+    /// Create a new instance of `Self` with the number of columns.
+    fn new(arity: usize) -> Self;
+    /// The number of columns.
+    fn arity(&self) -> usize;
+    /// Take `self` leaving an empty instance with the same number of columns.
+    fn take(&mut self) -> Self;
+}
+
 /// A type that can contain and work with facts.
-pub trait FactContainer : Length + Merge + Default + Sized + Clone {
+pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
 
     /// Applies an action to the facts, building the corresponding output.
     fn act_on(&self, action: &Action<Vec<u8>>) -> FactLSM<Self>;
@@ -171,53 +177,50 @@ pub trait FactContainer : Length + Merge + Default + Sized + Clone {
     /// The default implementation processes `others` in order, but more thoughtful implementations exist.
     fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize]) -> FactLSM<Self> {
         let mut result = FactLSM::default();
-        for other in others { result.extend(&mut self.join(other, arity, projection)); }
+        for other in others { result.extend(self.join(other, arity, projection)); }
         result
     }
 }
 
 /// An evolving set of facts.
-#[derive(Default)]
 pub struct FactSet<F: FactContainer = FactCollection> {
     pub stable: FactLSM<F>,
-    pub recent: F,
+    pub recent: Option<F>,
     pub to_add: FactLSM<F>,
 }
 
+impl<F: FactContainer> Default for FactSet<F> { fn default() -> Self { Self { stable: Default::default(), recent: None, to_add: Default::default() } } }
+
 impl<F: FactContainer> FactSet<F> {
 
-    pub fn len(&self) -> usize { self.stable.layers.iter().map(|x| x.len()).sum::<usize>() + self.recent.len() }
+    pub fn len(&self) -> usize { self.stable.layers.iter().chain(self.recent.as_ref()).map(|x| x.len()).sum::<usize>() }
 
     pub fn active(&self) -> bool {
-        !self.recent.is_empty() || !self.to_add.layers.is_empty()
+        self.recent.is_some() || !self.to_add.layers.is_empty()
     }
     /// Moves `facts` into `self.to_add`, with no assumptions on `facts`.
-    pub fn extend(&mut self, facts: impl IntoIterator<Item = F>) {
-        for facts in facts.into_iter() {
-            if !facts.is_empty() { self.to_add.push(facts); }
-        }
-    }
+    pub fn extend(&mut self, facts: impl IntoIterator<Item = F>) { self.to_add.extend(facts); }
 
     pub fn advance(&mut self) {
         // Move recent into stable
-        if !self.recent.is_empty() {
-            self.stable.push(std::mem::take(&mut self.recent));
-        }
+        self.stable.extend(self.recent.take());
 
         if let Some(to_add) = self.to_add.flatten() {
             // Tidy stable by an amount proportional to the work we are about to do.
             self.stable.tidy_through(2 * to_add.len());
             // Remove from to_add any facts already in stable.
-            self.recent = to_add.antijoin(self.stable.contents());
+            self.recent = Some(to_add.antijoin(self.stable.contents()));
         }
     }
 }
 
 /// A list of fact lists that double in length, each sorted and distinct.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct FactLSM<F> {
     pub layers: Vec<F>,
 }
+
+impl<F> Default for FactLSM<F> { fn default() -> Self { Self { layers: Default::default() } } }
 
 impl<F: Merge + Length> FactLSM<F> {
     pub fn is_empty(&self) -> bool { self.layers.iter().all(|l| l.is_empty()) }
@@ -228,14 +231,7 @@ impl<F: Merge + Length> FactLSM<F> {
         }
     }
 
-    pub fn extend(&mut self, other: &mut FactLSM<F>) {
-        Extend::extend(&mut self.layers, other.layers.drain(..).filter(|f| !f.is_empty()));
-        self.tidy();
-    }
-
-    pub fn contents(&self) -> impl Iterator<Item = &F> {
-        self.layers.iter()
-    }
+    pub fn contents(&self) -> impl Iterator<Item = &F> { self.layers.iter() }
 
     /// Flattens the layers into one layer, and takes it.
     pub fn flatten(&mut self) -> Option<F> {
@@ -290,6 +286,13 @@ impl<F> IntoIterator for FactLSM<F> {
 impl<F: Length> From<F> for FactLSM<F> {
     fn from(item: F) -> Self {
         Self { layers: if item.is_empty() { Vec::default() } else { vec![item] } }
+    }
+}
+
+impl<F: Merge+Length> Extend<F> for FactLSM<F> {
+    fn extend<T: IntoIterator<Item=F>>(&mut self, iter: T) {
+        self.layers.extend(iter.into_iter().filter(|f| !f.is_empty()));
+        self.tidy();
     }
 }
 
