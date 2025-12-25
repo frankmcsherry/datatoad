@@ -43,15 +43,15 @@ impl Relations {
     pub fn get_mut(&mut self, name: &str) -> Option<&mut FactSet<FactCollection>> {
         self.relations.get_mut (name).map(|(base, _)| base)
     }
-    pub fn entry(&mut self, name: String) -> &mut FactSet<FactCollection> {
-        &mut self.relations.entry(name).or_default().0
+    pub fn entry(&mut self, atom: &crate::types::Atom) -> &mut FactSet<FactCollection> {
+        &mut self.relations.entry(atom.name.clone()).or_insert_with(|| (FactSet::new(atom.terms.len()), Default::default())).0
     }
     pub fn advance(&mut self) {
         for (facts, transforms) in self.relations.values_mut() {
             facts.advance();
             for (action, transform) in transforms.iter_mut() {
                 if !transform.recent.is_empty() {
-                    transform.stable.push(std::mem::take(&mut transform.recent));
+                    transform.stable.push(transform.recent.take());
                 }
                 if let Some(mut recent) = facts.recent.act_on(action).flatten() {
                     // Non-permutations need to be deduplicated against existing facts.
@@ -75,9 +75,9 @@ impl Relations {
 
     /// Ensures that we have an entry for this name and the associated action.
     pub fn ensure_action(&mut self, name: &str, action: &Action<Vec<u8>>){
-        let (base, transforms) = self.relations.entry(name.to_string()).or_default();
+        let (base, transforms) = self.relations.entry(name.to_string()).or_insert_with(|| (FactSet::new(action.input_arity), Default::default()));
         if !action.is_identity() && !transforms.contains_key(action) {
-            let mut fact_set = FactSet::default();
+            let mut fact_set = FactSet::new(action.input_arity);
             // TODO: Can be more elegant if we see all columns retained, as it means no duplication.
             for layer in base.stable.contents() {
                 fact_set.stable.extend(&mut layer.act_on(action));
@@ -154,8 +154,18 @@ pub trait Merge {
     fn merge(self, other: Self) -> Self;
 }
 
+/// A type with a specific number of columns.
+pub trait Arity {
+    /// Create a new instance of `Self` with the number of columns.
+    fn new(arity: usize) -> Self;
+    /// The number of columns.
+    fn arity(&self) -> usize;
+    /// Take `self` leaving an empty instance with the same number of columns.
+    fn take(&mut self) -> Self;
+}
+
 /// A type that can contain and work with facts.
-pub trait FactContainer : Length + Merge + Default + Sized + Clone {
+pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
 
     /// Applies an action to the facts, building the corresponding output.
     fn act_on(&self, action: &Action<Vec<u8>>) -> FactLSM<Self>;
@@ -186,6 +196,14 @@ pub struct FactSet<F: FactContainer = FactCollection> {
 
 impl<F: FactContainer> FactSet<F> {
 
+    pub fn new(arity: usize) -> Self {
+        Self {
+            stable: Default::default(),
+            recent: F::new(arity),
+            to_add: Default::default(),
+        }
+    }
+
     pub fn len(&self) -> usize { self.stable.layers.iter().map(|x| x.len()).sum::<usize>() + self.recent.len() }
 
     pub fn active(&self) -> bool {
@@ -201,7 +219,7 @@ impl<F: FactContainer> FactSet<F> {
     pub fn advance(&mut self) {
         // Move recent into stable
         if !self.recent.is_empty() {
-            self.stable.push(std::mem::take(&mut self.recent));
+            self.stable.push(self.recent.take());
         }
 
         if let Some(to_add) = self.to_add.flatten() {
@@ -214,10 +232,12 @@ impl<F: FactContainer> FactSet<F> {
 }
 
 /// A list of fact lists that double in length, each sorted and distinct.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct FactLSM<F> {
     pub layers: Vec<F>,
 }
+
+impl<F> Default for FactLSM<F> { fn default() -> Self { Self { layers: Default::default() } } }
 
 impl<F: Merge + Length> FactLSM<F> {
     pub fn is_empty(&self) -> bool { self.layers.iter().all(|l| l.is_empty()) }

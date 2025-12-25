@@ -79,7 +79,7 @@ pub mod types {
                     }
                     let facts = Forest::<Terms>::from_columns(lits);
                     self.facts
-                        .entry(atom.name.to_owned())
+                        .entry(&atom)
                         .extend([facts]);
                 }
             }

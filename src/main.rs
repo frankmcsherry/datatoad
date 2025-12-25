@@ -69,7 +69,6 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                             use datatoad::facts::{Forest, Terms};
                             let mut readline = String::default();
                             if file.read_line(&mut readline).unwrap() > 0 {
-                                // let mut columns = vec![Terms::default(); arity];
                                 let mut columns = Vec::default();
                                 let line = readline.trim();
                                 for term in line.split(',') {
@@ -78,6 +77,8 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                     columns.push(terms);
                                 }
                                 readline.clear();
+
+                                let atom = crate::types::Atom { name, anti: false, terms: vec![crate::types::Term::Lit(vec![]); columns.len()] };
 
                                 while file.read_line(&mut readline).unwrap() > 0 {
                                     let line = readline.trim();
@@ -90,12 +91,12 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                         // Pass ownership of columns so the method can drop them as they are processed.
                                         let arity = columns.len();
                                         let trie = Forest::from_columns(columns);
-                                        state.facts.entry(name.clone()).extend([trie]);
+                                        state.facts.entry(&atom).extend([trie]);
                                         columns = vec![Terms::default(); arity];
                                     }
                                 }
                                 let trie = Forest::from_columns(columns);
-                                state.facts.entry(name).extend([trie]);
+                                state.facts.entry(&atom).extend([trie]);
                                 state.update();
                             }
                         }
@@ -121,6 +122,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                 use columnar::Push;
                                 use datatoad::facts::{Forest, Terms};
                                 let arity = names.len()-1;
+                                let atom = crate::types::Atom { name, anti: false, terms: vec![crate::types::Term::Lit(vec![]); arity] };
                                 let mut columns = vec![Terms::default(); arity];
                                 let mut readline = String::default();
                                 while file.read_line(&mut readline).unwrap() > 0 {
@@ -146,12 +148,12 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                     if columns[0].len() > 100_000_000 {
                                         // Pass ownership of columns so the method can drop them as they are processed.
                                         let trie = Forest::from_columns(columns);
-                                        state.facts.entry(name.clone()).extend([trie]);
+                                        state.facts.entry(&atom).extend([trie]);
                                         columns = vec![Terms::default(); arity];
                                     }
                                 }
                                 let trie = Forest::from_columns(columns);
-                                state.facts.entry(name).extend([trie]);
+                                state.facts.entry(&atom).extend([trie]);
                                 state.update();
                             }
                             else { println!("file not found: {:?}", filename); }

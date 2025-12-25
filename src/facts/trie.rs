@@ -29,19 +29,27 @@ use crate::facts::Lists;
 /// Although `Forest` will have many methods, the intent is that eventually all of
 /// these methods become relatively few calls into methods on the layers. When not
 /// the case, this is a bit of a bug.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Forest<C> { pub layers: Vec<Layer<C>> }
 
 impl<C: Container> Forest<C> {
+
+    pub fn new(arity: usize) -> Self { Self { layers: (0..arity).map(|_| Default::default()).collect() }}
+    pub fn arity(&self) -> usize { self.layers.len() }
+    pub fn take(&mut self) -> Self { let empty = Self::new(self.arity()); std::mem::replace(self, empty) }
+
     pub fn len(&self) -> usize { self.layers.last().map(|l| l.list.values.len()).unwrap_or(0) }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
-
-    /// The number of attributes in a non-empty forest, or zero if empty.
-    pub fn arity(&self) -> usize { self.layers.len() }
 
     pub fn borrow<'a>(&'a self) -> Vec<<Lists<C> as Container>::Borrowed<'a>> {
         self.layers.iter().map(|x| x.list.borrow()).collect::<Vec<_>>()
     }
+}
+
+impl<C: Container> crate::facts::Arity for Forest<C> {
+    fn new(arity: usize) -> Self { Self::new(arity) }
+    fn arity(&self) -> usize { self.arity() }
+    fn take(&mut self) -> Self { self.take() }
 }
 
 /// Advances pairs of lower and upper bounds on lists through each presented layer, to lower and upper bounds on items.
@@ -676,7 +684,7 @@ pub mod terms {
             use std::collections::VecDeque;
 
             let others = others.collect::<Vec<_>>();
-            if others.is_empty() { return if semi { Self::default() } else { self }; }
+            if others.is_empty() { return if semi { Self::new(self.arity()) } else { self }; }
             let other_arity = others[0].len();
             others.iter().for_each(|other| {
                 assert!(self.arity() >= other.len());
