@@ -59,34 +59,45 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     use std::io::{BufRead, BufReader};
                     use std::fs::File;
 
-                    let args: Result<[_;3],_> = words.take(3).collect::<Vec<_>>().try_into();
+                    let args: Result<[_;2],_> = words.take(2).collect::<Vec<_>>().try_into();
                     if let Ok(args) = args {
                         let name = args[0].to_string();
-                        let arity = args[1].len();
-                        let filename = args[2];
+                        let filename = args[1];
                         if let Ok(file) = File::open(filename) {
                             let mut file = BufReader::new(file);
                             use columnar::Push;
                             use datatoad::facts::{Forest, Terms};
-                            let mut columns = vec![Terms::default(); arity];
                             let mut readline = String::default();
-                            while file.read_line(&mut readline).unwrap() > 0 {
+                            if file.read_line(&mut readline).unwrap() > 0 {
+                                // let mut columns = vec![Terms::default(); arity];
+                                let mut columns = Vec::default();
                                 let line = readline.trim();
-                                for (term, col) in line.split(',').zip(columns.iter_mut()) {
-                                    col.push(&term.parse::<u32>().unwrap().to_be_bytes());
+                                for term in line.split(',') {
+                                    let mut terms = Terms::default();
+                                    terms.push(&term.parse::<u32>().unwrap().to_be_bytes());
+                                    columns.push(terms);
                                 }
                                 readline.clear();
-                                use columnar::Len;
-                                if columns[0].len() > 100_000_000 {
-                                    // Pass ownership of columns so the method can drop them as they are processed.
-                                    let trie = Forest::from_columns(columns);
-                                    state.facts.entry(name.clone()).extend([trie]);
-                                    columns = vec![Terms::default(); arity];
+
+                                while file.read_line(&mut readline).unwrap() > 0 {
+                                    let line = readline.trim();
+                                    for (term, col) in line.split(',').zip(columns.iter_mut()) {
+                                        col.push(&term.parse::<u32>().unwrap().to_be_bytes());
+                                    }
+                                    readline.clear();
+                                    use columnar::Len;
+                                    if columns[0].len() > 100_000_000 {
+                                        // Pass ownership of columns so the method can drop them as they are processed.
+                                        let arity = columns.len();
+                                        let trie = Forest::from_columns(columns);
+                                        state.facts.entry(name.clone()).extend([trie]);
+                                        columns = vec![Terms::default(); arity];
+                                    }
                                 }
+                                let trie = Forest::from_columns(columns);
+                                state.facts.entry(name).extend([trie]);
+                                state.update();
                             }
-                            let trie = Forest::from_columns(columns);
-                            state.facts.entry(name).extend([trie]);
-                            state.update();
                         }
                         else { println!("file not found: {:?}", filename); }
                     }
