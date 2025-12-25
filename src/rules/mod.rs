@@ -168,6 +168,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
 pub mod data {
 
     use std::collections::BTreeSet;
+    use std::rc::Rc;
     use crate::facts::{FactLSM, FactContainer, Terms};
     use crate::facts::trie::Forest;
     use crate::rules::{PlanAtom, ExecAtom};
@@ -232,9 +233,9 @@ pub mod data {
                             }
                         }
 
-                        for layer in delta.layers[prefix..].iter() { layers.push(layer.retain_lists(&mut bounds)); }
+                        for layer in delta.layers[prefix..].iter() { layers.push(Rc::new(layer.retain_lists(&mut bounds))); }
                     }
-                    for layer in delta.layers[..prefix].iter().rev() { layers.insert(0, layer.retain_items(&mut bools)); }
+                    for layer in delta.layers[..prefix].iter().rev() { layers.insert(0, Rc::new(layer.retain_items(&mut bools))); }
 
                     assert_eq!(counts.len(), layers[prefix-1].list.values.len());
                     delta = Forest { layers };
@@ -243,7 +244,9 @@ pub mod data {
                 // Must now project `counts` forward to leaves of `delta`, where we expect to find installed counts.
                 let mut ranges = (0 .. counts.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
                 for layer in prefix .. delta.arity() { advance_bounds::<Terms>(delta.layers[layer].borrow(), &mut ranges); }
-                let notes = &mut delta.layers.last_mut().unwrap().list.values.values;
+
+                let notes = delta.layers.last_mut().unwrap();
+                let notes = &mut Rc::make_mut(notes).list.values.values;
                 for (count, range) in counts.iter().zip(ranges.iter()) {
                     let order = (count+1).ilog2() as u8;
                     for index in range.0 .. range.1 {
@@ -355,6 +358,7 @@ pub mod logic {
     //! The `BatchLogic` trait provides batch functions, and expects to be invoked through a virtual call.
 
     use std::collections::BTreeSet;
+    use std::rc::Rc;
 
     use columnar::{Container, Index, Len, Push, Clear};
 
@@ -510,7 +514,8 @@ pub mod logic {
                     None => { vec![delta.layers.last().unwrap().list.values.len()] }
                 };
 
-                let notes = &mut delta.layers.last_mut().unwrap().list.values.values;
+                let notes = delta.layers.last_mut().unwrap();
+                let notes = &mut Rc::make_mut(notes).list.values.values;
                 for (index, order) in orders.into_iter().enumerate().flat_map(|(i,c)| std::iter::repeat(output[i]).take(c)).enumerate() {
                     if let Some(order) = order {
                         let order: u8 = (order+1).ilog2() as u8;
@@ -584,7 +589,7 @@ pub mod logic {
                             colnew.push(column.borrow().get(idx));
                         }
                     }
-                    delta.layers.push(Layer { list: colnew });
+                    delta.layers.push(Rc::new(Layer { list: colnew }));
                     terms.push(added.iter().next().unwrap().clone());
                 }
 
