@@ -44,19 +44,17 @@ impl Relations {
         self.relations.get_mut (name).map(|(base, _)| base)
     }
     pub fn entry(&mut self, atom: &crate::types::Atom) -> &mut FactSet<FactCollection> {
-        &mut self.relations.entry(atom.name.clone()).or_insert_with(|| (FactSet::new(atom.terms.len()), Default::default())).0
+        &mut self.relations.entry(atom.name.clone()).or_default().0
     }
     pub fn advance(&mut self) {
         for (facts, transforms) in self.relations.values_mut() {
             facts.advance();
             for (action, transform) in transforms.iter_mut() {
-                if !transform.recent.is_empty() {
-                    transform.stable.push(transform.recent.take());
-                }
-                if let Some(mut recent) = facts.recent.act_on(action).flatten() {
+                if let Some(recent) = transform.recent.take() { transform.stable.push(recent); }
+                if let Some(mut recent) = facts.recent.as_ref().and_then(|r| r.act_on(action).flatten()) {
                     // Non-permutations need to be deduplicated against existing facts.
                     if !action.is_permutation() { recent = recent.antijoin(transform.stable.contents()); }
-                    transform.recent = recent;
+                    transform.recent = Some(recent);
                 }
             }
         }
@@ -75,9 +73,9 @@ impl Relations {
 
     /// Ensures that we have an entry for this name and the associated action.
     pub fn ensure_action(&mut self, name: &str, action: &Action<Vec<u8>>){
-        let (base, transforms) = self.relations.entry(name.to_string()).or_insert_with(|| (FactSet::new(action.input_arity), Default::default()));
+        let (base, transforms) = self.relations.entry(name.to_string()).or_default();
         if !action.is_identity() && !transforms.contains_key(action) {
-            let mut fact_set = FactSet::new(action.input_arity);
+            let mut fact_set = FactSet::default();
             // TODO: Can be more elegant if we see all columns retained, as it means no duplication.
             for layer in base.stable.contents() {
                 fact_set.stable.extend(&mut layer.act_on(action));
@@ -87,8 +85,8 @@ impl Relations {
             if let Some(stable) = fact_set.stable.flatten() {
                 fact_set.stable.push(stable);
             }
-            if let Some(recent) = base.recent.act_on(action).flatten() {
-                fact_set.recent = recent.antijoin(fact_set.stable.contents());
+            if let Some(recent) = base.recent.as_ref().and_then(|r| r.act_on(action).flatten()) {
+                fact_set.recent = Some(recent.antijoin(fact_set.stable.contents()));
             }
             transforms.insert(action.clone(), fact_set);
         }
@@ -187,27 +185,20 @@ pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
 }
 
 /// An evolving set of facts.
-#[derive(Default)]
 pub struct FactSet<F: FactContainer = FactCollection> {
     pub stable: FactLSM<F>,
-    pub recent: F,
+    pub recent: Option<F>,
     pub to_add: FactLSM<F>,
 }
 
+impl<F: FactContainer> Default for FactSet<F> { fn default() -> Self { Self { stable: Default::default(), recent: None, to_add: Default::default() } } }
+
 impl<F: FactContainer> FactSet<F> {
 
-    pub fn new(arity: usize) -> Self {
-        Self {
-            stable: Default::default(),
-            recent: F::new(arity),
-            to_add: Default::default(),
-        }
-    }
-
-    pub fn len(&self) -> usize { self.stable.layers.iter().map(|x| x.len()).sum::<usize>() + self.recent.len() }
+    pub fn len(&self) -> usize { self.stable.layers.iter().chain(self.recent.as_ref()).map(|x| x.len()).sum::<usize>() }
 
     pub fn active(&self) -> bool {
-        !self.recent.is_empty() || !self.to_add.layers.is_empty()
+        self.recent.is_some() || !self.to_add.layers.is_empty()
     }
     /// Moves `facts` into `self.to_add`, with no assumptions on `facts`.
     pub fn extend(&mut self, facts: impl IntoIterator<Item = F>) {
@@ -218,15 +209,13 @@ impl<F: FactContainer> FactSet<F> {
 
     pub fn advance(&mut self) {
         // Move recent into stable
-        if !self.recent.is_empty() {
-            self.stable.push(self.recent.take());
-        }
+        if let Some(recent) = self.recent.take() { self.stable.push(recent); }
 
         if let Some(to_add) = self.to_add.flatten() {
             // Tidy stable by an amount proportional to the work we are about to do.
             self.stable.tidy_through(2 * to_add.len());
             // Remove from to_add any facts already in stable.
-            self.recent = to_add.antijoin(self.stable.contents());
+            self.recent = Some(to_add.antijoin(self.stable.contents()));
         }
     }
 }

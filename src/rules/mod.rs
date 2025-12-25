@@ -55,7 +55,7 @@ fn implement_action(head: &[Atom], body: &Atom, stable: bool, facts: &mut Relati
     for (head_atom, action) in head.iter().zip(head_actions.iter()) {
         if let Some(found) = facts.get(body.name.as_str()) {
             let mut derived = FactLSM::default();
-            for layer in found.stable.contents().filter(|_| stable).chain(Some(&found.recent)) {
+            for layer in found.stable.contents().filter(|_| stable).chain(found.recent.as_ref()) {
                 derived.extend(&mut layer.act_on(action));
             }
             facts.entry(head_atom).extend(derived);
@@ -75,7 +75,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
     for (plan_atom, atom) in body[..plan_atoms].iter().enumerate() {
 
         if !plans.contains_key(&plan_atom) { continue; }
-        if !stable && facts.get(atom.name.as_str()).map(|fs| !fs.recent.is_empty()) != Some(true) { continue; }
+        if !stable && facts.get(atom.name.as_str()).map(|fs| fs.recent.is_some()) != Some(true) { continue; }
 
         let plan = &plans[&plan_atom];
 
@@ -87,13 +87,13 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         let mut delta_lsm = FactLSM::default();
         if stable {
             let facts = &facts.get_action(atom.name.as_str(), action).unwrap();
-            for layer in facts.stable.contents().chain([&facts.recent]) {
+            for layer in facts.stable.contents().chain(facts.recent.as_ref()) {
                 delta_lsm.push(layer.clone());
             }
         }
         else {
             let facts = &facts.get_action(atom.name.as_str(), action).unwrap();
-            delta_lsm.push(facts.recent.clone());
+            if let Some(recent) = facts.recent.as_ref() { delta_lsm.push(recent.clone()); }
         };
 
         if delta_lsm.is_empty() { continue; }
@@ -107,7 +107,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         for load_atom in init_atoms.iter().filter(|a| a != &&plan_atom) {
             let (load_action, load_terms) = &loads[&plan_atom][load_atom];
             let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
-            let to_chain = if load_atom > &plan_atom { Some(&other.recent) } else { None };
+            let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
             let other_facts = other.stable.contents().chain(to_chain).filter(|l| !l.is_empty()).collect::<Vec<_>>();
             let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
                 if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
@@ -125,7 +125,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             let others = atoms.iter().map(|load_atom| {
                 let (load_action, load_terms) = &loads[&plan_atom][load_atom];
                 let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
-                let to_chain = if load_atom > &plan_atom && !other.recent.is_empty() { Some(&other.recent) } else { None };
+                let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
                 let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
                 let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
                     if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
