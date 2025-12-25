@@ -16,6 +16,7 @@
 //! recording the number of occurrences of each duplicate and using it to group
 //! the extracted column of values (forming runs of sorted values for prefixes).
 
+use std::rc::Rc;
 use columnar::Container;
 use crate::facts::Lists;
 
@@ -30,7 +31,7 @@ use crate::facts::Lists;
 /// these methods become relatively few calls into methods on the layers. When not
 /// the case, this is a bit of a bug.
 #[derive(Clone, Debug)]
-pub struct Forest<C> { pub layers: Vec<Layer<C>> }
+pub struct Forest<C> { pub layers: Vec<Rc<Layer<C>>> }
 
 impl<C: Container> Forest<C> {
 
@@ -91,7 +92,7 @@ pub mod terms {
             let mut reports = std::collections::VecDeque::default();
             reports.push_back(Report::Both(0, 0));
             for (layer0, layer1) in self.layers.iter().zip(other.layers.iter()) {
-                layers.push(layer0.union(layer1, &mut reports, layers.len() + 1 < self.arity()));
+                layers.push(Rc::new(layer0.union(layer1, &mut reports, layers.len() + 1 < self.arity())));
             }
 
             Self { layers }
@@ -119,7 +120,7 @@ pub mod terms {
                     values: column.borrow(),
                 };
                 // TODO: Figure out how to avoid `indexs` being literally just `0 .. len`.
-                Layer { list: crate::facts::trie::layers::sort_terms(lists, &mut groups[..], &indexs[..], index == columns_len-1) }
+                Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(lists, &mut groups[..], &indexs[..], index == columns_len-1) })
             }).collect();
             Self { layers }
         }
@@ -186,13 +187,13 @@ pub mod terms {
             if result.arity() > cursor {
                 let mut bounds = active.iter().copied().map(|i| (i,i+1)).collect::<Vec<_>>();
                 for layer in result.layers[cursor..].iter_mut().skip(1) {
-                    *layer = layer.retain_lists(&mut bounds);
+                    *layer = Rc::new(layer.retain_lists(&mut bounds));
                 }
             }
             // In any case, update prior layers from `other_arity` back to the first.
             for layer in result.layers[..cursor+1].iter_mut().rev() {
                 if include.iter().all(|x| *x) { return result; }  // TODO: make this test cheaper.
-                *layer = layer.retain_items(&mut include);
+                *layer = Rc::new(layer.retain_items(&mut include));
             }
 
             result
@@ -223,14 +224,14 @@ pub mod terms {
                             for (index, (lower, upper)) in bounds.into_iter().enumerate() {
                                 for _ in lower .. upper { use columnar::Push; list.push([self.layers[*col].list.values.borrow().get(index)]); }
                             }
-                            Layer { list }
+                            Rc::new(Layer { list })
                         }
                     },
                     Err(lit) => {
                         let count = self.layers.last().map(|l| l.list.values.len()).unwrap_or(1);
                         let mut list = Lists::<Terms>::default();
                         for _ in 0 .. count { use columnar::Push; list.push([lit]); }
-                        Layer { list }
+                        Rc::new(Layer { list })
                     },
                 });
             }
@@ -241,7 +242,7 @@ pub mod terms {
 
     /// Produces columns in the order indicated by `projection`, for the subset of indexes in `indexs`.
     #[inline(never)]
-    fn permute_subset(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Layer<Terms>> {
+    fn permute_subset(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Rc<Layer<Terms>>> {
 
         for index in 1 .. in_layers.len() {
             assert_eq!(in_layers[index-1].values.len(), in_layers[index].len());
@@ -259,7 +260,7 @@ pub mod terms {
             for layer in 0 .. prefix {
                 let mut out_layer = <Lists::<Terms> as Container>::with_capacity_for([in_layers[layer]].into_iter());
                 for (lower, upper) in bounds.iter().copied() { out_layer.extend_from_self(in_layers[layer], lower .. upper); }
-                output.push(Layer { list: out_layer });
+                output.push(Rc::new(Layer { list: out_layer }));
                 crate::facts::trie::layers::advance_bounds::<Terms>(in_layers[layer], &mut bounds);
             }
 
@@ -283,7 +284,7 @@ pub mod terms {
     /// expand the number of paths under discussion by moving indexes forward to the indicated column, and in the latter we
     /// only need to advance corresponding values of a prior column forward 1:1 to the current indexes.
     #[inline(never)]
-    fn permute_subset_inner(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Layer<Terms>> {
+    fn permute_subset_inner(in_layers: &[<Lists<Terms> as Container>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Rc<Layer<Terms>>> {
 
         if projection.is_empty() { return Vec::default(); }
 
@@ -341,7 +342,7 @@ pub mod terms {
             }
 
             let last = idx+1 == projection.len();
-            Layer { list: crate::facts::trie::layers::sort_terms(in_layers[col], &mut groups, &indexs, last) }
+            Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(in_layers[col], &mut groups, &indexs, last) })
 
         }).collect()
 
@@ -540,7 +541,7 @@ pub mod terms {
                     expand(Rc::make_mut(&mut that_j), values, &mut others);
                     sort_terms(values, &mut groups, &that_j, last)
                 };
-                Layer { list }
+                Rc::new(Layer { list })
             }).collect();
 
             output_lsm.push(Forest { layers });
@@ -558,7 +559,7 @@ pub mod terms {
         groups: &[&[usize]],
         indexs: &[&[usize]],
         projection: &[usize],
-    ) -> Vec<Layer<Terms>> {
+    ) -> Vec<Rc<Layer<Terms>>> {
 
         assert!(!layers.is_empty());
         assert_eq!(layers.len(), groups.len());
@@ -577,7 +578,7 @@ pub mod terms {
                 // TODO: rework layers to allow this to be something akin to `&groups[index]` without the copy.
                 base.list.values.extend(groups[index].iter().map(|g| (*g as u32).to_be_bytes()));
                 base.list.bounds.push(groups[index].len() as u64);
-                layers.insert(0, base);
+                layers.insert(0, Rc::new(base));
                 extracted.layers.push(Forest { layers });
 
             }
@@ -732,13 +733,13 @@ pub mod terms {
                     }
 
                     for layer in self.layers[layer_index..].iter_mut() {
-                        *layer = layer.retain_lists(&mut bounds);
+                        *layer = Rc::new(layer.retain_lists(&mut bounds));
                     }
                 }
                 // In any case, update prior layers from `layer_index` back to the first.
                 for layer in self.layers[..layer_index].iter_mut().rev() {
                     if include.iter().all(|x| *x) { return self; }  // TODO: make this test cheaper.
-                    *layer = layer.retain_items(&mut include);
+                    *layer = Rc::new(layer.retain_items(&mut include));
                 }
             }
             self

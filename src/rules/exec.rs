@@ -1,6 +1,7 @@
 //! Traits and logic associated with executing rules.
 
 use std::collections::BTreeSet;
+use std::rc::Rc;
 use crate::types::Action;
 use crate::facts::{FactContainer, FactLSM};
 
@@ -138,13 +139,13 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
     if let Some(mut delta) = delta_lsm.flatten() {
 
         let values = vec![255u8; 4 * delta.len()];
-        delta.layers.push(Layer { list: Lists {
+        delta.layers.push(Rc::new(Layer { list: Lists {
             bounds: Strides::new(1, delta.len() as u64),
             values: Lists {
                 bounds: Strides::new(4, delta.len() as u64),
                 values,
             },
-        }});
+        }}));
         delta_lsm.push(delta);
         delta_terms.push(potato);
 
@@ -155,7 +156,8 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
         // Extract the (count, index) layer to shard paths by index.
         if let Some(mut delta) = delta_lsm.flatten() {
 
-            let notes = delta.layers.pop().unwrap_or_default().list.values.values;
+            // This `Rc::unwrap_or_clone` could be `Rc::try_unwrap` as there *should* be unique ownership, other than bugs in `other.count` above.
+            let notes = Rc::unwrap_or_clone(delta.layers.pop().unwrap_or_default()).list.values.values;
             let mut bools = std::collections::VecDeque::with_capacity(notes.len()/4);
             delta_terms.pop();
 
@@ -165,7 +167,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
                 bools.clear();
                 bools.extend((0 .. notes.len()/4).map(|i| notes[4*i] > 0 && notes[4*i+1] == other_index as u8));
                 let mut layers = Vec::default();
-                for index in (0 .. delta_terms.len()).rev() { layers.insert(0, delta.layers[index].retain_items(&mut bools)); }
+                for index in (0 .. delta_terms.len()).rev() { layers.insert(0, Rc::new(delta.layers[index].retain_items(&mut bools))); }
                 let delta_shard = crate::facts::Forest { layers };
                 let mut delta_shard: FactLSM<_> = delta_shard.into();
 
