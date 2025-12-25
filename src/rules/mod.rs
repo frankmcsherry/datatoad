@@ -56,7 +56,7 @@ fn implement_action(head: &[Atom], body: &Atom, stable: bool, facts: &mut Relati
         if let Some(found) = facts.get(body.name.as_str()) {
             let mut derived = FactLSM::default();
             for layer in found.stable.contents().filter(|_| stable).chain(found.recent.as_ref()) {
-                derived.extend(&mut layer.act_on(action));
+                derived.append(&mut layer.act_on(action));
             }
             facts.entry(head_atom).extend(derived);
         }
@@ -274,7 +274,7 @@ pub mod data {
                     let join_terms = delta_terms.iter().chain(delta_terms[..prefix].iter()).chain(terms.iter()).copied().collect::<Vec<_>>();
                     // Our output join order (until we learn how to do FDB shapes) is the first of `others` not equal to ourself.
                     let projection = after.iter().map(|t| join_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
-                    delta_shard.extend(&mut delta.join_many(other_facts.iter().copied(), prefix, &projection[..]));
+                    delta_shard.append(&mut delta.join_many(other_facts.iter().copied(), prefix, &projection[..]));
                 }
                 delta_terms.clear();
                 delta_terms.extend_from_slice(after);

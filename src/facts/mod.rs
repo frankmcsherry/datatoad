@@ -78,7 +78,7 @@ impl Relations {
             let mut fact_set = FactSet::default();
             // TODO: Can be more elegant if we see all columns retained, as it means no duplication.
             for layer in base.stable.contents() {
-                fact_set.stable.extend(&mut layer.act_on(action));
+                fact_set.stable.append(&mut layer.act_on(action));
             }
             // Flattening deduplicates, which may be necessary as `action` may introduce collisions
             // across LSM layers.
@@ -179,7 +179,7 @@ pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
     /// The default implementation processes `others` in order, but more thoughtful implementations exist.
     fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize]) -> FactLSM<Self> {
         let mut result = FactLSM::default();
-        for other in others { result.extend(&mut self.join(other, arity, projection)); }
+        for other in others { result.append(&mut self.join(other, arity, projection)); }
         result
     }
 }
@@ -237,7 +237,7 @@ impl<F: Merge + Length> FactLSM<F> {
         }
     }
 
-    pub fn extend(&mut self, other: &mut FactLSM<F>) {
+    pub fn append(&mut self, other: &mut FactLSM<F>) {
         Extend::extend(&mut self.layers, other.layers.drain(..).filter(|f| !f.is_empty()));
         self.tidy();
     }
