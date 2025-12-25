@@ -65,7 +65,7 @@ pub fn permute_delta<F: FactContainer, T: Ord + Copy>(
 
     if permutation.iter().enumerate().any(|(index, i)| &index != i) {
         if let Some(flattened) = delta.flatten() {
-            delta.append(&mut flattened.act_on(&Action::permutation(permutation.iter().copied())));
+            delta.extend(flattened.act_on(&Action::permutation(permutation.iter().copied())));
         }
         *delta_terms = permutation.iter().map(|i| delta_terms[*i]).collect::<Vec<_>>();
     }
