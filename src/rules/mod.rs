@@ -243,7 +243,7 @@ pub mod data {
 
                 // Must now project `counts` forward to leaves of `delta`, where we expect to find installed counts.
                 let mut ranges = (0 .. counts.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
-                for layer in prefix .. delta.layers.len() { advance_bounds::<Terms>(delta.layers[layer].borrow(), &mut ranges); }
+                for layer in prefix .. delta.arity() { advance_bounds::<Terms>(delta.layers[layer].borrow(), &mut ranges); }
                 let notes = &mut delta.layers.last_mut().unwrap().list.values.values;
                 for (count, range) in counts.iter().zip(ranges.iter()) {
                     let order = (count+1).ilog2() as u8;
@@ -506,7 +506,7 @@ pub mod logic {
             let orders = match max {
                 Some(col) => {
                     let mut bounds = (0 .. delta.layers[col].list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
-                    for i in col+1 .. delta.layers.len() { advance_bounds::<Terms>(delta.layers[i].borrow(), &mut bounds)};
+                    for i in col+1 .. delta.arity() { advance_bounds::<Terms>(delta.layers[i].borrow(), &mut bounds)};
                     bounds.into_iter().map(|(l,u)| u-l).collect::<Vec<_>>()
                 },
                 None => { vec![delta.layers.last().unwrap().list.values.len()] }
@@ -579,7 +579,7 @@ pub mod logic {
                 //  We are initially 1:1 with the lists of layer pos, or items of layer pos-1.
                 //  We'll want to advance through each of the layers `pos..`.
                 let mut bounds = (0 .. column.len()).map(|i| (i, i+1)).collect::<Vec<_>>();
-                for idx in pos .. delta.layers.len() { advance_bounds::<Terms>(delta.layers[idx].borrow(), &mut bounds); }
+                for idx in pos .. delta.arity() { advance_bounds::<Terms>(delta.layers[idx].borrow(), &mut bounds); }
                 let mut colnew: Lists<Terms> = Default::default();
                 for idx in 0 .. column.len() {
                     for _ in bounds[idx].0 .. bounds[idx].1 {
