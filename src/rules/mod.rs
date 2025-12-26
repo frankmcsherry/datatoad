@@ -108,7 +108,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             let (load_action, load_terms) = &loads[&plan_atom][load_atom];
             let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
             let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
-            let other_facts = other.stable.contents().chain(to_chain).filter(|l| !l.is_empty()).collect::<Vec<_>>();
+            let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
             let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
                 if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
                 else if body[*load_atom].anti { Box::new(antijoin::Anti((other_facts, load_terms))) }
@@ -339,7 +339,7 @@ pub mod antijoin {
             let prefix = next_other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
             crate::rules::exec::permute_delta(delta_shard, delta_terms, next_other_terms[..prefix].iter().copied(), true);
             if let Some(delta) = delta_shard.flatten() {
-                assert!(terms.is_empty() || delta.is_empty());
+                assert!(terms.is_empty());
                 let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
                 delta_shard.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), false));
             }
