@@ -524,9 +524,7 @@ pub mod terms {
                     expand(Rc::make_mut(&mut this_i), values, &mut others);
                     sort_terms(values, &mut groups, &this_i, last)
                 }
-                else if column < this.len() + arity {
-                    unimplemented!("reference equated column of first join argument")
-                }
+                else if column < this.len() + arity { unimplemented!("reference equated column of first join argument") }
                 else {
                     // We expect this to be the next column in `that_values`.
                     let values = that_values[that_cursor];
@@ -696,9 +694,7 @@ pub mod terms {
                     reports = crate::facts::trie::layers::terms::intersection(layer0.borrow(), *layer1, &reports.0, &reports.1);
                 }
                 // Mark shared paths appropriately.
-                for index in reports.0.iter().copied() {
-                    include[index] = semi;
-                }
+                for index in reports.0.iter().copied() { include[index] = semi; }
             }
 
             self.retain_core(other_arity, include)
@@ -995,7 +991,6 @@ pub mod layers {
         output
     }
 
-
     // TODO: This method needs to be at most ~linear in the number of items that will be written out.
     // TODO: Invocations of this method will not have their bounds grow in number of intervals, and so
     //       we can re-use an argument `&mut [(usize, usize)]` to house the output bounds.
@@ -1018,9 +1013,7 @@ pub mod layers {
                 output.bounds.push(output.values.len() as u64);
                 bools.push_back(true);
             }
-            else {
-                bools.push_back(false);
-            }
+            else { bools.push_back(false); }
         }
 
         assert_eq!(bools.len(), lists.len());

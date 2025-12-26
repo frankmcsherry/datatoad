@@ -48,13 +48,9 @@ pub mod types {
             }
         }
 
-        pub fn advance(&mut self) {
-            self.facts.advance();
-        }
+        pub fn advance(&mut self) { self.facts.advance();}
 
-        fn active(&self) -> bool {
-            self.facts.active()
-        }
+        fn active(&self) -> bool { self.facts.active() }
 
         pub fn extend(&mut self, rules: impl IntoIterator<Item=Rule>) {
             for rule in rules.into_iter() { self.push(rule); }
@@ -78,9 +74,7 @@ pub mod types {
                         }
                     }
                     let facts = Forest::<Terms>::from_columns(lits);
-                    self.facts
-                        .entry(atom)
-                        .extend([facts]);
+                    self.facts.entry(atom).extend([facts]);
                 }
             }
             else {

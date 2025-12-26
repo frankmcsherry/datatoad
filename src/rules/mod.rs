@@ -70,7 +70,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
 
     let plan_atoms = if stable { 1 } else { body.len() };
 
-    let potato = "potato".to_string();
+    let potato = ".potato".to_string();
 
     for (plan_atom, atom) in body[..plan_atoms].iter().enumerate() {
 
@@ -158,9 +158,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
                 delta_lsm.push(delta);
             }
         }
-        if let Some(pos) = exact_match {
-            facts.entry(&head[pos]).extend(delta_lsm);
-        }
+        if let Some(pos) = exact_match { facts.entry(&head[pos]).extend(delta_lsm); }
     }
 }
 

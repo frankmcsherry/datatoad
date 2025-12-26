@@ -90,9 +90,9 @@ pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a
             let mut action = base_actions[&plan_atom].clone();
             action.projection =
             order.iter()
-                .flat_map(|t1| plan_terms.iter().position(|t2| t1 == t2))
-                .map(|p| base_actions[&plan_atom].projection[p].clone())
-                .collect();
+                 .flat_map(|t1| plan_terms.iter().position(|t2| t1 == t2))
+                 .map(|p| base_actions[&plan_atom].projection[p].clone())
+                 .collect();
 
             load_actions.get_mut(&plan_atom).map(|l| l.insert(plan_atom, (action, order)));
         }
@@ -224,10 +224,10 @@ impl<A: Ord+Copy, T: Ord+Copy> Strategy<A, T> for ByTerm {
             // Terms that can be ground through an atom from `terms`, but not yet in `terms`.
             let mut next_terms =
             terms.iter()
-                .flat_map(|term| terms_to_atoms[term].iter())
-                .flat_map(|atom| atoms_to_terms[atom].ground(&terms))
-                .filter(|term| !terms.contains(term))
-                .collect::<Vec<_>>();
+                 .flat_map(|term| terms_to_atoms[term].iter())
+                 .flat_map(|atom| atoms_to_terms[atom].ground(&terms))
+                 .filter(|term| !terms.contains(term))
+                 .collect::<Vec<_>>();
 
             // Choose the term incident on the most atoms.
             next_terms.sort_by_key(|t| terms_to_atoms[t].len());
@@ -262,9 +262,9 @@ impl<A: Ord+Copy, T: Ord+Copy> Strategy<A, T> for ByAtom {
             // Atoms are available if they can be fully enumerated from the bound terms.
             let mut next_atoms =
             atoms.iter()
-                .flat_map(|atom| atoms_to_terms[atom].terms())
-                .flat_map(|term| terms_to_atoms[&term].iter())
-                .filter(|atom| !atoms.contains(atom) && atoms_to_terms[atom].terms().difference(&atoms_to_terms[atom].ground(&terms)).all(|t| terms.contains(t)));
+                 .flat_map(|atom| atoms_to_terms[atom].terms())
+                 .flat_map(|term| terms_to_atoms[&term].iter())
+                 .filter(|atom| !atoms.contains(atom) && atoms_to_terms[atom].terms().difference(&atoms_to_terms[atom].ground(&terms)).all(|t| terms.contains(t)));
 
             // Choose the first available atom. This can be dramatically improved.
             let next_atom = next_atoms.next().unwrap_or_else(|| atoms_to_terms.keys().find(|a| !atoms.contains(a)).unwrap());
