@@ -17,7 +17,7 @@
 //! the extracted column of values (forming runs of sorted values for prefixes).
 
 use std::rc::Rc;
-use columnar::Container;
+use columnar::{Container, Len};
 use crate::facts::Lists;
 
 /// A sequence of layers, each a list of extensions for items of the prior layer.
@@ -31,17 +31,33 @@ use crate::facts::Lists;
 /// these methods become relatively few calls into methods on the layers. When not
 /// the case, this is a bit of a bug.
 #[derive(Clone, Debug)]
-pub struct Forest<C> { pub layers: Vec<Rc<Layer<C>>> }
+pub struct Forest<C> { layers: Vec<Rc<Layer<C>>> }
 
 impl<C: Container> Forest<C> {
 
     pub fn arity(&self) -> usize { self.layers.len() }
+    pub fn layer(&self, index: usize) -> &Rc<Layer<C>> { &self.layers[index] }
 
     pub fn len(&self) -> usize { self.layers.last().map(|l| l.list.values.len()).unwrap_or(0) }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 
     pub fn borrow<'a>(&'a self) -> Vec<<Lists<C> as Container>::Borrowed<'a>> {
         self.layers.iter().map(|x| x.list.borrow()).collect::<Vec<_>>()
+    }
+
+    pub fn push_layer(&mut self, layer: Rc<Layer<C>>) {
+        if !self.layers.is_empty() { assert_eq!(self.len(), layer.borrow().len()); }
+        self.layers.push(layer);
+    }
+    pub fn pop_layer(&mut self) -> Option<Rc<Layer<C>>> { self.layers.pop() }
+}
+
+impl<C: Container> TryFrom<Vec<Rc<Layer<C>>>> for Forest<C> {
+    type Error = Vec<Rc<Layer<C>>>;
+    fn try_from(layers: Vec<Rc<Layer<C>>>) -> Result<Self, Self::Error> {
+        for layer in layers.iter() { if layer.borrow().is_empty() { return Err(layers); } }
+        for index in 1 .. layers.len() { if layers[index-1].borrow().values.len() != layers[index].borrow().len() { return Err(layers); } }
+        Ok(Self { layers })
     }
 }
 
