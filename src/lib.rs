@@ -74,7 +74,7 @@ pub mod types {
                         }
                     }
                     let facts = Forest::<Terms>::from_columns(lits);
-                    self.facts.entry(atom).extend([facts]);
+                    self.facts.entry(atom).extend(facts);
                 }
             }
             else {

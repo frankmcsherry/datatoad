@@ -17,31 +17,53 @@
 //! the extracted column of values (forming runs of sorted values for prefixes).
 
 use std::rc::Rc;
-use columnar::Container;
+use columnar::{Container, Len};
 use crate::facts::Lists;
 
-/// A sequence of layers, each a list of extensions for items of the prior layer.
+/// A non-empty collection of facts, represented as a trie with one layer per term.
 ///
-/// This type houses many columns, and is meant to be demonstrative of how on can
-/// use column-oriented data to perform various collection-oriented tasks. Often,
-/// we'll want to use other types, perhaps of borrowed data, and it shouldn't be
-/// important to return to this type.
+/// There are as many layers as the type's arity, each of which is verified to be
+/// non-empty and have as many lists as the preceding layer has items, and as many
+/// items as the next layer has lists.
 ///
-/// Although `Forest` will have many methods, the intent is that eventually all of
-/// these methods become relatively few calls into methods on the layers. When not
-/// the case, this is a bit of a bug.
+/// The first layer has one list, corresponding to an implicit unit 0th column.
+/// When there are no layers, the collection has one 0-ary fact.
+///
+/// To represent an optionally empty collection consider an `Option<Forest<C>>` or
+/// a `FactLSM<Forest<C>>`.
 #[derive(Clone, Debug)]
-pub struct Forest<C> { pub layers: Vec<Rc<Layer<C>>> }
+pub struct Forest<C> { layers: Vec<Rc<Layer<C>>> }
 
 impl<C: Container> Forest<C> {
 
+    /// The number of columns of facts in the collection.
     pub fn arity(&self) -> usize { self.layers.len() }
-
-    pub fn len(&self) -> usize { self.layers.last().map(|l| l.list.values.len()).unwrap_or(0) }
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
-
+    /// A reference to the indexed layer.
+    pub fn layer(&self, index: usize) -> &Rc<Layer<C>> { &self.layers[index] }
+    /// The number of facts in the collection.
+    pub fn len(&self) -> usize { self.layers.last().map(|l| l.list.values.len()).unwrap_or(1) }
+    /// A collection of borrowed containers.
     pub fn borrow<'a>(&'a self) -> Vec<<Lists<C> as Container>::Borrowed<'a>> {
         self.layers.iter().map(|x| x.list.borrow()).collect::<Vec<_>>()
+    }
+    /// Inserts a new column for all facts, by a conforming layer.
+    ///
+    /// The layer must be non-empty, and have as many lists as `self.len()`.
+    pub fn push_layer(&mut self, layer: Rc<Layer<C>>) {
+        assert!(!layer.borrow().is_empty());
+        if !self.layers.is_empty() { assert_eq!(self.len(), layer.borrow().len()); }
+        self.layers.push(layer);
+    }
+    /// Removes the last column from facts, returning the layer with their values.
+    pub fn pop_layer(&mut self) -> Option<Rc<Layer<C>>> { self.layers.pop() }
+}
+
+impl<C: Container> TryFrom<Vec<Rc<Layer<C>>>> for Forest<C> {
+    type Error = Vec<Rc<Layer<C>>>;
+    fn try_from(layers: Vec<Rc<Layer<C>>>) -> Result<Self, Self::Error> {
+        for layer in layers.iter() { if layer.borrow().is_empty() { return Err(layers); } }
+        for index in 1 .. layers.len() { if layers[index-1].borrow().values.len() != layers[index].borrow().len() { return Err(layers); } }
+        Ok(Self { layers })
     }
 }
 
@@ -79,8 +101,6 @@ pub mod terms {
 
     impl crate::facts::Merge for Forest<Terms> {
         fn merge(self, other: Self) -> Self {
-            if self.is_empty() { return other; }
-            if other.is_empty() { return self; }
 
             assert_eq!(self.arity(), other.arity());
 
@@ -91,23 +111,22 @@ pub mod terms {
                 layers.push(Rc::new(layer0.union(layer1, &mut reports, layers.len() + 1 < self.arity())));
             }
 
-            Self { layers }
+            layers.try_into().expect("Non-empty inputs merged")
         }
     }
 
-    impl crate::facts::Length for Forest<Terms> {
-        fn len(&self) -> usize { self.layers.last().map(|x| x.list.values.len()).unwrap_or(0) }
-    }
+    impl crate::facts::Length for Forest<Terms> { fn len(&self) -> usize { self.len() } }
 
     impl Forest<Terms> {
         /// Forms a forest trie from a sequence of columns of identical lengths.
         ///
         /// This method takes ownership of the columns in order to drop them as they are processed.
         /// It could be generalized to `Vec<C>` for any `C` that can be borrowed as `Terms` can be.
-        pub fn from_columns(columns: Vec<Terms>) -> Self {
+        pub fn from_columns(columns: Vec<Terms>) -> Option<Self> {
+            if columns.iter().any(|c| c.is_empty()) { return None; }
             let (mut groups, indexs): (Vec<_>, Vec<_>) = (0 .. columns.first().map(columnar::Len::len).unwrap_or(0)).map(|i| (0, i)).unzip();
             let columns_len = columns.len();
-            let layers = columns.into_iter().enumerate().map(|(index, column)| {
+            let layers: Vec<_> = columns.into_iter().enumerate().map(|(index, column)| {
 
                 use columnar::{Vecs, primitive::offsets::Strides};
                 let bounds = Strides::new(1, column.len() as u64);
@@ -118,7 +137,7 @@ pub mod terms {
                 // TODO: Figure out how to avoid `indexs` being literally just `0 .. len`.
                 Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(lists, &mut groups[..], &indexs[..], index == columns_len-1) })
             }).collect();
-            Self { layers }
+            Some(layers.try_into().expect("empty columns tested earlier"))
         }
     }
 
@@ -132,7 +151,7 @@ pub mod terms {
         /// Each column should occur in at most one constraint, as otherwise they could be strengthened.
         /// For the moment, this is the caller's responsibility.
         #[inline(never)]
-        fn filter(&self, lit_filters: &[(usize, Vec<u8>)], var_filters: &[Vec<usize>]) -> Self {
+        fn filter(&self, lit_filters: &[(usize, Vec<u8>)], var_filters: &[Vec<usize>]) -> Option<Self> {
 
             // Plan the constraints applied to each column, to visit them in order.
             let mut constraints = std::collections::BTreeMap::<usize, Result<usize, &[u8]>>::default();
@@ -177,28 +196,24 @@ pub mod terms {
 
             // use `active` at `cursor` to retain lists and items.
             let mut include = std::iter::repeat(false).take(self.layers[cursor].list.values.len()).collect::<std::collections::VecDeque<_>>();
+            if active.is_empty() { return None; }
             for idx in active.iter().copied() { include[idx] = true; }
-            let mut result = self.clone();
+            let mut layers: Vec<Rc<_>> = Vec::new();
             // If there are additional layers, clone `include` and update unexplored layers.
-            if result.arity() > cursor {
+            if self.arity() > cursor {
                 let mut bounds = active.iter().copied().map(|i| (i,i+1)).collect::<Vec<_>>();
-                for layer in result.layers[cursor..].iter_mut().skip(1) {
-                    *layer = Rc::new(layer.retain_lists(&mut bounds));
-                }
+                for index in (cursor .. self.arity()).skip(1) { layers.push(Rc::new(self.layer(index).retain_lists(&mut bounds))); }
             }
             // In any case, update prior layers from `other_arity` back to the first.
-            for layer in result.layers[..cursor+1].iter_mut().rev() {
-                if include.iter().all(|x| *x) { return result; }  // TODO: make this test cheaper.
-                *layer = Rc::new(layer.retain_items(&mut include));
-            }
+            for index in (0 .. cursor+1).rev() { layers.insert(0, Rc::new(self.layer(index).retain_items(&mut include))); }
 
-            result
+            Some(layers.try_into().expect("Guarded by active.is_empty() test"))
         }
         /// Produces columns in the order indicated by `projection`. Each column should appear at most once.
         #[inline(never)]
         fn permute(&self, projection: &[usize]) -> Self {
             let indexs = (0 .. self.layers[0].list.len()).collect::<Vec<_>>();
-            Self { layers: permute_subset(&self.borrow()[..], projection, &indexs) }
+            permute_subset(&self.borrow()[..], projection, &indexs).try_into().expect("permutation should not remove facts")
         }
         /// Introduces repeated and literal columns.
         ///
@@ -404,6 +419,9 @@ pub mod terms {
             aligneds.push(Rc::new(this_aligned));
         }
 
+        // Ensures that afterwards there will be outputs.
+        if aligneds.last().unwrap().is_empty() { return Default::default(); }
+
         // Produce `this_i` and `this_values`, indexes into columns in the order they appear in `projection`.
         let mut this_i = aligneds.last().unwrap().clone();
         let mut this_values = None;
@@ -427,7 +445,7 @@ pub mod terms {
             let thats_values = thats.iter().map(|t| &t[arity..]).collect::<Vec<_>>();
             let thats_groups = aligned.iter().map(|(i,_)| &i[..]).collect::<Vec<_>>();
             let thats_indexs = aligned.iter().map(|(_,j)| &j[..]).collect::<Vec<_>>();
-            that_values = Some( Forest { layers: restrict_project_merge(&thats_values, &thats_groups, &thats_indexs, &that_order) });
+            that_values = Some( Forest { layers: restrict_project_merge(&thats_values, &thats_groups, &thats_indexs, &that_order).unwrap() });
             let that_j = Rc::make_mut(&mut that_j); that_j.clear(); that_j.extend(0 .. this_i.len());
         }
         let that_values = that_values.as_ref().map(|x| x.borrow()).unwrap_or(thats[0][arity..].to_vec());
@@ -536,9 +554,9 @@ pub mod terms {
                     sort_terms(values, &mut groups, &that_j, last)
                 };
                 Rc::new(Layer { list })
-            }).collect();
+            }).collect::<Vec<_>>();
 
-            output_lsm.push(Forest { layers });
+            output_lsm.push(layers.try_into().expect("non-empty intersection guarding"));
         }
 
         output_lsm
@@ -553,33 +571,34 @@ pub mod terms {
         groups: &[&[usize]],
         indexs: &[&[usize]],
         projection: &[usize],
-    ) -> Vec<Rc<Layer<Terms>>> {
+    ) -> Option<Vec<Rc<Layer<Terms>>>> {
 
         assert!(!layers.is_empty());
         assert_eq!(layers.len(), groups.len());
         assert_eq!(layers.len(), indexs.len());
 
+        if indexs.is_empty() { return None; }
+
         // TODO: can union from indexed layers without having to copy first.
-
-        if layers.len() == 1 { permute_subset(layers[0], projection, indexs[0]) }
+        if layers.len() == 1 { Some(permute_subset(layers[0], projection, indexs[0])) }
         else {
-            let mut extracted = FactLSM::default();
+            let mut extracted: FactLSM<Forest<Terms>> = FactLSM::default();
             for index in 0 .. layers.len() {
-
-                let mut layers = permute_subset(layers[index], projection, indexs[index]);
-                let mut base: Layer<Terms> = Default::default();
-                use columnar::Push;
-                // TODO: rework layers to allow this to be something akin to `&groups[index]` without the copy.
-                base.list.values.extend(groups[index].iter().map(|g| (*g as u32).to_be_bytes()));
-                base.list.bounds.push(groups[index].len() as u64);
-                layers.insert(0, Rc::new(base));
-                extracted.layers.push(Forest { layers });
-
+                if !groups[index].is_empty() {
+                    let mut layers = permute_subset(layers[index], projection, indexs[index]);
+                    let mut base: Layer<Terms> = Default::default();
+                    use columnar::Push;
+                    // TODO: rework layers to allow this to be something akin to `&groups[index]` without the copy.
+                    base.list.values.extend(groups[index].iter().map(|g| (*g as u32).to_be_bytes()));
+                    base.list.bounds.push(groups[index].len() as u64);
+                    layers.insert(0, Rc::new(base));
+                    extracted.layers.push(layers.try_into().expect("guarded by !groups[index].is_empty()"));
+                }
             }
 
-            let mut merged = extracted.flatten().unwrap().layers;
+            let mut merged = extracted.flatten().expect("empty index guard above").layers;
             merged.remove(0);
-            merged
+            Some(merged)
         }
     }
 
@@ -619,7 +638,6 @@ pub mod terms {
         #[inline(never)]
         fn act_on(&self, action: &Action<Vec<u8>>) -> FactLSM<Self> {
 
-            if self.is_empty() { return FactLSM::default(); }
             if action.is_identity() { return self.clone().into(); }
 
             //  Informally, we will stage the evaluation as three distinct actions:
@@ -632,7 +650,8 @@ pub mod terms {
             //  1.  Filter by literal and variable equalities.
             let mut filtered = None;
             if !action.lit_filter.is_empty() || !action.var_filter.is_empty() {
-                filtered = Some(self.filter(&action.lit_filter, &action.var_filter));
+                filtered = if let Some(facts) = self.filter(&action.lit_filter, &action.var_filter) { Some(facts) }
+                else { return FactLSM::default() }
             }
             let new_self = filtered.as_ref().unwrap_or(self);
 
@@ -648,7 +667,7 @@ pub mod terms {
         }
 
         fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize]) -> FactLSM<Self> {
-            let others = others.filter(|o| !o.is_empty()).map(|o| o.borrow()).collect::<Vec<_>>();
+            let others = others.map(|o| o.borrow()).collect::<Vec<_>>();
             let others = others.iter().map(|o| &o[..]).collect::<Vec<_>>();
             join_cols(&self.borrow()[..], &others[..], arity, projection)
         }
@@ -673,8 +692,6 @@ pub mod terms {
 
         #[inline(never)]
         pub fn retain_inner<'a>(self, others: impl Iterator<Item = &'a [<Lists<Terms> as Container>::Borrowed<'a>]>, semi: bool) -> FactLSM<Self> {
-
-            if self.is_empty() { return Default::default(); }
 
             use std::collections::VecDeque;
 

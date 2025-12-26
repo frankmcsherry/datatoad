@@ -90,13 +90,11 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                     if columns[0].len() > 100_000_000 {
                                         // Pass ownership of columns so the method can drop them as they are processed.
                                         let arity = columns.len();
-                                        let trie = Forest::from_columns(columns);
-                                        state.facts.entry(&atom).extend([trie]);
+                                        state.facts.entry(&atom).extend(Forest::from_columns(columns));
                                         columns = vec![Terms::default(); arity];
                                     }
                                 }
-                                let trie = Forest::from_columns(columns);
-                                state.facts.entry(&atom).extend([trie]);
+                                state.facts.entry(&atom).extend(Forest::from_columns(columns));
                                 state.update();
                             }
                         }
@@ -147,13 +145,11 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                     use columnar::Len;
                                     if columns[0].len() > 100_000_000 {
                                         // Pass ownership of columns so the method can drop them as they are processed.
-                                        let trie = Forest::from_columns(columns);
-                                        state.facts.entry(&atom).extend([trie]);
+                                        state.facts.entry(&atom).extend(Forest::from_columns(columns));
                                         columns = vec![Terms::default(); arity];
                                     }
                                 }
-                                let trie = Forest::from_columns(columns);
-                                state.facts.entry(&atom).extend([trie]);
+                                state.facts.entry(&atom).extend(Forest::from_columns(columns));
                                 state.update();
                             }
                             else { println!("file not found: {:?}", filename); }

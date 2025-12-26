@@ -101,8 +101,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
         }
         else {
             assert_eq!(&active[..], &delta_terms[..active.len()]);
-            let delta_clone = Forest { layers: delta.layers[..active.len()].to_vec() };
-            delta_lsm.push(delta_clone);
+            delta_lsm.push((0..active.len()).map(|i| Rc::clone(delta.layer(i))).collect::<Vec<_>>().try_into().expect("non-empty as copied from delta"));
             let mut active_clone = active.clone();
             let mut active_target = active.clone();
             active_target.extend(terms.iter().copied());
@@ -139,7 +138,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
     if let Some(mut delta) = delta_lsm.flatten() {
 
         let values = vec![255u8; 4 * delta.len()];
-        delta.layers.push(Rc::new(Layer { list: Lists {
+        delta.push_layer(Rc::new(Layer { list: Lists {
             bounds: Strides::new(1, delta.len() as u64),
             values: Lists {
                 bounds: Strides::new(4, delta.len() as u64),
@@ -157,7 +156,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
         if let Some(mut delta) = delta_lsm.flatten() {
 
             // This `Rc::unwrap_or_clone` could be `Rc::try_unwrap` as there *should* be unique ownership, other than bugs in `other.count` above.
-            let notes = Rc::unwrap_or_clone(delta.layers.pop().unwrap_or_default()).list.values.values;
+            let notes = Rc::unwrap_or_clone(delta.pop_layer().unwrap()).list.values.values;
             let mut bools = std::collections::VecDeque::with_capacity(notes.len()/4);
             delta_terms.pop();
 
@@ -166,10 +165,12 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
                 // Extract the shard of `delta` marked for this index.
                 bools.clear();
                 bools.extend((0 .. notes.len()/4).map(|i| notes[4*i] > 0 && notes[4*i+1] == other_index as u8));
-                let mut layers = Vec::default();
-                for index in (0 .. delta_terms.len()).rev() { layers.insert(0, Rc::new(delta.layers[index].retain_items(&mut bools))); }
-                let delta_shard = crate::facts::Forest { layers };
-                let mut delta_shard: FactLSM<_> = delta_shard.into();
+                let mut delta_shard = FactLSM::default();
+                if bools.iter().any(|x| *x) {
+                    let mut layers = Vec::default();
+                    for index in (0 .. delta_terms.len()).rev() { layers.insert(0, Rc::new(delta.layer(index).retain_items(&mut bools))); }
+                    delta_shard.push(layers.try_into().expect("non-empty due to bools.any() test"));
+                }
 
                 // join with atom: permute `delta_shard` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
                 let mut delta_shard_terms = delta_terms.clone();
@@ -189,7 +190,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
                 // Put in common layout (`target`) then merge.
                 permute_delta(&mut delta_shard, &mut delta_shard_terms, target.iter().copied(), false);
                 if let Some(mut delta) = delta_shard.flatten() {
-                    delta.layers.truncate(target.len());
+                    while delta.arity() > target.len() { delta.pop_layer(); }
                     delta_lsm.push(delta);
                 }
             }

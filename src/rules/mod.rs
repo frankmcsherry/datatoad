@@ -108,7 +108,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             let (load_action, load_terms) = &loads[&plan_atom][load_atom];
             let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
             let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
-            let other_facts = other.stable.contents().chain(to_chain).filter(|l| !l.is_empty()).collect::<Vec<_>>();
+            let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
             let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
                 if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
                 else if body[*load_atom].anti { Box::new(antijoin::Anti((other_facts, load_terms))) }
@@ -197,26 +197,28 @@ pub mod data {
             let prefix = other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
             crate::rules::exec::permute_delta(delta_lsm, delta_terms, other_terms[..prefix].iter().copied(), true);
             if let Some(mut delta) = delta_lsm.flatten() {
-                let length = if prefix > 0 { delta.layers[prefix-1].list.values.len() } else { 1 };
+                let length = if prefix > 0 { delta.layer(prefix-1).list.values.len() } else { 1 };
                 let mut counts = vec![0; length];
                 for other_part in other_facts.iter() {
                     let mut delta_idxs = vec![0];
                     let mut other_idxs = vec![0];
-                    for layer in 0 .. prefix { (delta_idxs, other_idxs) = intersection::<Terms>(delta.layers[layer].borrow(), other_part.layers[layer].borrow(), &delta_idxs, &other_idxs); }
+                    for layer in 0 .. prefix { (delta_idxs, other_idxs) = intersection::<Terms>(delta.layer(layer).borrow(), other_part.layer(layer).borrow(), &delta_idxs, &other_idxs); }
                     // The count derives from projecting `other_idxs` forward through `terms`.
                     let mut ranges = other_idxs.iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
-                    for layer in prefix .. (prefix + terms.len()) { advance_bounds::<Terms>(other_part.layers[layer].borrow(), &mut ranges); }
+                    for layer in prefix .. (prefix + terms.len()) { advance_bounds::<Terms>(other_part.layer(layer).borrow(), &mut ranges); }
                     for (delta_idx, range) in delta_idxs.iter().zip(ranges.iter()) { counts[*delta_idx] += range.1-range.0; }
                 }
 
                 // We now project `counts` forward through `delta` to the `potato` column.
                 // If any of `counts` are zero, we have the option to first restrict `delta` to only those prefixes.
-                // We don't have to do this, can choose to avoid if there are only *few* zeros, and generally don't expect this is semijoins have already happened.
+                // We don't have to do this, can choose to avoid if there are only *few* zeros, and generally don't expect this if semijoins have already happened.
                 let remove_zeros = counts.iter().filter(|c| c == &&0).count() > 0;
                 if remove_zeros {
                     let mut bools = std::collections::VecDeque::with_capacity(counts.len());
                     bools.extend(counts.iter().map(|c| c > &0));
                     counts.retain(|c| c > &0);
+                    // SUBTLE: `delta_lsm` is empty so returning communicates zeroing out everything. But also this guards Forest contruction to ensure it is non-empty.
+                    if counts.is_empty() { return; }
 
                     let mut layers = Vec::with_capacity(delta_terms.len());
                     if delta_terms.len() > prefix {
@@ -231,20 +233,20 @@ pub mod data {
                             }
                         }
 
-                        for layer in delta.layers[prefix..].iter() { layers.push(Rc::new(layer.retain_lists(&mut bounds))); }
+                        for index in prefix .. delta.arity() { layers.push(Rc::new(delta.layer(index).retain_lists(&mut bounds))); }
                     }
-                    for layer in delta.layers[..prefix].iter().rev() { layers.insert(0, Rc::new(layer.retain_items(&mut bools))); }
+                    for index in (0 .. prefix).rev() { layers.insert(0, Rc::new(delta.layer(index).retain_items(&mut bools))); }
 
                     assert_eq!(counts.len(), layers[prefix-1].list.values.len());
-                    delta = Forest { layers };
+                    delta = layers.try_into().expect("non-empty due to count.is_empty() guard");
                 }
 
                 // Must now project `counts` forward to leaves of `delta`, where we expect to find installed counts.
                 let mut ranges = (0 .. counts.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
-                for layer in prefix .. delta.arity() { advance_bounds::<Terms>(delta.layers[layer].borrow(), &mut ranges); }
+                for layer in prefix .. delta.arity() { advance_bounds::<Terms>(delta.layer(layer).borrow(), &mut ranges); }
 
-                let notes = delta.layers.last_mut().unwrap();
-                let notes = &mut Rc::make_mut(notes).list.values.values;
+                let mut notes_rc = delta.pop_layer().unwrap();
+                let notes = &mut Rc::make_mut(&mut notes_rc).list.values.values;
                 for (count, range) in counts.iter().zip(ranges.iter()) {
                     let order = (count+1).ilog2() as u8;
                     for index in range.0 .. range.1 {
@@ -254,6 +256,7 @@ pub mod data {
                         }
                     }
                 }
+                delta.push_layer(notes_rc);
                 delta_lsm.push(delta);
             }
         }
@@ -336,7 +339,7 @@ pub mod antijoin {
             let prefix = next_other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
             crate::rules::exec::permute_delta(delta_shard, delta_terms, next_other_terms[..prefix].iter().copied(), true);
             if let Some(delta) = delta_shard.flatten() {
-                assert!(terms.is_empty() || delta.is_empty());
+                assert!(terms.is_empty());
                 let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
                 delta_shard.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), false));
             }
@@ -473,7 +476,7 @@ pub mod logic {
                 //      Each present element of `self.bound` presents as a pair of borrowed container and list of counts for each element.
                 //      All present pairs should have the same sum of counts, indicating the total number of argument tuples.
                 let max = self.bound.iter().flatten().flat_map(|term| terms.iter().position(|t| t == term)).max();
-                let cnt = max.map(|col| delta.layers[col].list.values.len()).unwrap_or(1);
+                let cnt = max.map(|col| delta.layer(col).list.values.len()).unwrap_or(1);
 
                 //  Long-lived containers for literal values.
                 //  In an FDB world, we would put these at the root, independent of any input data, rather than to the side.
@@ -486,10 +489,10 @@ pub mod logic {
                     match arg {
                         Ok(term) => {
                             terms.iter().position(|t| t == term).map(|col| {
-                                let mut bounds = (0 .. delta.layers[col].list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
-                                for i in col+1 .. max.unwrap()+1 { advance_bounds::<Terms>(delta.layers[i].borrow(), &mut bounds)};
+                                let mut bounds = (0 .. delta.layer(col).list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
+                                for i in col+1 .. max.unwrap()+1 { advance_bounds::<Terms>(delta.layer(i).borrow(), &mut bounds)};
                                 let counts = bounds.into_iter().map(|(l, u)| u-l).collect::<Vec<_>>();
-                                (delta.layers[col].list.values.borrow(), counts)
+                                (delta.layer(col).list.values.borrow(), counts)
                             })
                         },
                         Err(_) => { Some((lits[index].borrow(), vec![cnt] )) },
@@ -503,15 +506,15 @@ pub mod logic {
                 //  3.  Project the output forward to the count column, potentially update count and index.
                 let orders = match max {
                     Some(col) => {
-                        let mut bounds = (0 .. delta.layers[col].list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
-                        for i in col+1 .. delta.arity() { advance_bounds::<Terms>(delta.layers[i].borrow(), &mut bounds)};
+                        let mut bounds = (0 .. delta.layer(col).list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
+                        for i in col+1 .. delta.arity() { advance_bounds::<Terms>(delta.layer(i).borrow(), &mut bounds)};
                         bounds.into_iter().map(|(l,u)| u-l).collect::<Vec<_>>()
                     },
-                    None => { vec![delta.layers.last().unwrap().list.values.len()] }
+                    None => { vec![delta.len()] }
                 };
 
-                let notes = delta.layers.last_mut().unwrap();
-                let notes = &mut Rc::make_mut(notes).list.values.values;
+                let mut notes_rc = delta.pop_layer().unwrap();
+                let notes = &mut Rc::make_mut(&mut notes_rc).list.values.values;
                 for (index, order) in orders.into_iter().enumerate().flat_map(|(i,c)| std::iter::repeat(output[i]).take(c)).enumerate() {
                     if let Some(order) = order {
                         let order: u8 = (order+1).ilog2() as u8;
@@ -521,6 +524,7 @@ pub mod logic {
                         }
                     }
                 }
+                delta.push_layer(notes_rc);
 
                 facts.push(delta);
             }
@@ -540,7 +544,7 @@ pub mod logic {
                 //      Each present element of `self.bound` presents as a pair of borrowed container and list of counts for each element.
                 //      All present pairs should have the same sum of counts, indicating the total number of argument tuples.
                 let max = self.bound.iter().flatten().flat_map(|term| terms.iter().position(|t| t == term)).max();
-                let cnt = max.map(|col| delta.layers[col].list.values.len()).unwrap_or(1);
+                let cnt = max.map(|col| delta.layer(col).list.values.len()).unwrap_or(1);
 
                 //  Long-lived containers for literal values.
                 //  In an FDB world, we would put these at the root, independent of any input data, rather than to the side.
@@ -553,10 +557,10 @@ pub mod logic {
                     match arg {
                         Ok(term) => {
                             terms.iter().position(|t| t == term).map(|col| {
-                                let mut bounds = (0 .. delta.layers[col].list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
-                                for i in col+1 .. max.unwrap()+1 { advance_bounds::<Terms>(delta.layers[i].borrow(), &mut bounds)};
+                                let mut bounds = (0 .. delta.layer(col).list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
+                                for i in col+1 .. max.unwrap()+1 { advance_bounds::<Terms>(delta.layer(i).borrow(), &mut bounds)};
                                 let counts = bounds.into_iter().map(|(l, u)| u-l).collect::<Vec<_>>();
-                                (delta.layers[col].list.values.borrow(), counts)
+                                (delta.layer(col).list.values.borrow(), counts)
                             })
                         },
                         Err(_) => { Some((lits[index].borrow(), vec![cnt] )) },
@@ -578,14 +582,14 @@ pub mod logic {
                     //  We are initially 1:1 with the lists of layer pos, or items of layer pos-1.
                     //  We'll want to advance through each of the layers `pos..`.
                     let mut bounds = (0 .. column.len()).map(|i| (i, i+1)).collect::<Vec<_>>();
-                    for idx in pos .. delta.arity() { advance_bounds::<Terms>(delta.layers[idx].borrow(), &mut bounds); }
+                    for idx in pos .. delta.arity() { advance_bounds::<Terms>(delta.layer(idx).borrow(), &mut bounds); }
                     let mut colnew: Lists<Terms> = Default::default();
                     for idx in 0 .. column.len() {
                         for _ in bounds[idx].0 .. bounds[idx].1 {
                             colnew.push(column.borrow().get(idx));
                         }
                     }
-                    delta.layers.push(Rc::new(Layer { list: colnew }));
+                    delta.push_layer(Rc::new(Layer { list: colnew }));
                     facts.push(delta);
                     terms.push(*added.iter().next().unwrap());
                 }
