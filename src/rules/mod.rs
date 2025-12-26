@@ -287,10 +287,9 @@ pub mod data {
 
                 let prefix = next_other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
                 crate::rules::exec::permute_delta(delta_shard, delta_terms, next_other_terms[..prefix].iter().copied(), true);
-                if let Some(mut delta) = delta_shard.flatten() {
+                if let Some(delta) = delta_shard.flatten() {
                     let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
-                    delta = delta.retain_inner(others.iter().map(|o| &o[..prefix]), true);
-                    delta_shard.push(delta);
+                    delta_shard.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), true));
                 }
             }
         }
@@ -338,11 +337,10 @@ pub mod antijoin {
 
             let prefix = next_other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
             crate::rules::exec::permute_delta(delta_shard, delta_terms, next_other_terms[..prefix].iter().copied(), true);
-            if let Some(mut delta) = delta_shard.flatten() {
+            if let Some(delta) = delta_shard.flatten() {
                 assert!(terms.is_empty() || delta.is_empty());
                 let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
-                delta = delta.retain_inner(others.iter().map(|o| &o[..prefix]), false);
-                delta_shard.push(delta);
+                delta_shard.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), false));
             }
         }
     }
@@ -571,7 +569,7 @@ pub mod logic {
                     // Semijoin case.
                     let added = added.iter().map(|term| self.bound.iter().position(|t| t.as_ref() == Ok(term)).unwrap()).collect::<BTreeSet<_>>();
                     let keep = self.logic.count(&args, &added).into_iter().map(|x| x != Some(0)).collect::<std::collections::VecDeque<_>>();
-                    delta = delta.retain_core(max.map(|c| c+1).unwrap_or(0), keep);
+                    facts.extend(delta.retain_core(max.map(|c| c+1).unwrap_or(0), keep));
                 }
                 else {
                     let colidx = added.iter().map(|term| self.bound.iter().position(|t| t.as_ref() == Ok(term)).unwrap()).next().unwrap();
@@ -590,10 +588,10 @@ pub mod logic {
                         }
                     }
                     delta.layers.push(Rc::new(Layer { list: colnew }));
+                    facts.push(delta);
                     terms.push(*added.iter().next().unwrap());
                 }
 
-                facts.push(delta);
             }
             else { Extend::extend(terms, added.iter().take(1).copied()); }
         }

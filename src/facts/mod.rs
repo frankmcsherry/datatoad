@@ -51,10 +51,9 @@ impl Relations {
             facts.advance();
             for (action, transform) in transforms.iter_mut() {
                 transform.stable.extend(transform.recent.take());
-                if let Some(mut recent) = facts.recent.as_ref().and_then(|r| r.act_on(action).flatten()) {
+                if let Some(recent) = facts.recent.as_ref().and_then(|r| r.act_on(action).flatten()) {
                     // Non-permutations need to be deduplicated against existing facts.
-                    if !action.is_permutation() { recent = recent.antijoin(transform.stable.contents()); }
-                    transform.recent = Some(recent);
+                    transform.recent = if !action.is_permutation() { recent.antijoin(transform.stable.contents()).flatten() } else { Some(recent) };
                 }
             }
         }
@@ -84,7 +83,7 @@ impl Relations {
             // across LSM layers.
             if let Some(stable) = fact_set.stable.flatten() { fact_set.stable.push(stable); }
             if let Some(recent) = base.recent.as_ref().and_then(|r| r.act_on(action).flatten()) {
-                fact_set.recent = Some(recent.antijoin(fact_set.stable.contents()));
+                fact_set.recent = recent.antijoin(fact_set.stable.contents()).flatten();
             }
             transforms.insert(action.clone(), fact_set);
         }
@@ -152,12 +151,8 @@ pub trait Merge {
 
 /// A type with a specific number of columns.
 pub trait Arity {
-    /// Create a new instance of `Self` with the number of columns.
-    fn new(arity: usize) -> Self;
     /// The number of columns.
     fn arity(&self) -> usize;
-    /// Take `self` leaving an empty instance with the same number of columns.
-    fn take(&mut self) -> Self;
 }
 
 /// A type that can contain and work with facts.
@@ -168,9 +163,9 @@ pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
     /// Joins `self` and `other` on the first `arity` columns, putting projected results in `builders`.
     fn join<'a>(&'a self, other: &'a Self, arity: usize, projection: &[usize]) -> FactLSM<Self> { self.join_many([other].into_iter(), arity, projection) }
     /// The subset of `self` whose facts do not start with any prefix in `others`.
-    fn antijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a { unimplemented!() }
+    fn antijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> FactLSM<Self> where Self: 'a;
     /// The subset of `self` whose facts start with some prefix in `others`.
-    fn semijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a;
+    fn semijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> FactLSM<Self> where Self: 'a;
 
     /// Joins `self` and `others` on the first `arity` columns, putting projected results in `builders`.
     ///
@@ -209,7 +204,7 @@ impl<F: FactContainer> FactSet<F> {
             // Tidy stable by an amount proportional to the work we are about to do.
             self.stable.tidy_through(2 * to_add.len());
             // Remove from to_add any facts already in stable.
-            self.recent = Some(to_add.antijoin(self.stable.contents()));
+            self.recent = to_add.antijoin(self.stable.contents()).flatten();
         }
     }
 }

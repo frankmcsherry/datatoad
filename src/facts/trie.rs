@@ -35,9 +35,7 @@ pub struct Forest<C> { pub layers: Vec<Rc<Layer<C>>> }
 
 impl<C: Container> Forest<C> {
 
-    pub fn new(arity: usize) -> Self { Self { layers: (0..arity).map(|_| Default::default()).collect() }}
     pub fn arity(&self) -> usize { self.layers.len() }
-    pub fn take(&mut self) -> Self { let empty = Self::new(self.arity()); std::mem::replace(self, empty) }
 
     pub fn len(&self) -> usize { self.layers.last().map(|l| l.list.values.len()).unwrap_or(0) }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
@@ -48,9 +46,7 @@ impl<C: Container> Forest<C> {
 }
 
 impl<C: Container> crate::facts::Arity for Forest<C> {
-    fn new(arity: usize) -> Self { Self::new(arity) }
     fn arity(&self) -> usize { self.arity() }
-    fn take(&mut self) -> Self { self.take() }
 }
 
 /// Advances pairs of lower and upper bounds on lists through each presented layer, to lower and upper bounds on items.
@@ -659,9 +655,9 @@ pub mod terms {
             join_cols(&self.borrow()[..], &others[..], arity, projection)
         }
 
-        fn antijoin<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a { self.retain_join::<'a>(others, false) }
+        fn antijoin<'a>(self, others: impl Iterator<Item = &'a Self>) -> FactLSM<Self> where Self: 'a { self.retain_join::<'a>(others, false) }
 
-        #[inline(never)] fn semijoin<'a>(self, others: impl Iterator<Item = &'a Self>) -> Self where Self: 'a { self.retain_join::<'a>(others, true) }
+        #[inline(never)] fn semijoin<'a>(self, others: impl Iterator<Item = &'a Self>) -> FactLSM<Self> where Self: 'a { self.retain_join::<'a>(others, true) }
     }
 
     impl Forest<Terms> {
@@ -672,20 +668,20 @@ pub mod terms {
         /// an antijoin retains elements not in common with `others`.
         ///
         /// All of `others` should have the same number of layers, and no more than `self`.
-        pub fn retain_join<'a>(self, others: impl Iterator<Item = &'a Self>, semi: bool) -> Self {
+        pub fn retain_join<'a>(self, others: impl Iterator<Item = &'a Self>, semi: bool) -> FactLSM<Self> {
             let others = others.map(|o| o.borrow()).collect::<Vec<_>>();
             self.retain_inner(others.iter().map(|o| &o[..]), semi)
         }
 
         #[inline(never)]
-        pub fn retain_inner<'a>(self, others: impl Iterator<Item = &'a [<Lists<Terms> as Container>::Borrowed<'a>]>, semi: bool) -> Self {
+        pub fn retain_inner<'a>(self, others: impl Iterator<Item = &'a [<Lists<Terms> as Container>::Borrowed<'a>]>, semi: bool) -> FactLSM<Self> {
 
-            if self.is_empty() { return self; }
+            if self.is_empty() { return Default::default(); }
 
             use std::collections::VecDeque;
 
             let others = others.collect::<Vec<_>>();
-            if others.is_empty() { return if semi { Self::new(self.arity()) } else { self }; }
+            if others.is_empty() { return if semi { Default::default() } else { self.into() }; }
             let other_arity = others[0].len();
             others.iter().for_each(|other| {
                 assert!(self.arity() >= other.len());
@@ -711,38 +707,41 @@ pub mod terms {
         /// Retains facts based on a bitmap for a layer of the trie.
         ///
         /// The bitmap is inserted between layer_index - 1 and layer_index, restricting either the items of layer_index-1 or the lists of layer_index.
-        pub fn retain_core(mut self, layer_index: usize, mut include: std::collections::VecDeque<bool>) -> Self {
+        pub fn retain_core(mut self, layer_index: usize, mut include: std::collections::VecDeque<bool>) -> FactLSM<Self> {
 
             if layer_index > 0 { assert_eq!(include.len(), self.layers[layer_index-1].list.values.len()); }
             if layer_index < self.arity() { assert_eq!(include.len(), self.layers[layer_index].list.len()); }
 
-            // If not all items are included, restrict layers of `self`.
-            if include.iter().all(|x| *x) { return self; }
-            else {
-                // If there are additional layers, clone `include` and update unexplored layers.
-                if self.arity() > layer_index {
+            let aggr = include.iter().fold(0u8, |b, i| b | if *i { 1u8 } else { 2u8 });
+            match aggr {
+                1u8 => self.into(),
+                2u8 => Default::default(),
+                _ => {
+                    // If there are additional layers, clone `include` and update unexplored layers.
+                    if self.arity() > layer_index {
 
-                    let mut prev = None;
-                    let mut bounds = Vec::default();
-                    for (idx, retain) in include.iter().chain([&false]).enumerate() {
-                        match (retain, &mut prev) {
-                            (true, None) => { prev = Some(idx); },
-                            (false, Some(lower) ) => { bounds.push((*lower, idx)); prev = None; }
-                            _ => { },
+                        let mut prev = None;
+                        let mut bounds = Vec::default();
+                        for (idx, retain) in include.iter().chain([&false]).enumerate() {
+                            match (retain, &mut prev) {
+                                (true, None) => { prev = Some(idx); },
+                                (false, Some(lower) ) => { bounds.push((*lower, idx)); prev = None; }
+                                _ => { },
+                            }
+                        }
+
+                        for layer in self.layers[layer_index..].iter_mut() {
+                            *layer = Rc::new(layer.retain_lists(&mut bounds));
                         }
                     }
-
-                    for layer in self.layers[layer_index..].iter_mut() {
-                        *layer = Rc::new(layer.retain_lists(&mut bounds));
+                    // In any case, update prior layers from `layer_index` back to the first.
+                    for layer in self.layers[..layer_index].iter_mut().rev() {
+                        if include.iter().all(|x| *x) { return self.into(); }  // TODO: make this test cheaper.
+                        *layer = Rc::new(layer.retain_items(&mut include));
                     }
-                }
-                // In any case, update prior layers from `layer_index` back to the first.
-                for layer in self.layers[..layer_index].iter_mut().rev() {
-                    if include.iter().all(|x| *x) { return self; }  // TODO: make this test cheaper.
-                    *layer = Rc::new(layer.retain_items(&mut include));
+                    self.into()
                 }
             }
-            self
         }
     }
 }
