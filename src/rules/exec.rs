@@ -47,28 +47,28 @@ pub trait ExecAtom<T: Ord> {
     );
 }
 
-/// Permute `delta` from its current order, `delta_terms` to one that matches `other_terms` on common terms.
+/// Permute `facts` from its current order, `terms` to one that matches `align` on common terms.
 ///
-/// The method updates both `delta` and `delta_terms`.
-/// The method assumes that some prefix of `other_terms` is present in `delta_terms`, and no further terms
-/// from `other_terms` around found there. The caller must restrict `other_terms` to make this the case.
+/// The method updates both `facts` and `terms`.
+/// The method assumes that some prefix of `align` is present in `terms`, and no further terms
+/// from `align` around found there. The caller must restrict `align` to make this the case.
 ///
-/// The `align` argument indicates that columns in `delta_terms` absent from `other_terms` should be added afterwards.
-/// When `align` is not set, only those terms present in both `delta_terms` and `other_terms` are produced.
+/// The `prune` argument indicates that columns in `terms` absent from `align` should be discarded.
+/// When `prune` is not set, all of `terms` are retained but re-ordered to start with `align`.
 pub fn permute_delta<F: FactContainer, T: Ord + Copy>(
-    delta: &mut FactLSM<F>,
-    delta_terms: &mut Vec<T>,
-    other_terms: impl Iterator<Item = T>,
-    align: bool,
+    facts: &mut FactLSM<F>,
+    terms: &mut Vec<T>,
+    align: impl Iterator<Item = T>,
+    prune: bool,
 ) {
-    let mut permutation: Vec<usize> = other_terms.flat_map(|t1| delta_terms.iter().position(|t2| &t1 == t2)).collect();
-    if align { for index in 0 .. delta_terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
+    let mut permutation: Vec<usize> = align.flat_map(|t1| terms.iter().position(|t2| &t1 == t2)).collect();
+    if !prune { for index in 0 .. terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
 
     if permutation.iter().enumerate().any(|(index, i)| &index != i) {
-        if let Some(flattened) = delta.flatten() {
-            delta.extend(flattened.act_on(&Action::permutation(permutation.iter().copied())));
+        if let Some(flattened) = facts.flatten() {
+            facts.extend(flattened.act_on(&Action::permutation(permutation.iter().copied())));
         }
-        *delta_terms = permutation.iter().map(|i| delta_terms[*i]).collect::<Vec<_>>();
+        *terms = permutation.iter().map(|i| terms[*i]).collect::<Vec<_>>();
     }
 }
 
@@ -84,7 +84,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
 ) {
     if others.len() == 1 {
         others[0].join(delta_lsm, delta_terms, terms, target);
-        permute_delta(delta_lsm, delta_terms, target.iter().copied(), false);
+        permute_delta(delta_lsm, delta_terms, target.iter().copied(), true);
         return;
     }
 
@@ -106,7 +106,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
             let mut active_target = active.clone();
             active_target.extend(terms.iter().copied());
             wco_join_inner(delta_lsm, &mut active_clone, terms, others, potato, &active_target);
-            permute_delta(delta_lsm, &mut active_clone, delta_terms[..active.len()].iter().copied(), true);
+            permute_delta(delta_lsm, &mut active_clone, delta_terms[..active.len()].iter().copied(), false);
 
             let mut crossed_terms = delta_terms.clone();
             crossed_terms.extend(delta_terms[..active.len()].iter().copied());
@@ -188,7 +188,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
                 }
 
                 // Put in common layout (`target`) then merge.
-                permute_delta(&mut delta_shard, &mut delta_shard_terms, target.iter().copied(), false);
+                permute_delta(&mut delta_shard, &mut delta_shard_terms, target.iter().copied(), true);
                 if let Some(mut delta) = delta_shard.flatten() {
                     while delta.arity() > target.len() { delta.pop_layer(); }
                     delta_lsm.push(delta);
