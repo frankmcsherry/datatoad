@@ -453,7 +453,6 @@ pub mod logic {
                 Ok(name) => terms.contains(name),
                 Err(_) => true,
             }).map(|(index,_term)| index).collect();
-            println!("indexes: {:?}", indexes);
             self.logic.bound(&indexes).into_iter().map(|index| self.bound[index].as_ref().unwrap()).copied().collect()
         }
     }
@@ -692,7 +691,7 @@ pub mod logic {
         impl super::Logic for Times {
             fn arity(&self) -> usize { 3 }
             fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> {
-                if args.len() > 1 || args.contains(&2) { (0 .. 2).filter(|i| !args.contains(i)).collect() } else { Default::default() }
+                if args.len() > 1 || args.contains(&2) { (0 .. 3).filter(|i| !args.contains(i)).collect() } else { Default::default() }
             }
             fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
                 // Any two+ bound terms should lead to a `Some(0)` or `Some(1)` determination.
@@ -731,7 +730,7 @@ pub mod logic {
         pub struct Plus;
         impl super::Logic for Plus {
             fn arity(&self) -> usize { 3 }
-            fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { if args.len() > 1 { (0 .. 2).filter(|i| !args.contains(i)).collect() } else { Default::default() } }
+            fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { if args.len() > 1 { (0 .. 3).filter(|i| !args.contains(i)).collect() } else { Default::default() } }
             fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
                 // Any two+ bound terms should lead to a `Some(0)` or `Some(1)` determination.
                 if let Some((decoded, width)) = decode_u64::<3>(args) {
