@@ -359,7 +359,7 @@ pub mod logic {
     use std::collections::BTreeSet;
     use std::rc::Rc;
 
-    use columnar::{Container, Index, Len, Push, Clear};
+    use columnar::{Container, Index, Len, Push, Clear, Options};
 
     use crate::types::{Atom, Term};
     use crate::facts::FactLSM;
@@ -423,7 +423,7 @@ pub mod logic {
         /// When `output` is empty, it is important to emit variously `Some(0)` or `Some(1)` to indicate respectively absence or presence.
         fn count(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: &BTreeSet<usize>) -> Vec<Option<usize>>;
         /// For a subset of arguments, populate distinct values for arguments in `output`.
-        fn delve(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: usize) ->Lists<Terms>;
+        fn delve(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: usize) -> Options<Lists<Terms>>;
     }
 
     /// A wrapper for general logic-backed relations that manages the terms in each position.
@@ -538,7 +538,7 @@ pub mod logic {
             _after: &[T],
         ) {
             //  Flatten the input, to make our life easier.
-            if let Some(mut delta) = facts.flatten() {
+            if let Some(delta) = facts.flatten() {
 
                 //  1.  Prepare the function arguments, a `Vec<Option<(Borrowed, Vec<usize>)>>` indicating present elements of `self.bound`.
                 //      Each present element of `self.bound` presents as a pair of borrowed container and list of counts for each element.
@@ -576,21 +576,22 @@ pub mod logic {
                 else {
                     let colidx = added.iter().map(|term| self.bound.iter().position(|t| t.as_ref() == Ok(term)).unwrap()).next().unwrap();
                     let column = self.logic.delve(&args, colidx);
-                    assert_eq!(added.len(), 1);
-                    // TODO: Need to advance to the last layer; in an FDB we could just branch at `max`.
-                    let pos = max.map(|c| c+1).unwrap_or(0);
-                    //  We are initially 1:1 with the lists of layer pos, or items of layer pos-1.
-                    //  We'll want to advance through each of the layers `pos..`.
-                    let mut bounds = (0 .. column.len()).map(|i| (i, i+1)).collect::<Vec<_>>();
-                    for idx in pos .. delta.arity() { advance_bounds::<Terms>(delta.layer(idx).borrow(), &mut bounds); }
-                    let mut colnew: Lists<Terms> = Default::default();
-                    for idx in 0 .. column.len() {
-                        for _ in bounds[idx].0 .. bounds[idx].1 {
-                            colnew.push(column.borrow().get(idx));
+                    let columnar::Options { indexes: columnar::RankSelect { values, counts: _ }, somes: column } = column;
+                    let keep = values.into_index_iter().collect();
+                    if let Some(mut delta) = delta.retain_core(max.map(|c| c+1).unwrap_or(0), keep).flatten() {
+                        assert_eq!(added.len(), 1);
+                        let pos = max.map(|c| c+1).unwrap_or(0);
+                        let mut bounds = (0 .. column.len()).map(|i| (i, i+1)).collect::<Vec<_>>();
+                        for idx in pos .. delta.arity() { advance_bounds::<Terms>(delta.layer(idx).borrow(), &mut bounds); }
+                        let mut colnew: Lists<Terms> = Default::default();
+                        for idx in 0 .. column.len() {
+                            for _ in bounds[idx].0 .. bounds[idx].1 {
+                                colnew.push(column.borrow().get(idx));
+                            }
                         }
+                        delta.push_layer(Rc::new(Layer { list: colnew }));
+                        facts.push(delta);
                     }
-                    delta.push_layer(Rc::new(Layer { list: colnew }));
-                    facts.push(delta);
                     terms.push(*added.iter().next().unwrap());
                 }
 
@@ -619,19 +620,20 @@ pub mod logic {
 
             counts
         }
-        fn delve(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: usize) -> Lists<Terms> {
+        fn delve(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: usize) -> Options<Lists<Terms>> {
 
             // The following is .. neither clear nor performant. It should be at least one of those two things.
             let length = args.iter().flatten().next().map(|a| a.1.iter().sum()).unwrap_or(1);
             let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().copied().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
             let mut values: Vec<Option<<Terms as columnar::Container>::Ref<'_>>> = Vec::default();
             let mut terms = Terms::default();
-            let mut result: Lists<Terms> = Default::default();
+            let mut result: Options<Lists<Terms>> = Default::default();
             for _ in 0 .. length {
                 values.clear();
                 Extend::extend(&mut values, indexs.iter_mut().enumerate().map(|(col, i)| i.as_mut().map(|j| args[col].as_ref().unwrap().0.get(j.next().unwrap()))));
                 self.logic.delve(&values, (output, &mut terms));
-                result.push(terms.borrow().into_index_iter());
+                if terms.is_empty() { result.push(None::<Vec<Vec<u8>>>); }
+                else { result.push(Some(terms.borrow().into_index_iter())); }
                 terms.clear();
             }
             assert_eq!(result.len(), length);
@@ -698,7 +700,7 @@ pub mod logic {
                 if let Some((decoded, width)) = decode_u64::<3>(args) {
                     match decoded {
                         [Some(x), Some(y), Some(z)] => { let (mul, ovr) = u64::overflowing_mul(x, y); if !ovr && mul == z { Some(1) } else { Some(0) }},
-                        [Some(x), Some(y),    None] => { let (mul, ovr) = u64::overflowing_mul(x, y); if !ovr && ((mul >> width) == 0) { Some(1) } else { Some(0) } },
+                        [Some(x), Some(y),    None] => { let (mul, ovr) = u64::overflowing_mul(x, y); if !ovr && ((mul >> (8*width)) == 0) { Some(1) } else { Some(0) } },
                         [None,    Some(y), Some(z)] => { if y > 0 && y <= z && (z / y) * y == z { Some(1) } else { Some(0) } },
                         [Some(x), None,    Some(z)] => { if x > 0 && x <= z && (z / x) * x == z { Some(1) } else { Some(0) } },
                         // If we only have z, we there are only so many products that can form `z`.
@@ -711,7 +713,7 @@ pub mod logic {
             fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms)) {
                 if let Some((decoded, width)) = decode_u64::<3>(args) {
                     match decoded {
-                        [Some(x), Some(y),    None] => { let (mul, ovr) = u64::overflowing_mul(x, y); if !ovr && ((mul >> width) == 0) { output.1.push(&mul.to_be_bytes()[(8-width)..]) } },
+                        [Some(x), Some(y),    None] => { let (mul, ovr) = u64::overflowing_mul(x, y); if !ovr && ((mul >> (8*width)) == 0) { output.1.push(&mul.to_be_bytes()[(8-width)..]) } },
                         [None,    Some(y), Some(z)] => { if y > 0 && y <= z && (z / y) * y == z { output.1.push(&(z/y).to_be_bytes()[(8-width)..]) } },
                         [Some(x), None,    Some(z)] => { if x > 0 && x <= z && (z / x) * x == z { output.1.push(&(z/x).to_be_bytes()[(8-width)..]) } },
                         // If we only have z, we there are only so many products that can form `z`.
@@ -736,7 +738,7 @@ pub mod logic {
                 if let Some((decoded, width)) = decode_u64::<3>(args) {
                     match decoded {
                         [Some(x), Some(y), Some(z)] => { let (sum, ovr) = u64::overflowing_add(x, y); if !ovr && sum == z { Some(1) } else { Some(0) }},
-                        [Some(x), Some(y),    None] => { let (sum, ovr) = u64::overflowing_add(x, y); if !ovr && ((sum >> width) == 0) { Some(1) } else { Some(0) } },
+                        [Some(x), Some(y),    None] => { let (sum, ovr) = u64::overflowing_add(x, y); if !ovr && ((sum >> (8*width)) == 0) { Some(1) } else { Some(0) } },
                         [Some(x),    None, Some(z)] => { if x <= z { Some(1) } else { Some(0) } },
                         [None,    Some(y), Some(z)] => { if y <= z { Some(1) } else { Some(0) } },
                         // TODO: There are some things that we could say more about, e.g. that a `z` has a count of `z+1` because there are that many ways to add up to `z`.
@@ -749,7 +751,7 @@ pub mod logic {
             fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms)) {
                 if let Some((decoded, width)) = decode_u64::<3>(args) {
                     match decoded {
-                        [Some(x), Some(y),    None] => { let (sum, ovr) = u64::overflowing_add(x, y); if !ovr && ((sum >> width) == 0) { output.1.push(&sum.to_be_bytes()[(8-width)..]) } },
+                        [Some(x), Some(y),    None] => { let (sum, ovr) = u64::overflowing_add(x, y); if !ovr && ((sum >> (8*width)) == 0) { output.1.push(&sum.to_be_bytes()[(8-width)..]) } },
                         [Some(x), None,    Some(z)] => { if x <= z { output.1.push(&(z-x).to_be_bytes()[(8-width)..]) } },
                         [None,    Some(y), Some(z)] => { if y <= z { output.1.push(&(z-y).to_be_bytes()[(8-width)..]) } },
                         _ => { }
