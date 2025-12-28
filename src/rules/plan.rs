@@ -208,9 +208,10 @@ pub trait Strategy<A: Ord+Copy, T: Ord+Copy> {
 
 /// Plans updates for an atom by repeatedly introducing individual terms and all supported atoms.
 pub struct ByTerm;
-impl<A: Ord+Copy, T: Ord+Copy> Strategy<A, T> for ByTerm {
+impl<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> Strategy<A, T> for ByTerm {
     fn plan_atom(atom: A, atoms_to_terms: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>, terms_to_atoms: &BTreeMap<T, BTreeSet<A>>) -> Plan<A, T> {
 
+        // TODO: Reason about which terms are needed to produce (e.g. avoid singly mentioned variables).
         assert!(atoms_to_terms[&atom].terms() == atoms_to_terms[&atom].ground(&Default::default()));
 
         let init_terms: BTreeSet<T> = atoms_to_terms[&atom].terms();
@@ -232,11 +233,14 @@ impl<A: Ord+Copy, T: Ord+Copy> Strategy<A, T> for ByTerm {
             // Choose the term incident on the most atoms.
             next_terms.sort_by_key(|t| terms_to_atoms[t].len());
             // If we can't find a term, we'll need to pick any groundable term (e.g. a cross join with a data-backed relation).
-            let next_term = next_terms.last().copied().unwrap_or_else(|| atoms_to_terms.values().flat_map(|a| a.ground(&terms)).filter(|t| !terms.contains(t)).next().unwrap());
-            let next_atoms = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].terms().contains(&next_term)).copied().collect();
-
-            terms.insert(next_term);
-            plan.push((next_atoms, [next_term].into_iter().collect(), Vec::new()));
+            if let Some(next_term) = next_terms.last().copied().or_else(|| atoms_to_terms.values().flat_map(|a| a.ground(&terms)).filter(|t| !terms.contains(t)).next()) {
+                let next_atoms = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].terms().contains(&next_term)).copied().collect();
+                terms.insert(next_term);
+                plan.push((next_atoms, [next_term].into_iter().collect(), Vec::new()));
+            }
+            else {
+                panic!("Failed to find term to extend {:?} to {:?}", terms, terms_to_atoms.keys());
+            }
         }
         plan
     }

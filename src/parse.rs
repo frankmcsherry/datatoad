@@ -96,7 +96,8 @@ fn parse_atom<I: Iterator<Item=Token>>(tokens: &mut Peekable<I>) -> Option<Atom>
 
 fn parse_term<I: Iterator<Item=Token>>(tokens: &mut Peekable<I>) -> Option<Term> {
     let Token::Text(term) = tokens.next()? else { None? };
-    if let Some(bytes) = parse_lit(term.as_str()) { Some(Term::Lit(bytes)) }
+    if term == "_" { panic!("Wildcards _ not yet supported"); }
+    else if let Some(bytes) = parse_lit(term.as_str()) { Some(Term::Lit(bytes)) }
     else { Some(Term::Var(term.clone())) }
 }
 
@@ -107,6 +108,10 @@ fn parse_lit(term: &str) -> Option<Vec<u8>> {
     if term.len() % 2 == 0 && &term[0..2] == "0x" {
         let bytes: Result<Vec<u8>, std::num::ParseIntError> = (2..term.len()).step_by(2).map(|i| u8::from_str_radix(&term[i..i + 2], 16)).collect();
         if let Ok(bytes) = bytes { return Some(bytes); }
+    }
+    // TODO: find a better way to choose a width for integer literals.
+    else if let Ok(num) = term.parse::<u32>() {
+        return Some(num.to_be_bytes().to_vec());
     }
     None
 }

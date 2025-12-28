@@ -47,22 +47,25 @@ pub trait ExecAtom<T: Ord> {
     );
 }
 
+/// Indicates behavior of `permute`, either aligned extra columns or pruning them.
+pub enum PermuteMode { Align, Prune }
+
 /// Permute `facts` from its current order, `terms` to one that matches `align` on common terms.
 ///
 /// The method updates both `facts` and `terms`.
 /// The method assumes that some prefix of `align` is present in `terms`, and no further terms
 /// from `align` around found there. The caller must restrict `align` to make this the case.
 ///
-/// The `prune` argument indicates that columns in `terms` absent from `align` should be discarded.
-/// When `prune` is not set, all of `terms` are retained but re-ordered to start with `align`.
-pub fn permute_delta<F: FactContainer, T: Ord + Copy>(
+/// The `mode` argument indicates whther columns in `terms` absent from `align` should be discarded.
+/// When `prune` is set they are; otherwise all of `terms` are retained but re-ordered to start with `align`.
+pub fn permute<F: FactContainer, T: Ord + Copy>(
     facts: &mut FactLSM<F>,
     terms: &mut Vec<T>,
     align: impl Iterator<Item = T>,
-    prune: bool,
+    mode: PermuteMode,
 ) {
     let mut permutation: Vec<usize> = align.flat_map(|t1| terms.iter().position(|t2| &t1 == t2)).collect();
-    if !prune { for index in 0 .. terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
+    if let PermuteMode::Align = mode { for index in 0 .. terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
 
     if permutation.iter().enumerate().any(|(index, i)| &index != i) {
         if let Some(flattened) = facts.flatten() {
@@ -84,7 +87,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
 ) {
     if others.len() == 1 {
         others[0].join(delta_lsm, delta_terms, terms, target);
-        permute_delta(delta_lsm, delta_terms, target.iter().copied(), true);
+        permute(delta_lsm, delta_terms, target.iter().copied(), PermuteMode::Prune);
         return;
     }
 
@@ -106,7 +109,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
             let mut active_target = active.clone();
             active_target.extend(terms.iter().copied());
             wco_join_inner(delta_lsm, &mut active_clone, terms, others, potato, &active_target);
-            permute_delta(delta_lsm, &mut active_clone, delta_terms[..active.len()].iter().copied(), false);
+            permute(delta_lsm, &mut active_clone, delta_terms[..active.len()].iter().copied(), PermuteMode::Align);
 
             let mut crossed_terms = delta_terms.clone();
             crossed_terms.extend(delta_terms[..active.len()].iter().copied());
@@ -188,7 +191,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
                 }
 
                 // Put in common layout (`target`) then merge.
-                permute_delta(&mut delta_shard, &mut delta_shard_terms, target.iter().copied(), true);
+                permute(&mut delta_shard, &mut delta_shard_terms, target.iter().copied(), PermuteMode::Prune);
                 if let Some(mut delta) = delta_shard.flatten() {
                     while delta.arity() > target.len() { delta.pop_layer(); }
                     delta_lsm.push(delta);
