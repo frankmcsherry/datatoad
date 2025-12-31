@@ -56,36 +56,33 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                 ".list" => { state.facts.list() }
                 ".flow" => {
 
-                    use std::io::{BufRead, BufReader};
-                    use std::fs::File;
-
                     let args: Result<[_;2],_> = words.take(2).collect::<Vec<_>>().try_into();
                     if let Ok(args) = args {
                         let name = args[0].to_string();
                         let filename = args[1];
-                        if let Ok(file) = File::open(filename) {
-                            let mut file = BufReader::new(file);
-                            use columnar::Push;
-                            use datatoad::facts::{Forest, Terms};
-                            let mut readline = String::default();
-                            if file.read_line(&mut readline).unwrap() > 0 {
+                        if let Ok(file) = std::fs::File::open(filename) {
+
+                            let file = std::io::BufReader::new(file);
+                            let mut reader = simd_csv::ZeroCopyReaderBuilder::default().has_headers(false).from_reader(file);
+                            if let Some(record) = reader.read_byte_record().unwrap() {
+
+                                use columnar::Push;
+                                use datatoad::facts::{Forest, Terms};
                                 let mut columns = Vec::default();
-                                let line = readline.trim();
-                                for term in line.split(',') {
+                                for term in record.iter() {
                                     let mut terms = Terms::default();
-                                    terms.push(&term.parse::<u32>().unwrap().to_be_bytes());
+                                    let num = term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32));
+                                    terms.push(&num.to_be_bytes());
                                     columns.push(terms);
                                 }
-                                readline.clear();
 
                                 let atom = crate::types::Atom { name, anti: false, terms: vec![crate::types::Term::Lit(vec![]); columns.len()] };
 
-                                while file.read_line(&mut readline).unwrap() > 0 {
-                                    let line = readline.trim();
-                                    for (term, col) in line.split(',').zip(columns.iter_mut()) {
-                                        col.push(&term.parse::<u32>().unwrap().to_be_bytes());
+                                while let Some(record) = reader.read_byte_record().unwrap() {
+                                    for (term, col) in record.iter().zip(columns.iter_mut()) {
+                                        let num = term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32));
+                                        col.push(&num.to_be_bytes());
                                     }
-                                    readline.clear();
                                     use columnar::Len;
                                     if columns[0].len() > 100_000_000 {
                                         // Pass ownership of columns so the method can drop them as they are processed.
@@ -159,6 +156,12 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     else { println!(".load command requires arguments: <name> <patt> <file>"); }
                 }
                 ".note" => { }
+                ".prof" => {
+                    for (rule, durs) in state.rules.iter() {
+                        println!("{:>10}ms {}", durs.iter().sum::<std::time::Duration>().as_millis(), rule);
+                    }
+                }
+                ".quit" => { std::process::exit(0); }
                 ".save" => { println!("unimplemented: {:?}", word); }
                 ".time" => {
                     println!("time:\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());

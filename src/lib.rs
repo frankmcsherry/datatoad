@@ -12,6 +12,23 @@ pub mod types {
         pub body: Vec<Atom>,
     }
 
+    impl std::fmt::Display for Rule {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let mut head = self.head.iter();
+            let mut body = self.body.iter();
+            if let Some(atom) = head.next() {
+                write!(f, "{}", atom)?;
+                for atom in head { write!(f, ", {}", atom)?; }
+            }
+            write!(f, " :- ", )?;
+            if let Some(atom) = body.next() {
+                write!(f, "{}", atom)?;
+                for atom in body { write!(f, ", {}", atom)?; }
+            }
+            write!(f, ".")
+        }
+    }
+
     #[derive(Clone, Debug)]
     pub struct Atom {
         pub name: String,
@@ -19,10 +36,35 @@ pub mod types {
         pub terms: Vec<Term>,
     }
 
+    impl std::fmt::Display for Atom {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if self.anti { write!(f, "!")?; }
+            write!(f, "{}", self.name)?;
+            write!(f, "(")?;
+            let mut terms = self.terms.iter();
+            if let Some(term) = terms.next() {
+                write!(f, "{}", term)?;
+                for term in terms {
+                    write!(f, ", {}", term)?;
+                }
+            }
+            write!(f, ")")
+        }
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Term {
         Var(String),
         Lit(Vec<u8>),
+    }
+
+    impl std::fmt::Display for Term {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Term::Var(name) => { write!(f, "{}", name) },
+                Term::Lit(data) => { write!(f, "{:X?}", data) },
+            }
+        }
     }
 
     impl Term {
@@ -32,7 +74,7 @@ pub mod types {
 
     #[derive(Default)]
     pub struct State {
-        rules: Vec<Rule>,
+        pub rules: Vec<(Rule, Vec<std::time::Duration>)>,
         pub facts: facts::Relations,
     }
 
@@ -41,8 +83,10 @@ pub mod types {
         pub fn update(&mut self) {
             self.advance();
             while self.active() {
-                for rule in self.rules.iter() {
+                for (rule, durs) in self.rules.iter_mut() {
+                    let timer = std::time::Instant::now();
                     crate::rules::implement(rule, false, &mut self.facts);
+                    durs.push(timer.elapsed());
                 }
                 self.advance();
             }
@@ -78,8 +122,9 @@ pub mod types {
                 }
             }
             else {
+                let timer = std::time::Instant::now();
                 crate::rules::implement(&rule, true, &mut self.facts);
-                self.rules.push(rule);
+                self.rules.push((rule, vec![timer.elapsed()]));
             }
         }
     }

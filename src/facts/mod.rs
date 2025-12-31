@@ -209,16 +209,26 @@ impl<F: FactContainer> FactSet<F> {
     }
 }
 
-/// A list of fact lists that double in length, each sorted and distinct.
+/// A potentially empty list of non-empty fact containers, each sorted and distinct.
+///
+/// The LSM (log-structured merge) structure merges any containers whose counts are within a factor of two.
+/// This ensures that there are at most a logarithmic number of containers, and that the number of contained
+/// facts is at most twice the number of distinct facts (the largest layer is all distinct facts, and the
+/// other layers telescope to sum to at most this).
+///
+/// The `FactLSM` does not have a specific arity or type itself, but it will check that introduced containers
+/// match other present containers, and panic if this occurs.
 #[derive(Clone)]
-pub struct FactLSM<F> {
-    pub layers: Vec<F>,
-}
+pub struct FactLSM<F> { layers: Vec<F> }
 
 impl<F> Default for FactLSM<F> { fn default() -> Self { Self { layers: Default::default() } } }
 
-impl<F: Merge + Length> FactLSM<F> {
-    pub fn is_empty(&self) -> bool { self.layers.iter().all(|l| l.is_empty()) }
+impl<F: Merge + Length + Arity> FactLSM<F> {
+    pub fn is_empty(&self) -> bool {
+        // Each container is meant to be non-empty, making the LSM non-empty when `self.layers` is.
+        for layer in self.layers.iter() { assert!(!layer.is_empty()); }
+        self.layers.is_empty()
+    }
     pub fn push(&mut self, layer: F) {
         if !layer.is_empty() {
             self.layers.push(layer);
@@ -244,6 +254,7 @@ impl<F: Merge + Length> FactLSM<F> {
 
     /// Ensures layers double in size.
     fn tidy(&mut self) {
+        if !self.layers.is_empty() { self.layers.iter().for_each(|l| assert_eq!(l.arity(), self.layers[0].arity())) }
         self.layers.sort_by_key(|x| x.len());
         self.layers.reverse();
         while let Some(pos) = (1..self.layers.len()).position(|i| self.layers[i-1].len() < 2 * self.layers[i].len()) {
@@ -284,7 +295,7 @@ impl<F: Length> From<F> for FactLSM<F> {
     }
 }
 
-impl<F: Merge+Length> Extend<F> for FactLSM<F> {
+impl<F: Merge+Length+Arity> Extend<F> for FactLSM<F> {
     fn extend<T: IntoIterator<Item=F>>(&mut self, iter: T) {
         self.layers.extend(iter.into_iter().filter(|f| !f.is_empty()));
         self.tidy();

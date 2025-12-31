@@ -119,11 +119,10 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             boxed_atom.join(&mut delta_lsm, &mut delta_terms, &Default::default(), init_order);
         }
         // We may need to produce the result in a different order.
-        permute(&mut delta_lsm, &mut delta_terms, init_order.iter().copied(), PermuteMode::Align);
+        permute(&mut delta_lsm, &mut delta_terms, init_order.iter().copied(), PermuteMode::Prune);
 
         // Stage 2: Each other plan stage.
         for (atoms, terms, order) in plan.iter().skip(1) {
-
             let others = atoms.iter().map(|load_atom| {
                 let (load_action, load_terms) = &loads[&plan_atom][load_atom];
                 let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
@@ -179,7 +178,7 @@ pub mod data {
         fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T> { self.difference(terms).cloned().collect() }
     }
 
-    impl<'a, T: Ord + Copy> ExecAtom<T> for (Vec<&'a Forest<Terms>>, &'a Vec<T>) {
+    impl<'a, T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<&'a Forest<Terms>>, &'a Vec<T>) {
 
         fn terms(&self) -> &[T] { self.1 }
 
@@ -271,6 +270,20 @@ pub mod data {
             terms: &BTreeSet<T>,
             after: &[T],
         ) {
+            // TODO: this was needed because of a bad load action on z3.
+            // TODO: is this method responsible for this, or the caller?
+            permute(delta_shard, delta_terms, self.1.iter().copied(), PermuteMode::Align);
+
+            // First, check intended invariants on alignment.
+            // The `terms` we are asked to add should immediately follow in `self.1` its shared prefix with `delta_terms`
+            let term_lower = delta_terms.iter().zip(self.1.iter()).take_while(|(t1,t2)| t1 == t2).count();
+            let term_upper = term_lower + terms.len();
+            if &self.1[term_lower .. term_upper].iter().copied().collect::<BTreeSet<_>>() != terms {
+                println!("delta_shard: {:?}", delta_terms);
+                println!("self.1: {:?}", self.1);
+                panic!("post-prefix terms are not the requested terms: {:?} then {:?} v {:?}", &self.1[..term_lower], &self.1[term_lower .. term_upper], terms);
+            }
+
             if !terms.is_empty() {
                 let (other_facts, other_terms) = self;
 

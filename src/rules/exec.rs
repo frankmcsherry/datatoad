@@ -179,7 +179,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
                 let mut delta_shard_terms = delta_terms.clone();
                 let next_other_idx = if other_index == 0 { 1 } else { 0 };
                 let mut after = Vec::default();
-                after.extend(others[next_other_idx].terms().iter().take_while(|t| delta_terms.contains(t) || terms.contains(t)));
+                after.extend(others[next_other_idx].terms().iter().filter(|t| delta_terms.contains(t) || terms.contains(t)));
                 after.extend(delta_terms.iter().filter(|t| !others[next_other_idx].terms().contains(t)));
                 other.join(&mut delta_shard, &mut delta_shard_terms, terms, &after);
 
