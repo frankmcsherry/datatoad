@@ -62,7 +62,7 @@ pub mod types {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Term::Var(name) => { write!(f, "{}", name) },
-                Term::Lit(data) => { write!(f, "{:X?}", data) },
+                Term::Lit(data) => { write!(f, "0x")?; for byte in data.iter() { write!(f, "{:X?}", byte)?; }; Ok(()) },
             }
         }
     }
@@ -143,10 +143,14 @@ pub mod types {
     }
 
     impl Action<Vec<u8>> {
-        /// Converts a body `Atom` to an `Action`.
+        /// Converts a body `Atom` to an `Action` to apply to the base data.
         ///
-        /// The names of the output columns can be read from `atom.terms`
-        /// by way of the returned `Action::projection`.
+        /// The action produces the distinct variable terms in their order of introduction.
+        /// Variable terms that repeat a previous variable are translated to filter constraints.
+        /// Literal terms are are translated to filter constraints.
+        ///
+        /// The values of the returned `projection` indicate the first occurrence of each output
+        /// variable term in `atom.terms`, which can be used to read the names of output columns.
         pub fn from_body(atom: &Atom) -> Self {
             let mut output = Action::default();
             let mut terms = std::collections::BTreeMap::default();

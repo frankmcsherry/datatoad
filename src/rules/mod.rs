@@ -47,7 +47,7 @@ fn implement_action(head: &[Atom], body: &Atom, stable: bool, facts: &mut Relati
         let mut action = load_action.clone();
         action.projection = atom.terms.iter().map(|term| {
             match term {
-                Term::Var(____) => { action.projection[body.terms.iter().position(|t| t == term).unwrap()].clone() },
+                Term::Var(____) => { Ok(body.terms.iter().position(|t| t == term).unwrap()) },
                 Term::Lit(data) => { Err(data.to_vec()) },
             }
         }).collect();

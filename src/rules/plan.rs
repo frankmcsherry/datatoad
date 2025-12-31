@@ -171,10 +171,10 @@ pub trait Strategy<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> {
         let mut term_count: BTreeMap<T, usize> = Default::default();
         for term in head_terms.iter() { *term_count.entry(*term).or_default() += 1; }
         for (term, atoms) in terms_to_atoms.iter() { *term_count.entry(*term).or_default() += atoms.len(); }
-        for (term, count) in term_count.iter() {
+        for (_term, count) in term_count.iter() {
             if count < &2 && boxed_atoms.len() > 1 {
                 // TODO: This is incorrect when an entire atom is pruned, e.g. as in `continue(_)`.
-                // terms_to_atoms.remove(term);
+                // terms_to_atoms.remove(_term);
             }
         }
 
