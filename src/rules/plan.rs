@@ -153,12 +153,12 @@ fn head_order<'a>(head: &'a [Atom]) -> Vec<&'a String> {
 }
 
 /// A type that can produce an update plan for a rule.
-pub trait Strategy<A: Ord+Copy, T: Ord+Copy> {
-    /// For `atom`, a sequence of (atoms, terms) pairs to introduce to effect a join.
+pub trait Strategy<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> {
+    /// Plan a join to respond to changes in `atom`.
     ///
-    /// The `atoms_to_terms` map is to a plannable atom, and the `terms_to_atoms` the inverse map of their `terms()` functions.
-    /// Plan strategies should take care to consult each atom's `ground(terms)` method which indicates which terms the atom can produce;
-    /// it may not be the case that an atom can ground any of their terms as a function of other ground terms.
+    /// The keys of `terms_to_atoms` are the necessary terms, which may be less than the terms announced from `atoms_to_terms`.
+    /// Each atom's `ground(terms)` method which indicates which terms the atom can produce, and it may not be the case that an
+    /// atom can ground any of their terms as a function of other ground terms.
     fn plan_atom(atom: A, atoms_to_terms: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>, terms_to_atoms: &BTreeMap<T, BTreeSet<A>>) -> Plan<A, T>;
 
     /// Plans updates for each atom in the rule.
@@ -166,6 +166,17 @@ pub trait Strategy<A: Ord+Copy, T: Ord+Copy> {
 
         let mut terms_to_atoms: BTreeMap<T, BTreeSet<A>> = Default::default();
         for (atom, boxed) in boxed_atoms.iter() { for term in boxed.terms() { terms_to_atoms.entry(term).or_default().insert(*atom); } }
+
+        // Look for terms that can potentially be pruned.
+        let mut term_count: BTreeMap<T, usize> = Default::default();
+        for term in head_terms.iter() { *term_count.entry(*term).or_default() += 1; }
+        for (term, atoms) in terms_to_atoms.iter() { *term_count.entry(*term).or_default() += atoms.len(); }
+        for (term, count) in term_count.iter() {
+            if count < &2 && boxed_atoms.len() > 1 {
+                // TODO: This is incorrect when an entire atom is pruned, e.g. as in `continue(_)`.
+                // terms_to_atoms.remove(term);
+            }
+        }
 
         let mut rule_plan = BTreeMap::default();
         for atom in boxed_atoms.keys().copied() {
@@ -214,7 +225,7 @@ impl<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> Strategy<A, T> for ByTerm {
         // TODO: Reason about which terms are needed to produce (e.g. avoid singly mentioned variables).
         assert!(atoms_to_terms[&atom].terms() == atoms_to_terms[&atom].ground(&Default::default()));
 
-        let init_terms: BTreeSet<T> = atoms_to_terms[&atom].terms();
+        let init_terms: BTreeSet<T> = atoms_to_terms[&atom].terms().into_iter().filter(|t| terms_to_atoms.contains_key(t)).collect();
         let init_atoms: BTreeSet<A> = init_terms.iter().flat_map(|t| terms_to_atoms[t].iter()).filter(|a| atoms_to_terms[a].terms().iter().all(|t| init_terms.contains(t))).copied().collect();
 
         // One approach: grow terms through adjacent atoms.
@@ -227,13 +238,13 @@ impl<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> Strategy<A, T> for ByTerm {
             terms.iter()
                  .flat_map(|term| terms_to_atoms[term].iter())
                  .flat_map(|atom| atoms_to_terms[atom].ground(&terms))
-                 .filter(|term| !terms.contains(term))
+                 .filter(|term| !terms.contains(term) && terms_to_atoms.contains_key(term))
                  .collect::<Vec<_>>();
 
             // Choose the term incident on the most atoms.
             next_terms.sort_by_key(|t| terms_to_atoms[t].len());
             // If we can't find a term, we'll need to pick any groundable term (e.g. a cross join with a data-backed relation).
-            if let Some(next_term) = next_terms.last().copied().or_else(|| atoms_to_terms.values().flat_map(|a| a.ground(&terms)).filter(|t| !terms.contains(t)).next()) {
+            if let Some(next_term) = next_terms.last().copied().or_else(|| atoms_to_terms.values().flat_map(|a| a.ground(&terms)).filter(|t| !terms.contains(t) && terms_to_atoms.contains_key(t)).next()) {
                 let next_atoms = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].terms().contains(&next_term)).copied().collect();
                 terms.insert(next_term);
                 plan.push((next_atoms, [next_term].into_iter().collect(), Vec::new()));
@@ -248,7 +259,7 @@ impl<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> Strategy<A, T> for ByTerm {
 
 /// Plans updates for an atom by repeatedly adding individual atoms and all of their terms.
 pub struct ByAtom;
-impl<A: Ord+Copy, T: Ord+Copy> Strategy<A, T> for ByAtom {
+impl<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> Strategy<A, T> for ByAtom {
     fn plan_atom(atom: A, atoms_to_terms: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>, terms_to_atoms: &BTreeMap<T, BTreeSet<A>>) -> Plan<A, T> {
 
         assert!(atoms_to_terms[&atom].terms() == atoms_to_terms[&atom].ground(&Default::default()));

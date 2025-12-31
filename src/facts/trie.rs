@@ -379,6 +379,8 @@ pub mod terms {
         if this.len() < arity { return Default::default(); }
         if this.last().is_some_and(|l| l.is_empty()){ return Default::default(); }
 
+        for that in thats.iter() { assert_eq!(that.len(), thats[0].len()); }
+
         assert!(thats.iter().all(|t| t.len() >= arity));
 
         // TODO: This is a work-around due to arity 0 not working great due to edge cases.
@@ -573,9 +575,17 @@ pub mod terms {
         projection: &[usize],
     ) -> Option<Vec<Rc<Layer<Terms>>>> {
 
+        // Assert intended preconditions.
         assert!(!layers.is_empty());
         assert_eq!(layers.len(), groups.len());
         assert_eq!(layers.len(), indexs.len());
+
+        // Assert that the input layers have the same shape, and support the projection.
+        let max_p = projection.iter().max().map(|x| x+1).unwrap_or(0);
+        for layer in layers {
+            assert_eq!(layer.len(), layers[0].len());
+            assert!(layer.len() >= max_p);
+        }
 
         if indexs.is_empty() { return None; }
 
