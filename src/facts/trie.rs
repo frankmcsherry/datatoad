@@ -123,6 +123,7 @@ pub mod terms {
         /// This method takes ownership of the columns in order to drop them as they are processed.
         /// It could be generalized to `Vec<C>` for any `C` that can be borrowed as `Terms` can be.
         pub fn from_columns(columns: Vec<Terms>) -> Option<Self> {
+            for col in columns.iter() { assert_eq!(col.len(), columns[0].len()); }
             if columns.iter().any(|c| c.is_empty()) { return None; }
             let (mut groups, indexs): (Vec<_>, Vec<_>) = (0 .. columns.first().map(columnar::Len::len).unwrap_or(0)).map(|i| (0, i)).unzip();
             let columns_len = columns.len();

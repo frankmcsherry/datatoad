@@ -58,46 +58,10 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
 
                     let args: Result<[_;2],_> = words.take(2).collect::<Vec<_>>().try_into();
                     if let Ok(args) = args {
-                        let name = args[0].to_string();
-                        let filename = args[1];
-                        if let Ok(file) = std::fs::File::open(filename) {
-
-                            let file = std::io::BufReader::new(file);
-                            let mut reader = simd_csv::ZeroCopyReaderBuilder::default().has_headers(false).from_reader(file);
-                            if let Some(record) = reader.read_byte_record().unwrap() {
-
-                                use columnar::Push;
-                                use datatoad::facts::{Forest, Terms};
-                                let mut columns = Vec::default();
-                                for term in record.iter() {
-                                    let mut terms = Terms::default();
-                                    let num = term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32));
-                                    terms.push(&num.to_be_bytes());
-                                    columns.push(terms);
-                                }
-
-                                let atom = crate::types::Atom { name, anti: false, terms: vec![crate::types::Term::Lit(vec![]); columns.len()] };
-
-                                while let Some(record) = reader.read_byte_record().unwrap() {
-                                    for (term, col) in record.iter().zip(columns.iter_mut()) {
-                                        let num = term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32));
-                                        col.push(&num.to_be_bytes());
-                                    }
-                                    use columnar::Len;
-                                    if columns[0].len() > 100_000_000 {
-                                        // Pass ownership of columns so the method can drop them as they are processed.
-                                        let arity = columns.len();
-                                        state.facts.entry(&atom).extend(Forest::from_columns(columns));
-                                        columns = vec![Terms::default(); arity];
-                                    }
-                                }
-                                state.facts.entry(&atom).extend(Forest::from_columns(columns));
-                                state.update();
-                            }
-                        }
-                        else { println!("file not found: {:?}", filename); }
+                        flow_log::load_rows(args[0], args[1], &mut state.facts);
+                        state.update();
                     }
-                    else { println!(".flow command requires arguments: <name> <patt> <file>"); }
+                    else { println!(".flow command requires arguments: <name> <file>"); }
                 }
                 ".load" => {
 
@@ -180,5 +144,132 @@ fn exec_file(filename: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec<
         for readline in file.lines() {
             handle_command(readline.expect("Read error").as_str(), state, bytes, timer);
         }
+    }
+}
+
+/// Specialized logic to load FlowLog evaluation files, which are unsigned 32bit integers as CSVs.
+mod flow_log {
+
+    /// Column-oriented loading; usually slower than row-oriented loading for homogenous rows.
+    #[allow(unused)]
+    fn load_cols(name: &str, filename: &str, facts: &mut datatoad::facts::Relations) {
+
+        if let Ok(file) = std::fs::File::open(filename) {
+
+            let file = std::io::BufReader::new(file);
+            let mut reader = simd_csv::ZeroCopyReaderBuilder::default().has_headers(false).from_reader(file);
+            if let Some(record) = reader.read_byte_record().unwrap() {
+
+                use columnar::Push;
+                use datatoad::facts::{Forest, Terms};
+                let mut columns = Vec::default();
+                for term in record.iter() {
+                    let mut terms = Terms::default();
+                    let num = term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32));
+                    terms.push(&num.to_be_bytes());
+                    columns.push(terms);
+                }
+
+                let atom = crate::types::Atom { name: name.to_string(), anti: false, terms: vec![crate::types::Term::Lit(vec![]); columns.len()] };
+
+                while let Some(record) = reader.read_byte_record().unwrap() {
+                    for (term, col) in record.iter().zip(columns.iter_mut()) {
+                        let num = term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32));
+                        col.push(&num.to_be_bytes());
+                    }
+                    use columnar::Len;
+                    if columns[0].len() > 100_000_000 {
+                        // Pass ownership of columns so the method can drop them as they are processed.
+                        let arity = columns.len();
+                        facts.entry(&atom).extend(Forest::from_columns(columns));
+                        columns = vec![Terms::default(); arity];
+                    }
+                }
+                facts.entry(&atom).extend(Forest::from_columns(columns));
+            }
+        }
+        else { println!("file not found: {:?}", filename); }
+    }
+
+    /// Row-oriented loading; usually faster than column-oriented loading, as the rows have a common column type.
+    pub fn load_rows(name: &str, filename: &str, facts: &mut datatoad::facts::Relations) {
+
+        if let Ok(file) = std::fs::File::open(filename) {
+
+            let file = std::io::BufReader::new(file);
+            let mut reader = simd_csv::ZeroCopyReaderBuilder::default().has_headers(false).from_reader(file);
+            if let Some(record) = reader.read_byte_record().unwrap() {
+                let arity = record.len();
+                let mut bytes = Vec::default();
+                for term in record.iter() {
+                    let num = term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32));
+                    bytes.extend(num.to_be_bytes());
+                }
+
+                let atom = crate::types::Atom { name: name.to_string(), anti: false, terms: vec![crate::types::Term::Lit(vec![]); arity] };
+
+                while let Some(record) = reader.read_byte_record().unwrap() {
+                    for term in record.iter() {
+                        let num = term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32));
+                        bytes.extend(num.to_be_bytes());
+                    }
+                    if bytes.len() >= 4_000_000_000 {
+                        facts.entry(&atom).extend([to_forest(&mut bytes, arity)]);
+                        bytes.clear();
+                    }
+                }
+
+                facts.entry(&atom).extend([to_forest(&mut bytes, arity)]);
+            }
+        }
+        else { println!("file not found: {:?}", filename); }
+    }
+
+    use datatoad::facts::{Forest, Lists, Terms, trie::Layer};
+
+    /// Extracts a forest over `[u8;4]` values from bytes and a row arity.
+    ///
+    /// Only specialized up through arity nine; greater arities cause a panic.
+    fn to_forest(bytes: &mut [u8], arity: usize) -> Forest<Terms> {
+        let layers = match arity {
+            0 => { flow_sort::< 0>(bytes) },
+            1 => { flow_sort::< 4>(bytes) },
+            2 => { flow_sort::< 8>(bytes) },
+            3 => { flow_sort::<12>(bytes) },
+            4 => { flow_sort::<16>(bytes) },
+            5 => { flow_sort::<20>(bytes) },
+            6 => { flow_sort::<24>(bytes) },
+            7 => { flow_sort::<28>(bytes) },
+            8 => { flow_sort::<32>(bytes) },
+            9 => { flow_sort::<36>(bytes) },
+            _ => { unimplemented!("Too many columns") }
+        }.unwrap();
+        layers.into_iter().map(|l| std::rc::Rc::new(Layer { list: l }) ).collect::<Vec<_>>().try_into().unwrap()
+    }
+
+    /// Takes bytes blocked as `KW` bytes of `[u8;4]` values for each row, and builds layers.
+    fn flow_sort<const KW: usize>(entries: &mut [u8]) -> Option<Vec<Lists<Terms>>> {
+
+        use datatoad::facts::radix_sort;
+        use columnar::{Push, Len};
+
+        radix_sort::lsb_range(entries.as_chunks_mut::<KW>().0, 0, KW);
+
+        let mut iter = entries.as_chunks_mut::<4>().0.chunks(KW/4);
+        if let Some(row) = iter.next() {
+            let mut columns: Vec<Lists<Terms>> = vec![Default::default(); KW/4];
+            for col in 0 .. KW/4 { columns[col].values.push(row[col]); }
+            let mut prev = row;
+            for row in iter {
+                let pos = prev.iter().zip(row.iter()).position(|(p,r)| p != r).unwrap_or(KW/4);
+                for col in (pos .. KW/4).skip(1) { let len = columns[col].values.len() as u64; columns[col].bounds.push(len); }
+                for col in pos .. KW/4 { columns[col].values.push(row[col]); }
+                prev = row;
+            }
+
+            for col in 0 .. KW/4 { let len = columns[col].values.len() as u64; columns[col].bounds.push(len); }
+            Some(columns)
+        }
+        else { None }
     }
 }
