@@ -375,7 +375,6 @@ pub mod terms {
         projection: &[usize],
     ) -> FactLSM<Forest<Terms>> {
 
-        if this.is_empty() { return Default::default(); }
         if thats.len() == 0 { return Default::default(); }
         if this.len() < arity { return Default::default(); }
         if this.last().is_some_and(|l| l.is_empty()){ return Default::default(); }
