@@ -23,8 +23,6 @@ pub mod exec;
 pub use plan::PlanAtom;
 pub use exec::ExecAtom;
 
-use exec::{permute, PermuteMode};
-
 /// Implements a provided rule in the context of various facts.
 ///
 /// The `stable` argument indicates whether we should perform a join with all facts (true),
@@ -85,20 +83,17 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         let (action, terms) = &loads[&plan_atom][&plan_atom];
         facts.ensure_action(body[plan_atom].name.as_str(), action);
 
-        let mut delta_terms = terms.clone();
-        let mut delta_lsm = FactLSM::default();
+        let mut salad = crate::rules::exec::Salad::new(FactLSM::default(), terms.clone());
         if stable {
             let facts = &facts.get_action(atom.name.as_str(), action).unwrap();
-            for layer in facts.stable.contents().chain(facts.recent.as_ref()) {
-                delta_lsm.push(layer.clone());
-            }
+            salad.extend(facts.stable.contents().chain(facts.recent.as_ref()).cloned());
         }
         else {
             let facts = &facts.get_action(atom.name.as_str(), action).unwrap();
-            delta_lsm.extend(facts.recent.clone());
+            salad.extend(facts.recent.clone());
         };
 
-        if delta_lsm.is_empty() { continue; }
+        if salad.facts.is_empty() { continue; }
 
         for (load_atom, (action, _)) in loads[&plan_atom].iter() {
             facts.ensure_action(body[*load_atom].name.as_str(), action);
@@ -116,10 +111,10 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
                 else if body[*load_atom].anti { Box::new(antijoin::Anti((other_facts, load_terms))) }
                 else { Box::new((other_facts, load_terms)) }
             };
-            boxed_atom.join(&mut delta_lsm, &mut delta_terms, &Default::default(), init_order);
+            boxed_atom.join(&mut salad, &Default::default(), init_order);
         }
         // We may need to produce the result in a different order.
-        permute(&mut delta_lsm, &mut delta_terms, init_order.iter().copied(), PermuteMode::Prune);
+        salad.prune_to(init_order.iter().copied());
 
         // Stage 2: Each other plan stage.
         for (atoms, terms, order) in plan.iter().skip(1) {
@@ -136,7 +131,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
                 boxed_atom
             }).collect::<Vec<_>>();
 
-            exec::wco_join(&mut delta_lsm, &mut delta_terms, terms, &others[..], &potato, &order[..]);
+            exec::wco_join(&mut salad, terms, &others[..], &potato, &order[..]);
         }
 
         // Stage 3: We now need to form up the facts to commit back to `facts`.
@@ -144,22 +139,22 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         // and can simply commit `delta`. There could be multiple heads, and the action
         // could be not the identity.
         let exact_match = head.iter().position(|a| {
-            a.terms.len() == delta_terms.len() &&
-            a.terms.iter().zip(delta_terms.iter()).all(|(h,d)| h.as_var() == Some(d))
+            a.terms.len() == salad.arity() &&
+            a.terms.iter().zip(salad.terms.iter()).all(|(h,d)| h.as_var() == Some(d))
         });
 
         for (_, atom) in head.iter().enumerate().filter(|(pos,_)| Some(*pos) != exact_match) {
-            let mut action = Action::with_arity(delta_terms.len());
+            let mut action = Action::with_arity(salad.arity());
             action.projection = atom.terms.iter().map(|t| match t {
-                Term::Var(name) => Ok(delta_terms.iter().position(|t2| t2 == &name).expect(format!("Failed to find {:?} in {:?}", name, delta_terms).as_str())),
+                Term::Var(name) => Ok(salad.terms.iter().position(|t2| t2 == &name).expect(format!("Failed to find {:?} in {:?}", name, salad.terms).as_str())),
                 Term::Lit(data) => Err(data.clone()),
             }).collect();
-            if let Some(delta) = delta_lsm.flatten() {
+            if let Some(delta) = salad.facts.flatten() {
                 facts.entry(atom).extend(delta.act_on(&action));
-                delta_lsm.push(delta);
+                salad.extend([delta]);
             }
         }
-        if let Some(pos) = exact_match { facts.entry(&head[pos]).extend(delta_lsm); }
+        if let Some(pos) = exact_match { facts.entry(&head[pos]).extend(salad.facts); }
     }
 }
 
@@ -168,10 +163,10 @@ pub mod data {
 
     use std::collections::BTreeSet;
     use std::rc::Rc;
-    use crate::facts::{FactLSM, FactContainer, Terms};
+    use crate::facts::{FactContainer, Terms};
     use crate::facts::trie::Forest;
     use crate::rules::{PlanAtom, ExecAtom};
-    use crate::rules::exec::{permute, PermuteMode};
+    use crate::rules::exec::Salad;
 
     impl<T: Ord + Copy> PlanAtom<T> for BTreeSet<T> {
         fn terms(&self) -> BTreeSet<T> { self.clone() }
@@ -182,13 +177,7 @@ pub mod data {
 
         fn terms(&self) -> &[T] { self.1 }
 
-        fn count(
-            &self,
-            delta_lsm: &mut FactLSM<Forest<Terms>>,
-            delta_terms: &mut Vec<T>,
-            terms: &BTreeSet<T>,
-            other_index: u8,
-        ) {
+        fn count(&self, salad: &mut Salad<T>, terms: &BTreeSet<T>, other_index: u8) {
 
             use columnar::Len;
             use crate::facts::trie::layers::advance_bounds;
@@ -196,9 +185,9 @@ pub mod data {
 
             let (other_facts, other_terms) = self;
 
-            let prefix = other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
-            permute(delta_lsm, delta_terms, other_terms[..prefix].iter().copied(), PermuteMode::Align);
-            if let Some(mut delta) = delta_lsm.flatten() {
+            let prefix = other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
+            salad.align_to(other_terms[..prefix].iter().copied());
+            if let Some(mut delta) = salad.facts.flatten() {
                 let length = if prefix > 0 { delta.layer(prefix-1).list.values.len() } else { 1 };
                 let mut counts = vec![0; length];
                 for other_part in other_facts.iter() {
@@ -222,8 +211,8 @@ pub mod data {
                     // SUBTLE: `delta_lsm` is empty so returning communicates zeroing out everything. But also this guards Forest contruction to ensure it is non-empty.
                     if counts.is_empty() { return; }
 
-                    let mut layers = Vec::with_capacity(delta_terms.len());
-                    if delta_terms.len() > prefix {
+                    let mut layers = Vec::with_capacity(salad.arity());
+                    if salad.arity() > prefix {
 
                         let mut prev = None;
                         let mut bounds = Vec::default();
@@ -259,27 +248,21 @@ pub mod data {
                     }
                 }
                 delta.push_layer(notes_rc);
-                delta_lsm.push(delta);
+                salad.extend([delta]);
             }
         }
 
-        fn join(
-            &self,
-            delta_shard: &mut FactLSM<Forest<Terms>>,
-            delta_terms: &mut Vec<T>,
-            terms: &BTreeSet<T>,
-            after: &[T],
-        ) {
+        fn join(&self, salad: &mut Salad<T>, terms: &BTreeSet<T>, after: &[T]) {
             // TODO: this was needed because of a bad load action on z3.
             // TODO: is this method responsible for this, or the caller?
-            permute(delta_shard, delta_terms, self.1.iter().copied(), PermuteMode::Align);
+            salad.align_to(self.1.iter().copied());
 
             // First, check intended invariants on alignment.
             // The `terms` we are asked to add should immediately follow in `self.1` its shared prefix with `delta_terms`
-            let term_lower = delta_terms.iter().zip(self.1.iter()).take_while(|(t1,t2)| t1 == t2).count();
+            let term_lower = salad.terms.iter().zip(self.1.iter()).take_while(|(t1,t2)| t1 == t2).count();
             let term_upper = term_lower + terms.len();
             if &self.1[term_lower .. term_upper].iter().copied().collect::<BTreeSet<_>>() != terms {
-                println!("delta_shard: {:?}", delta_terms);
+                println!("salad.terms: {:?}", salad.terms);
                 println!("self.1: {:?}", self.1);
                 panic!("post-prefix terms are not the requested terms: {:?} then {:?} v {:?}", &self.1[..term_lower], &self.1[term_lower .. term_upper], terms);
             }
@@ -287,26 +270,26 @@ pub mod data {
             if !terms.is_empty() {
                 let (other_facts, other_terms) = self;
 
-                // join with atom: permute `delta_shard` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
-                let prefix = other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
-                permute(delta_shard, delta_terms, other_terms[..prefix].iter().copied(), PermuteMode::Align);
-                if let Some(delta) = delta_shard.flatten() {
-                    let join_terms = delta_terms.iter().chain(delta_terms[..prefix].iter()).chain(terms.iter()).copied().collect::<Vec<_>>();
+                // join with atom: permute `salad.terms` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
+                let prefix = other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
+                salad.align_to(other_terms[..prefix].iter().copied());
+                if let Some(delta) = salad.facts.flatten() {
+                    let join_terms = salad.terms.iter().chain(salad.terms[..prefix].iter()).chain(terms.iter()).copied().collect::<Vec<_>>();
                     // Our output join order (until we learn how to do FDB shapes) is the first of `others` not equal to ourself.
                     let projection = after.iter().map(|t| join_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
-                    delta_shard.extend(delta.join_many(other_facts.iter().copied(), prefix, &projection[..]));
+                    salad.facts.extend(delta.join_many(other_facts.iter().copied(), prefix, &projection[..]));
                 }
-                delta_terms.clear();
-                delta_terms.extend_from_slice(after);
+                salad.terms.clear();
+                salad.terms.extend_from_slice(after);
             }
             else {
                 let (next_other_facts, next_other_terms) = self;
 
-                let prefix = next_other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
-                permute(delta_shard, delta_terms, next_other_terms[..prefix].iter().copied(), PermuteMode::Align);
-                if let Some(delta) = delta_shard.flatten() {
+                let prefix = next_other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
+                salad.align_to(next_other_terms[..prefix].iter().copied());
+                if let Some(delta) = salad.facts.flatten() {
                     let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
-                    delta_shard.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), true));
+                    salad.facts.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), true));
                 }
             }
         }
@@ -317,10 +300,10 @@ pub mod data {
 pub mod antijoin {
 
     use std::collections::BTreeSet;
-    use crate::facts::{FactLSM, Terms};
+    use crate::facts::Terms;
     use crate::facts::trie::Forest;
     use crate::rules::{PlanAtom, ExecAtom};
-    use crate::rules::exec::{permute, PermuteMode};
+    use crate::rules::exec::Salad;
 
     /// Wrapper type for antijoins.
     pub struct Anti<T>(pub T);
@@ -334,31 +317,17 @@ pub mod antijoin {
 
         fn terms(&self) -> &[T] { self.0.1 }
 
-        fn count(
-            &self,
-            _: &mut FactLSM<Forest<Terms>>,
-            _: &mut Vec<T>,
-            _: &BTreeSet<T>,
-            _: u8,
-        ) {
-            // Antijoins propose nothing
-        }
+        fn count(&self, _: &mut Salad<T>, _: &BTreeSet<T>, _: u8) { }
 
-        fn join(
-            &self,
-            delta_shard: &mut FactLSM<Forest<Terms>>,
-            delta_terms: &mut Vec<T>,
-            terms: &BTreeSet<T>,
-            _after: &[T],
-        ) {
+        fn join(&self, salad: &mut Salad<T>, terms: &BTreeSet<T>, _after: &[T]) {
             let (next_other_facts, next_other_terms) = &self.0;
 
-            let prefix = next_other_terms.iter().take_while(|t| delta_terms.contains(t)).count();
-            permute(delta_shard, delta_terms, next_other_terms[..prefix].iter().copied(), PermuteMode::Align);
-            if let Some(delta) = delta_shard.flatten() {
+            let prefix = next_other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
+            salad.align_to(next_other_terms[..prefix].iter().copied());
+            if let Some(delta) = salad.facts.flatten() {
                 assert!(terms.is_empty());
                 let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
-                delta_shard.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), false));
+                salad.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), false));
             }
         }
     }
@@ -379,11 +348,11 @@ pub mod logic {
     use columnar::{Container, Index, Len, Push, Clear, Options};
 
     use crate::types::{Atom, Term};
-    use crate::facts::FactLSM;
-    use crate::facts::{Forest, Lists, Terms};
+    use crate::facts::{Lists, Terms};
     use crate::facts::trie::Layer;
     use crate::facts::trie::layers::advance_bounds;
     use crate::rules::{exec, plan};
+    use crate::rules::exec::Salad;
 
     /// Looks for the atom's name in a known list, and returns an implementation if found.
     ///
@@ -479,20 +448,14 @@ pub mod logic {
         // Lightly odd, in that we have no preference on term order.
         fn terms(&self) -> &[T] { &self.terms }
 
-        fn count(
-            &self,
-            facts: &mut FactLSM<Forest<Terms>>,
-            terms: &mut Vec<T>,
-            added: &BTreeSet<T>,
-            my_index: u8,
-        ) {
+        fn count(&self, salad: &mut Salad<T>, added: &BTreeSet<T>, my_index: u8) {
             //  Flatten the input, to make our life easier.
-            if let Some(mut delta) = facts.flatten() {
+            if let Some(mut delta) = salad.facts.flatten() {
 
                 //  1.  Prepare the function arguments, a `Vec<Option<(Borrowed, Vec<usize>)>>` indicating present elements of `self.bound`.
                 //      Each present element of `self.bound` presents as a pair of borrowed container and list of counts for each element.
                 //      All present pairs should have the same sum of counts, indicating the total number of argument tuples.
-                let max = self.bound.iter().flatten().flat_map(|term| terms.iter().position(|t| t == term)).max();
+                let max = self.bound.iter().flatten().flat_map(|term| salad.terms.iter().position(|t| t == term)).max();
                 let cnt = max.map(|col| delta.layer(col).list.values.len()).unwrap_or(1);
 
                 //  Long-lived containers for literal values.
@@ -505,7 +468,7 @@ pub mod logic {
                 self.bound.iter().enumerate().map(|(index, arg)| {
                     match arg {
                         Ok(term) => {
-                            terms.iter().position(|t| t == term).map(|col| {
+                            salad.terms.iter().position(|t| t == term).map(|col| {
                                 let mut bounds = (0 .. delta.layer(col).list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
                                 for i in col+1 .. max.unwrap()+1 { advance_bounds::<Terms>(delta.layer(i).borrow(), &mut bounds)};
                                 let counts = bounds.into_iter().map(|(l, u)| u-l).collect::<Vec<_>>();
@@ -543,24 +506,18 @@ pub mod logic {
                 }
                 delta.push_layer(notes_rc);
 
-                facts.push(delta);
+                salad.extend([delta]);
             }
         }
 
-        fn join(
-            &self,
-            facts: &mut FactLSM<Forest<Terms>>,
-            terms: &mut Vec<T>,
-            added: &BTreeSet<T>,
-            _after: &[T],
-        ) {
+        fn join(&self, salad: &mut Salad<T>, added: &BTreeSet<T>, _after: &[T]) {
             //  Flatten the input, to make our life easier.
-            if let Some(delta) = facts.flatten() {
+            if let Some(delta) = salad.facts.flatten() {
 
                 //  1.  Prepare the function arguments, a `Vec<Option<(Borrowed, Vec<usize>)>>` indicating present elements of `self.bound`.
                 //      Each present element of `self.bound` presents as a pair of borrowed container and list of counts for each element.
                 //      All present pairs should have the same sum of counts, indicating the total number of argument tuples.
-                let max = self.bound.iter().flatten().flat_map(|term| terms.iter().position(|t| t == term)).max();
+                let max = self.bound.iter().flatten().flat_map(|term| salad.terms.iter().position(|t| t == term)).max();
                 let cnt = max.map(|col| delta.layer(col).list.values.len()).unwrap_or(1);
 
                 //  Long-lived containers for literal values.
@@ -573,7 +530,7 @@ pub mod logic {
                 self.bound.iter().enumerate().map(|(index, arg)| {
                     match arg {
                         Ok(term) => {
-                            terms.iter().position(|t| t == term).map(|col| {
+                            salad.terms.iter().position(|t| t == term).map(|col| {
                                 let mut bounds = (0 .. delta.layer(col).list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
                                 for i in col+1 .. max.unwrap()+1 { advance_bounds::<Terms>(delta.layer(i).borrow(), &mut bounds)};
                                 let counts = bounds.into_iter().map(|(l, u)| u-l).collect::<Vec<_>>();
@@ -588,7 +545,7 @@ pub mod logic {
                     // Semijoin case.
                     let added = added.iter().map(|term| self.bound.iter().position(|t| t.as_ref() == Ok(term)).unwrap()).collect::<BTreeSet<_>>();
                     let keep = self.logic.count(&args, &added).into_iter().map(|x| x != Some(0)).collect::<std::collections::VecDeque<_>>();
-                    facts.extend(delta.retain_core(max.map(|c| c+1).unwrap_or(0), keep));
+                    salad.facts.extend(delta.retain_core(max.map(|c| c+1).unwrap_or(0), keep));
                 }
                 else {
                     let colidx = added.iter().map(|term| self.bound.iter().position(|t| t.as_ref() == Ok(term)).unwrap()).next().unwrap();
@@ -607,13 +564,13 @@ pub mod logic {
                             }
                         }
                         delta.push_layer(Rc::new(Layer { list: colnew }));
-                        facts.push(delta);
+                        salad.facts.push(delta);
                     }
-                    terms.push(*added.iter().next().unwrap());
+                    salad.terms.push(*added.iter().next().unwrap());
                 }
 
             }
-            else { Extend::extend(terms, added.iter().take(1).copied()); }
+            else { Extend::extend(&mut salad.terms, added.iter().take(1).copied()); }
         }
     }
 
