@@ -86,13 +86,11 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         let mut salad = crate::rules::exec::Salad::new(FactLSM::default(), terms.clone());
         if stable {
             let facts = &facts.get_action(atom.name.as_str(), action).unwrap();
-            for layer in facts.stable.contents().chain(facts.recent.as_ref()) {
-                salad.facts.push(layer.clone());
-            }
+            salad.extend(facts.stable.contents().chain(facts.recent.as_ref()).cloned());
         }
         else {
             let facts = &facts.get_action(atom.name.as_str(), action).unwrap();
-            salad.facts.extend(facts.recent.clone());
+            salad.extend(facts.recent.clone());
         };
 
         if salad.facts.is_empty() { continue; }
@@ -141,19 +139,19 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         // and can simply commit `delta`. There could be multiple heads, and the action
         // could be not the identity.
         let exact_match = head.iter().position(|a| {
-            a.terms.len() == salad.terms.len() &&
+            a.terms.len() == salad.arity() &&
             a.terms.iter().zip(salad.terms.iter()).all(|(h,d)| h.as_var() == Some(d))
         });
 
         for (_, atom) in head.iter().enumerate().filter(|(pos,_)| Some(*pos) != exact_match) {
-            let mut action = Action::with_arity(salad.terms.len());
+            let mut action = Action::with_arity(salad.arity());
             action.projection = atom.terms.iter().map(|t| match t {
                 Term::Var(name) => Ok(salad.terms.iter().position(|t2| t2 == &name).expect(format!("Failed to find {:?} in {:?}", name, salad.terms).as_str())),
                 Term::Lit(data) => Err(data.clone()),
             }).collect();
             if let Some(delta) = salad.facts.flatten() {
                 facts.entry(atom).extend(delta.act_on(&action));
-                salad.facts.push(delta);
+                salad.extend([delta]);
             }
         }
         if let Some(pos) = exact_match { facts.entry(&head[pos]).extend(salad.facts); }
@@ -213,8 +211,8 @@ pub mod data {
                     // SUBTLE: `delta_lsm` is empty so returning communicates zeroing out everything. But also this guards Forest contruction to ensure it is non-empty.
                     if counts.is_empty() { return; }
 
-                    let mut layers = Vec::with_capacity(salad.terms.len());
-                    if salad.terms.len() > prefix {
+                    let mut layers = Vec::with_capacity(salad.arity());
+                    if salad.arity() > prefix {
 
                         let mut prev = None;
                         let mut bounds = Vec::default();
@@ -250,7 +248,7 @@ pub mod data {
                     }
                 }
                 delta.push_layer(notes_rc);
-                salad.facts.push(delta);
+                salad.extend([delta]);
             }
         }
 
@@ -329,7 +327,7 @@ pub mod antijoin {
             if let Some(delta) = salad.facts.flatten() {
                 assert!(terms.is_empty());
                 let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
-                salad.facts.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), false));
+                salad.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), false));
             }
         }
     }
@@ -508,7 +506,7 @@ pub mod logic {
                 }
                 delta.push_layer(notes_rc);
 
-                salad.facts.push(delta);
+                salad.extend([delta]);
             }
         }
 

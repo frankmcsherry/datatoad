@@ -51,10 +51,16 @@ impl<T: Ord+Copy> Salad<T> {
     /// Constructs a new `Self` from facts and terms.
     pub fn new(facts: FactLSM<Forest<Terms>>, terms: Vec<T>) -> Self { Self { facts, terms } }
 
+    /// The number of columns.
+    pub fn arity(&self) -> usize { self.terms.len() }
+
     /// Permutes columns to start with those present in `align`, followed by those not present.
     pub fn align_to(&mut self, align: impl Iterator<Item = T>) { Self::permute(self, align, PermuteMode::Align); }
     /// Permutes columns to start with those present in `align`, dropping those not present.
     pub fn prune_to(&mut self, align: impl Iterator<Item = T>) { Self::permute(self, align, PermuteMode::Prune); }
+
+    /// Removes all but the first `arity` columns.
+    pub fn truncate(&mut self, arity: usize) { if let Some(mut facts) = self.facts.flatten() { facts.truncate(arity); self.facts.push(facts); } self.terms.truncate(arity); }
 
     /// Permute `facts` from its current order, `terms` to one that matches `align` on common terms.
     ///
@@ -78,8 +84,17 @@ impl<T: Ord+Copy> Salad<T> {
             }
             salad.terms = permutation.iter().map(|i| salad.terms[*i]).collect::<Vec<_>>();
         }
-    }
 
+        // Maybe necessary if `permutation` is `0 .. k` for k less than the input arity.
+        if let PermuteMode::Prune = mode { salad.truncate(permutation.len()); }
+    }
+}
+
+// The `Extend` implementation panics if one inserts any facts with an arity that does not match the number of terms.
+impl<T> Extend<Forest<Terms>> for Salad<T> {
+    fn extend<I: IntoIterator<Item=Forest<Terms>>>(&mut self, iter: I) {
+        self.facts.extend(iter.into_iter().map(|x| { assert_eq!(x.arity(), self.terms.len()); x }));
+    }
 }
 
 /// Indicates behavior of `permute`, either aligned extra columns or pruning them.
@@ -113,10 +128,8 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
             assert_eq!(&active[..], &salad.terms[..active.len()]);
 
             let mut prefix = salad.clone();
-            let mut clone = facts.clone();
-            clone.truncate(active.len());
-            prefix.facts.push(clone);
-            prefix.terms.truncate(active.len());
+            prefix.extend([facts.clone()]);
+            prefix.truncate(active.len());
 
             let mut active_target = active.clone();
             active_target.extend(terms.iter().copied());
@@ -199,10 +212,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
 
                 // Put in common layout (`target`) then merge.
                 shard.prune_to(target.iter().copied());
-                if let Some(mut facts) = shard.facts.flatten() {
-                    while facts.arity() > target.len() { facts.pop_layer(); }
-                    salad.facts.push(facts);
-                }
+                if let Some(facts) = shard.facts.flatten() { salad.facts.push(facts); }
             }
         }
 
