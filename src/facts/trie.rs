@@ -56,6 +56,9 @@ impl<C: Container> Forest<C> {
     }
     /// Removes the last column from facts, returning the layer with their values.
     pub fn pop_layer(&mut self) -> Option<Rc<Layer<C>>> { self.layers.pop() }
+
+    /// Removes all but the first `arity` columns.
+    pub fn truncate(&mut self, arity: usize) { while self.arity() > arity { self.pop_layer(); } }
 }
 
 impl<C: Container> TryFrom<Vec<Rc<Layer<C>>>> for Forest<C> {

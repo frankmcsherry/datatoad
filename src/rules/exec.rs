@@ -25,26 +25,30 @@ pub trait ExecAtom<T: Ord> {
     /// For prefixes where this atom would add a less-or-equal log(1+count), it should overwrite that value and the index.
     /// The implementor is not required to update any counts, for example if it is unable to provide ground values.
     /// In this case, the implementor is not expected to respond to `join` for the same arguments.
-    fn count(
-        &self,
-        facts: &mut FactLSM<Forest<Terms>>,
-        terms: &mut Vec<T>,
-        added: &BTreeSet<T>,
-        index: u8,
-    );
+    fn count(&self, salad: &mut Salad<T>, added: &BTreeSet<T>, index: u8 );
 
     /// Join or semijoin `facts` with `self` on the shared `terms`, introducing `added`.
     ///
     /// If `terms` is empty, a semijoin is intended.
     /// If `terms` plus `added` cover all of `self.terms()` the result must contain no facts not satisfying `self`.
     /// The `after` term sequence is the order to which `terms` will next be permuted (an optional hint to lay out output).
-    fn join(
-        &self,
-        facts: &mut FactLSM<Forest<Terms>>,
-        terms: &mut Vec<T>,
-        added: &BTreeSet<T>,
-        after: &[T],
-    );
+    fn join(&self, salad: &mut Salad<T>, added: &BTreeSet<T>, after: &[T]);
+}
+
+/// Facts of multiple columns and the names for those columns.
+///
+/// This type is intended for fact collections that support shuffling of the columns, i.e. in-flight facts rather than at-rest facts.
+/// It would be surprising to use this type to wrap collections of facts that are not actively moving through rules.
+#[derive(Clone)]
+pub struct Salad<T> {
+    /// Many facts represented as a sequence of layers in correspondence with columns.
+    pub facts: FactLSM<Forest<Terms>>,
+    /// Names for the sequence of columns.
+    pub terms: Vec<T>,
+}
+
+impl<T> Salad<T> {
+    pub fn new(facts: FactLSM<Forest<Terms>>, terms: Vec<T>) -> Self { Self { facts, terms } }
 }
 
 /// Indicates behavior of `permute`, either aligned extra columns or pruning them.
@@ -58,148 +62,143 @@ pub enum PermuteMode { Align, Prune }
 ///
 /// The `mode` argument indicates whther columns in `terms` absent from `align` should be discarded.
 /// When `prune` is set they are; otherwise all of `terms` are retained but re-ordered to start with `align`.
-pub fn permute<F: FactContainer, T: Ord + Copy>(
-    facts: &mut FactLSM<F>,
-    terms: &mut Vec<T>,
+pub fn permute<T: Ord + Copy>(
+    salad: &mut Salad<T>,
     align: impl Iterator<Item = T>,
     mode: PermuteMode,
 ) {
-    let mut permutation: Vec<usize> = align.flat_map(|t1| terms.iter().position(|t2| &t1 == t2)).collect();
-    if let PermuteMode::Align = mode { for index in 0 .. terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
+    let mut permutation: Vec<usize> = align.flat_map(|t1| salad.terms.iter().position(|t2| &t1 == t2)).collect();
+    if let PermuteMode::Align = mode { for index in 0 .. salad.terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
 
     if permutation.iter().enumerate().any(|(index, i)| &index != i) {
-        if let Some(flattened) = facts.flatten() {
-            facts.extend(flattened.act_on(&Action::permutation(permutation.iter().copied())));
+        if let Some(flattened) = salad.facts.flatten() {
+            salad.facts.extend(flattened.act_on(&Action::permutation(permutation.iter().copied())));
         }
-        *terms = permutation.iter().map(|i| terms[*i]).collect::<Vec<_>>();
+        salad.terms = permutation.iter().map(|i| salad.terms[*i]).collect::<Vec<_>>();
     }
 }
 
 use crate::facts::{Forest, Terms};
 #[inline(never)]
 pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
-    delta_lsm: &mut FactLSM<Forest<Terms>>,
-    delta_terms: &mut Vec<T>,
+    salad: &mut Salad<T>,
     terms: &BTreeSet<T>,
     others: &[Box<dyn ExecAtom<T> + '_>],
     potato: T,
     target: &[T],
 ) {
     if others.len() == 1 {
-        others[0].join(delta_lsm, delta_terms, terms, target);
-        permute(delta_lsm, delta_terms, target.iter().copied(), PermuteMode::Prune);
+        others[0].join(salad, terms, target);
+        permute(salad, target.iter().copied(), PermuteMode::Prune);
         return;
     }
 
-    //  0.  Add a new column containing `[255u8, 255u8]` named `potato`, to house our by-atom count and index information.
-    if let Some(delta) = delta_lsm.flatten() {
+    if let Some(facts) = salad.facts.flatten() {
 
-        use columnar::Len;
+        let active = salad.terms.iter().filter(|t| others.iter().any(|o| o.terms().contains(t))).copied().collect::<Vec<_>>();
 
-        let active = delta_terms.iter().filter(|t| others.iter().any(|o| o.terms().contains(t))).copied().collect::<Vec<_>>();
-
-        if active.len() == delta_terms.len() {
-            delta_lsm.push(delta);
-            wco_join_inner(delta_lsm, delta_terms, terms, others, potato, target);
+        if active.len() == salad.terms.len() {
+            salad.facts.push(facts);
+            wco_join_inner(salad, terms, others, potato, target);
         }
         else {
-            assert_eq!(&active[..], &delta_terms[..active.len()]);
-            delta_lsm.push((0..active.len()).map(|i| Rc::clone(delta.layer(i))).collect::<Vec<_>>().try_into().expect("non-empty as copied from delta"));
-            let mut active_clone = active.clone();
+            assert_eq!(&active[..], &salad.terms[..active.len()]);
+
+            let mut prefix = salad.clone();
+            let mut clone = facts.clone();
+            clone.truncate(active.len());
+            prefix.facts.push(clone);
+            prefix.terms.truncate(active.len());
+
             let mut active_target = active.clone();
             active_target.extend(terms.iter().copied());
-            wco_join_inner(delta_lsm, &mut active_clone, terms, others, potato, &active_target);
-            permute(delta_lsm, &mut active_clone, delta_terms[..active.len()].iter().copied(), PermuteMode::Align);
+            wco_join_inner(&mut prefix, terms, others, potato, &active_target);
+            permute(&mut prefix, salad.terms[..active.len()].iter().copied(), PermuteMode::Align);
 
-            let mut crossed_terms = delta_terms.clone();
-            crossed_terms.extend(delta_terms[..active.len()].iter().copied());
+            let mut crossed_terms = salad.terms.clone();
+            crossed_terms.extend(salad.terms[..active.len()].iter().copied());
             crossed_terms.extend(terms.iter().copied());
             let projection = target.iter().map(|t| crossed_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
-            *delta_lsm = delta.join_many(delta_lsm.contents(), active.len(), &projection[..]);
-            delta_terms.clear();
-            delta_terms.extend_from_slice(target);
+            salad.facts = facts.join_many(prefix.facts.contents(), active.len(), &projection[..]);
+            salad.terms.clear();
+            salad.terms.extend_from_slice(target);
         }
     }
-    else { delta_terms.extend(terms.iter().copied()); }
+    else { salad.terms.extend(terms.iter().copied()); }
 }
 
 #[inline(never)]
 fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
-    delta_lsm: &mut FactLSM<Forest<Terms>>,
-    delta_terms: &mut Vec<T>,
+    salad: &mut Salad<T>,
     terms: &BTreeSet<T>,
     others: &[Box<dyn ExecAtom<T> + '_>],
     potato: T,
     target: &[T],
 ) {
-
-    use columnar::Len;
     use columnar::primitive::offsets::Strides;
-
     use crate::facts::{trie::Layer, Lists};
 
-    if let Some(mut delta) = delta_lsm.flatten() {
+    if let Some(mut facts) = salad.facts.flatten() {
 
-        let values = vec![255u8; 4 * delta.len()];
-        delta.push_layer(Rc::new(Layer { list: Lists {
-            bounds: Strides::new(1, delta.len() as u64),
+        let values = vec![255u8; 4 * facts.len()];
+        facts.push_layer(Rc::new(Layer { list: Lists {
+            bounds: Strides::new(1, facts.len() as u64),
             values: Lists {
-                bounds: Strides::new(4, delta.len() as u64),
+                bounds: Strides::new(4, facts.len() as u64),
                 values,
             },
         }}));
-        delta_lsm.push(delta);
-        delta_terms.push(potato);
+        salad.facts.push(facts);
+        salad.terms.push(potato);
 
         //  1.  For each atom, update proposals (count, index) for each path in `delta` to track the minimum count.
-        for (index, other) in others.iter().enumerate() { other.count(delta_lsm, delta_terms, terms, index as u8); }
+        for (index, other) in others.iter().enumerate() { other.count(salad, terms, index as u8); }
 
-        //  2.  Partition `delta_lsm` by atom index, and join to get proposals.
+        //  2.  Partition `salad.facts` by atom index, and join to get proposals.
         // Extract the (count, index) layer to shard paths by index.
-        if let Some(mut delta) = delta_lsm.flatten() {
+        if let Some(mut facts) = salad.facts.flatten() {
 
             // This `Rc::unwrap_or_clone` could be `Rc::try_unwrap` as there *should* be unique ownership, other than bugs in `other.count` above.
-            let notes = Rc::unwrap_or_clone(delta.pop_layer().unwrap()).list.values.values;
+            let notes = Rc::unwrap_or_clone(facts.pop_layer().unwrap()).list.values.values;
             let mut bools = std::collections::VecDeque::with_capacity(notes.len()/4);
-            delta_terms.pop();
+            salad.terms.pop();
 
             for (other_index, other) in others.iter().enumerate().rev() {
 
                 // Extract the shard of `delta` marked for this index.
                 bools.clear();
                 bools.extend((0 .. notes.len()/4).map(|i| notes[4*i] > 0 && notes[4*i+1] == other_index as u8));
-                let mut delta_shard = FactLSM::default();
+                let mut shard = Salad::new(FactLSM::default(), salad.terms.clone());
                 if bools.iter().any(|x| *x) {
                     let mut layers = Vec::default();
-                    for index in (0 .. delta_terms.len()).rev() { layers.insert(0, Rc::new(delta.layer(index).retain_items(&mut bools))); }
-                    delta_shard.push(layers.try_into().expect("non-empty due to bools.any() test"));
+                    for index in (0 .. salad.terms.len()).rev() { layers.insert(0, Rc::new(facts.layer(index).retain_items(&mut bools))); }
+                    shard.facts.push(layers.try_into().expect("non-empty due to bools.any() test"));
                 }
 
-                // join with atom: permute `delta_shard` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
-                let mut delta_shard_terms = delta_terms.clone();
+                // join with atom: permute `shard` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
                 let next_other_idx = if other_index == 0 { 1 } else { 0 };
                 let mut after = Vec::default();
-                after.extend(others[next_other_idx].terms().iter().filter(|t| delta_terms.contains(t) || terms.contains(t)));
-                after.extend(delta_terms.iter().filter(|t| !others[next_other_idx].terms().contains(t)));
-                other.join(&mut delta_shard, &mut delta_shard_terms, terms, &after);
+                after.extend(others[next_other_idx].terms().iter().filter(|t| salad.terms.contains(t) || terms.contains(t)));
+                after.extend(salad.terms.iter().filter(|t| !others[next_other_idx].terms().contains(t)));
+                other.join(&mut shard, terms, &after);
 
                 // semijoin with other atoms.
                 for (next_other_index, next_other) in others.iter().enumerate() {
                     if next_other_index != other_index {
-                        next_other.join(&mut delta_shard, &mut delta_shard_terms, &Default::default(), Default::default());
+                        next_other.join(&mut shard, &Default::default(), Default::default());
                     }
                 }
 
                 // Put in common layout (`target`) then merge.
-                permute(&mut delta_shard, &mut delta_shard_terms, target.iter().copied(), PermuteMode::Prune);
-                if let Some(mut delta) = delta_shard.flatten() {
-                    while delta.arity() > target.len() { delta.pop_layer(); }
-                    delta_lsm.push(delta);
+                permute(&mut shard, target.iter().copied(), PermuteMode::Prune);
+                if let Some(mut facts) = shard.facts.flatten() {
+                    while facts.arity() > target.len() { facts.pop_layer(); }
+                    salad.facts.push(facts);
                 }
             }
         }
 
-        delta_terms.clear();
-        delta_terms.extend_from_slice(target);
+        salad.terms.clear();
+        salad.terms.extend_from_slice(target);
     }
 }
