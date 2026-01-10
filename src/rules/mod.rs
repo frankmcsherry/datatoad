@@ -23,8 +23,6 @@ pub mod exec;
 pub use plan::PlanAtom;
 pub use exec::ExecAtom;
 
-use exec::{permute, PermuteMode};
-
 /// Implements a provided rule in the context of various facts.
 ///
 /// The `stable` argument indicates whether we should perform a join with all facts (true),
@@ -118,7 +116,7 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
             boxed_atom.join(&mut salad, &Default::default(), init_order);
         }
         // We may need to produce the result in a different order.
-        permute(&mut salad, init_order.iter().copied(), PermuteMode::Prune);
+        salad.prune_to(init_order.iter().copied());
 
         // Stage 2: Each other plan stage.
         for (atoms, terms, order) in plan.iter().skip(1) {
@@ -170,7 +168,7 @@ pub mod data {
     use crate::facts::{FactContainer, Terms};
     use crate::facts::trie::Forest;
     use crate::rules::{PlanAtom, ExecAtom};
-    use crate::rules::exec::{permute, PermuteMode, Salad};
+    use crate::rules::exec::Salad;
 
     impl<T: Ord + Copy> PlanAtom<T> for BTreeSet<T> {
         fn terms(&self) -> BTreeSet<T> { self.clone() }
@@ -190,7 +188,7 @@ pub mod data {
             let (other_facts, other_terms) = self;
 
             let prefix = other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
-            permute(salad, other_terms[..prefix].iter().copied(), PermuteMode::Align);
+            salad.align_to(other_terms[..prefix].iter().copied());
             if let Some(mut delta) = salad.facts.flatten() {
                 let length = if prefix > 0 { delta.layer(prefix-1).list.values.len() } else { 1 };
                 let mut counts = vec![0; length];
@@ -259,7 +257,7 @@ pub mod data {
         fn join(&self, salad: &mut Salad<T>, terms: &BTreeSet<T>, after: &[T]) {
             // TODO: this was needed because of a bad load action on z3.
             // TODO: is this method responsible for this, or the caller?
-            permute(salad, self.1.iter().copied(), PermuteMode::Align);
+            salad.align_to(self.1.iter().copied());
 
             // First, check intended invariants on alignment.
             // The `terms` we are asked to add should immediately follow in `self.1` its shared prefix with `delta_terms`
@@ -276,7 +274,7 @@ pub mod data {
 
                 // join with atom: permute `salad.terms` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
                 let prefix = other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
-                permute(salad, other_terms[..prefix].iter().copied(), PermuteMode::Align);
+                salad.align_to(other_terms[..prefix].iter().copied());
                 if let Some(delta) = salad.facts.flatten() {
                     let join_terms = salad.terms.iter().chain(salad.terms[..prefix].iter()).chain(terms.iter()).copied().collect::<Vec<_>>();
                     // Our output join order (until we learn how to do FDB shapes) is the first of `others` not equal to ourself.
@@ -290,7 +288,7 @@ pub mod data {
                 let (next_other_facts, next_other_terms) = self;
 
                 let prefix = next_other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
-                permute(salad, next_other_terms[..prefix].iter().copied(), PermuteMode::Align);
+                salad.align_to(next_other_terms[..prefix].iter().copied());
                 if let Some(delta) = salad.facts.flatten() {
                     let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
                     salad.facts.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), true));
@@ -307,7 +305,7 @@ pub mod antijoin {
     use crate::facts::Terms;
     use crate::facts::trie::Forest;
     use crate::rules::{PlanAtom, ExecAtom};
-    use crate::rules::exec::{permute, PermuteMode, Salad};
+    use crate::rules::exec::Salad;
 
     /// Wrapper type for antijoins.
     pub struct Anti<T>(pub T);
@@ -327,7 +325,7 @@ pub mod antijoin {
             let (next_other_facts, next_other_terms) = &self.0;
 
             let prefix = next_other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
-            permute(salad, next_other_terms[..prefix].iter().copied(), PermuteMode::Align);
+            salad.align_to(next_other_terms[..prefix].iter().copied());
             if let Some(delta) = salad.facts.flatten() {
                 assert!(terms.is_empty());
                 let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();

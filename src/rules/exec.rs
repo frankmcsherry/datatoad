@@ -47,36 +47,44 @@ pub struct Salad<T> {
     pub terms: Vec<T>,
 }
 
-impl<T> Salad<T> {
+impl<T: Ord+Copy> Salad<T> {
+    /// Constructs a new `Self` from facts and terms.
     pub fn new(facts: FactLSM<Forest<Terms>>, terms: Vec<T>) -> Self { Self { facts, terms } }
+
+    /// Permutes columns to start with those present in `align`, followed by those not present.
+    pub fn align_to(&mut self, align: impl Iterator<Item = T>) { Self::permute(self, align, PermuteMode::Align); }
+    /// Permutes columns to start with those present in `align`, dropping those not present.
+    pub fn prune_to(&mut self, align: impl Iterator<Item = T>) { Self::permute(self, align, PermuteMode::Prune); }
+
+    /// Permute `facts` from its current order, `terms` to one that matches `align` on common terms.
+    ///
+    /// The method updates both `facts` and `terms`.
+    /// The method assumes that some prefix of `align` is present in `terms`, and no further terms
+    /// from `align` around found there. The caller must restrict `align` to make this the case.
+    ///
+    /// The `mode` argument indicates whther columns in `terms` absent from `align` should be discarded.
+    /// When `prune` is set they are; otherwise all of `terms` are retained but re-ordered to start with `align`.
+    fn permute(
+        salad: &mut Salad<T>,
+        align: impl Iterator<Item = T>,
+        mode: PermuteMode,
+    ) {
+        let mut permutation: Vec<usize> = align.flat_map(|t1| salad.terms.iter().position(|t2| &t1 == t2)).collect();
+        if let PermuteMode::Align = mode { for index in 0 .. salad.terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
+
+        if permutation.iter().enumerate().any(|(index, i)| &index != i) {
+            if let Some(flattened) = salad.facts.flatten() {
+                salad.facts.extend(flattened.act_on(&Action::permutation(permutation.iter().copied())));
+            }
+            salad.terms = permutation.iter().map(|i| salad.terms[*i]).collect::<Vec<_>>();
+        }
+    }
+
 }
 
 /// Indicates behavior of `permute`, either aligned extra columns or pruning them.
-pub enum PermuteMode { Align, Prune }
+enum PermuteMode { Align, Prune }
 
-/// Permute `facts` from its current order, `terms` to one that matches `align` on common terms.
-///
-/// The method updates both `facts` and `terms`.
-/// The method assumes that some prefix of `align` is present in `terms`, and no further terms
-/// from `align` around found there. The caller must restrict `align` to make this the case.
-///
-/// The `mode` argument indicates whther columns in `terms` absent from `align` should be discarded.
-/// When `prune` is set they are; otherwise all of `terms` are retained but re-ordered to start with `align`.
-pub fn permute<T: Ord + Copy>(
-    salad: &mut Salad<T>,
-    align: impl Iterator<Item = T>,
-    mode: PermuteMode,
-) {
-    let mut permutation: Vec<usize> = align.flat_map(|t1| salad.terms.iter().position(|t2| &t1 == t2)).collect();
-    if let PermuteMode::Align = mode { for index in 0 .. salad.terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
-
-    if permutation.iter().enumerate().any(|(index, i)| &index != i) {
-        if let Some(flattened) = salad.facts.flatten() {
-            salad.facts.extend(flattened.act_on(&Action::permutation(permutation.iter().copied())));
-        }
-        salad.terms = permutation.iter().map(|i| salad.terms[*i]).collect::<Vec<_>>();
-    }
-}
 
 use crate::facts::{Forest, Terms};
 #[inline(never)]
@@ -89,7 +97,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
 ) {
     if others.len() == 1 {
         others[0].join(salad, terms, target);
-        permute(salad, target.iter().copied(), PermuteMode::Prune);
+        salad.prune_to(target.iter().copied());
         return;
     }
 
@@ -113,7 +121,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
             let mut active_target = active.clone();
             active_target.extend(terms.iter().copied());
             wco_join_inner(&mut prefix, terms, others, potato, &active_target);
-            permute(&mut prefix, salad.terms[..active.len()].iter().copied(), PermuteMode::Align);
+            prefix.align_to(salad.terms[..active.len()].iter().copied());
 
             let mut crossed_terms = salad.terms.clone();
             crossed_terms.extend(salad.terms[..active.len()].iter().copied());
@@ -190,7 +198,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
                 }
 
                 // Put in common layout (`target`) then merge.
-                permute(&mut shard, target.iter().copied(), PermuteMode::Prune);
+                shard.prune_to(target.iter().copied());
                 if let Some(mut facts) = shard.facts.flatten() {
                     while facts.arity() > target.len() { facts.pop_layer(); }
                     salad.facts.push(facts);
