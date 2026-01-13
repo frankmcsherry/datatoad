@@ -33,7 +33,6 @@ fn main() {
 
         handle_command(text.as_str(), &mut state, &mut bytes, &mut timer);
 
-        println!("{:?}", timer.elapsed());
         println!();
         print!("> ");
         let _ = std::io::stdout().flush();
