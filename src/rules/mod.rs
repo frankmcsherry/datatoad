@@ -14,7 +14,7 @@
 //!
 //! These traits are implemented for relations that are *explicit* (represented by data) and *implicit* (represented by code), and in-between (e.g. antijoins).
 
-use crate::types::{Rule, Action, Atom, Term};
+use crate::types::{Rule, Action, Term};
 use crate::facts::{FactContainer, FactLSM, Relations};
 
 pub mod plan;
@@ -28,43 +28,9 @@ pub use exec::ExecAtom;
 /// The `stable` argument indicates whether we should perform a join with all facts (true),
 /// or only a join that involves novel facts (false).
 pub fn implement(rule: &Rule, stable: bool, facts: &mut Relations) {
-    match (&rule.head[..], &rule.body[..]) {
-        (head, [body]) => { implement_action(head, body, stable, facts) },
-        (head, body) => { implement_joins(head, body, stable, facts) },
-    }
-}
 
-/// Maps an action across a single atom in the body.
-fn implement_action(head: &[Atom], body: &Atom, stable: bool, facts: &mut Relations) {
-
-    // The body provides filters and an association between columns and names,
-    // which we expect to find in the atoms of the head. We'll need to form up
-    // actions for each head that perform the compound actions.
-    let load_action = Action::from_body(body);
-    let head_actions = head.iter().map(|atom| {
-        let mut action = load_action.clone();
-        action.projection = atom.terms.iter().map(|term| {
-            match term {
-                Term::Var(____) => { Ok(body.terms.iter().position(|t| t == term).unwrap()) },
-                Term::Lit(data) => { Err(data.to_vec()) },
-            }
-        }).collect();
-        action
-    }).collect::<Vec<_>>();
-    // TODO: perform all actions at the same time. Likely extend `FactContainer::act_on`.
-    for (head_atom, action) in head.iter().zip(head_actions.iter()) {
-        if let Some(found) = facts.get(body.name.as_str()) {
-            let mut derived = FactLSM::default();
-            for layer in found.stable.contents().filter(|_| stable).chain(found.recent.as_ref()) {
-                derived.extend(layer.act_on(action));
-            }
-            facts.entry(head_atom).extend(derived);
-        }
-    }
-}
-
-/// The complicated implementation case where these is at least one join.
-fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relations) {
+    let head = &rule.head[..];
+    let body = &rule.body[..];
 
     let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body);
 
@@ -83,15 +49,18 @@ fn implement_joins(head: &[Atom], body: &[Atom], stable: bool, facts: &mut Relat
         let (action, terms) = &loads[&plan_atom][&plan_atom];
         facts.ensure_action(body[plan_atom].name.as_str(), action);
 
-        let mut salad = crate::rules::exec::Salad::new(FactLSM::default(), terms.clone());
-        if stable {
-            let facts = &facts.get_action(atom.name.as_str(), action).unwrap();
-            salad.extend(facts.stable.contents().chain(facts.recent.as_ref()).cloned());
+        // Starting with a unit collection, we need to introduce columns for `terms`.
+        let mut salad = crate::rules::exec::Salad::new(FactLSM::default(), Vec::default());
+        if let Some(logic) = logic::resolve(&body[plan_atom]) {
+            let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = Box::new(logic);
+            salad.extend([Vec::default().try_into().unwrap()]);
+            boxed_atom.join(&mut salad, &terms.iter().copied().collect(), &terms);
         }
         else {
-            let facts = &facts.get_action(atom.name.as_str(), action).unwrap();
-            salad.extend(facts.recent.clone());
-        };
+            let dataz = &facts.get_action(atom.name.as_str(), action).unwrap();
+            salad.terms = terms.clone();
+            salad.extend(dataz.stable.contents().filter(|_| stable).chain(dataz.recent.as_ref()).cloned());
+        }
 
         if salad.facts.is_empty() { continue; }
 
