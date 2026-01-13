@@ -47,9 +47,6 @@ pub fn implement(rule: &Rule, stable: bool, facts: &mut Relations) {
 
         // Stage 0: Load the recently added facts.
         let (action, terms) = &loads[&plan_atom][&plan_atom];
-        facts.ensure_action(body[plan_atom].name.as_str(), action);
-
-        // Starting with a unit collection, we need to introduce columns for `terms`.
         let mut salad = crate::rules::exec::Salad::new(FactLSM::default(), Vec::default());
         if let Some(logic) = logic::resolve(&body[plan_atom]) {
             let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = Box::new(logic);
@@ -57,6 +54,7 @@ pub fn implement(rule: &Rule, stable: bool, facts: &mut Relations) {
             boxed_atom.join(&mut salad, &terms.iter().copied().collect(), &terms);
         }
         else {
+            facts.ensure_action(body[plan_atom].name.as_str(), action);
             let dataz = &facts.get_action(atom.name.as_str(), action).unwrap();
             salad.terms = terms.clone();
             salad.extend(dataz.stable.contents().filter(|_| stable).chain(dataz.recent.as_ref()).cloned());
@@ -64,21 +62,26 @@ pub fn implement(rule: &Rule, stable: bool, facts: &mut Relations) {
 
         if salad.facts.is_empty() { continue; }
 
+        // Ensure arranged facts exist first, as once we start capturing them it is too late to change others.
         for (load_atom, (action, _)) in loads[&plan_atom].iter() {
-            facts.ensure_action(body[*load_atom].name.as_str(), action);
+            if logic::resolve(&body[*load_atom]).is_none() {
+                facts.ensure_action(body[*load_atom].name.as_str(), action);
+            }
         }
 
         // Stage 1: Semijoin with other atoms that are subsumed by the initial terms.
         let (init_atoms, _init_terms, init_order) = &plan[0];
         for load_atom in init_atoms.iter().filter(|a| a != &&plan_atom) {
             let (load_action, load_terms) = &loads[&plan_atom][load_atom];
-            let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
-            let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
-            let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
             let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
                 if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
-                else if body[*load_atom].anti { Box::new(antijoin::Anti((other_facts, load_terms))) }
-                else { Box::new((other_facts, load_terms)) }
+                else {
+                    let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
+                    let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
+                    let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
+                    if body[*load_atom].anti { Box::new(antijoin::Anti((other_facts, load_terms))) }
+                    else { Box::new((other_facts, load_terms)) }
+                }
             };
             boxed_atom.join(&mut salad, &Default::default(), init_order);
         }
@@ -89,13 +92,15 @@ pub fn implement(rule: &Rule, stable: bool, facts: &mut Relations) {
         for (atoms, terms, order) in plan.iter().skip(1) {
             let others = atoms.iter().map(|load_atom| {
                 let (load_action, load_terms) = &loads[&plan_atom][load_atom];
-                let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
-                let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
-                let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
                 let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
                     if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
-                    else if body[*load_atom].anti { Box::new(antijoin::Anti((other_facts, load_terms))) }
-                    else { Box::new((other_facts, load_terms)) }
+                    else {
+                        let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
+                        let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
+                        let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
+                        if body[*load_atom].anti { Box::new(antijoin::Anti((other_facts, load_terms))) }
+                        else { Box::new((other_facts, load_terms)) }
+                    }
                 };
                 boxed_atom
             }).collect::<Vec<_>>();
