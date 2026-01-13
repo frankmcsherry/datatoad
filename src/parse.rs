@@ -81,12 +81,18 @@ fn parse_atom<I: Iterator<Item=Token>>(tokens: &mut Peekable<I>) -> Option<Atom>
     let Token::LParen     = tokens.next()? else { None? };
 
     let mut terms = Vec::new();
-    terms.push(parse_term(tokens)?);
-    while let Token::Comma = tokens.peek()? {
-        tokens.next();
-        terms.push(parse_term(tokens)?);
-    }
-    let Token::RParen     = tokens.next()? else { None? };
+    match tokens.peek()? {
+        Token::RParen => { tokens.next(); },
+        Token::Text(_) => {
+            terms.push(parse_term(tokens)?);
+            while let Token::Comma = tokens.peek()? {
+                tokens.next();
+                terms.push(parse_term(tokens)?);
+            }
+            let Token::RParen     = tokens.next()? else { None? };
+        },
+        _ => None?
+    };
 
     // Names starting with an `!` indicate an antijoin, which suppresses records that match.
     let (anti, name) = name.strip_prefix("!").map(|n| (true, n)).unwrap_or((false, name.as_str()));
