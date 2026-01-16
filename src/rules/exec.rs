@@ -101,66 +101,73 @@ impl<T> Extend<Forest<Terms>> for Salad<T> {
 enum PermuteMode { Align, Prune }
 
 
+/// A worst-case optimal join step that introduces `terms` subject to the constraints of `atoms`.
+///
+/// In the case that `atoms` has one element, this will be a conventional equijoin using terms in common.
+/// If `atoms` contains multiple elements, each will be probed for their number of distinct assignments
+/// to `terms`, for each input fact. Each fact will be extended by the atom with the fewest assignments,
+/// with the other atoms validating (by semijoin) the assignments to `terms`.
+///
+/// The `potato` argument is a placeholder term that we need to name the column containing the counts metadata.
+/// The `target` argument is the intended term order, which the output may be restricted to if appropriate.
 use crate::facts::{Forest, Terms};
 #[inline(never)]
 pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
     salad: &mut Salad<T>,
     terms: &BTreeSet<T>,
-    others: &[Box<dyn ExecAtom<T> + '_>],
+    atoms: &[Box<dyn ExecAtom<T> + '_>],
     potato: T,
     target: &[T],
 ) {
-    if others.len() == 1 {
-        others[0].join(salad, terms, target);
-        salad.prune_to(target.iter().copied());
-        return;
-    }
-
-    if let Some(facts) = salad.facts.flatten() {
-
-        let active = salad.terms.iter().filter(|t| others.iter().any(|o| o.terms().contains(t))).copied().collect::<Vec<_>>();
-
-        if active.len() == salad.terms.len() {
-            salad.facts.push(facts);
-            wco_join_inner(salad, terms, others, potato, target);
-        }
-        else {
-            assert_eq!(&active[..], &salad.terms[..active.len()]);
-
+    // Single atoms are handled using a conventional equijoin.
+    if atoms.len() == 1 { atoms[0].join(salad, terms, target); }
+    else {
+        // Multiple atoms will use worst-case optimal machinery, but we first sequester any columns not referenced by the atoms.
+        let shared = salad.terms.iter().filter(|t| atoms.iter().any(|a| a.terms().contains(t))).copied().collect::<Vec<_>>();
+        if salad.terms.len() != shared.len() {
+            salad.align_to(shared.iter().copied());
             let mut prefix = salad.clone();
-            prefix.extend([facts.clone()]);
-            prefix.truncate(active.len());
+            prefix.truncate(shared.len());
 
-            let mut active_target = active.clone();
-            active_target.extend(terms.iter().copied());
-            wco_join_inner(&mut prefix, terms, others, potato, &active_target);
-            prefix.align_to(salad.terms[..active.len()].iter().copied());
+            let mut shared_target = shared.clone();
+            shared_target.extend(terms.iter().copied());
+            wco_join_inner(&mut prefix, terms, atoms, potato, &shared_target);
+            prefix.align_to(salad.terms[..shared.len()].iter().copied());
 
-            let mut crossed_terms = salad.terms.clone();
-            crossed_terms.extend(salad.terms[..active.len()].iter().copied());
-            crossed_terms.extend(terms.iter().copied());
-            let projection = target.iter().map(|t| crossed_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
-            salad.facts = facts.join_many(prefix.facts.contents(), active.len(), &projection[..]);
+            // Re-install sequestered terms.
+            if let Some(facts) = salad.facts.flatten() {
+                let mut crossed_terms = salad.terms.clone();
+                crossed_terms.extend(salad.terms[..shared.len()].iter().copied());
+                crossed_terms.extend(terms.iter().copied());
+                let projection = target.iter().map(|t| crossed_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
+                salad.facts = facts.join_many(prefix.facts.contents(), shared.len(), &projection[..]);
+            }
             salad.terms.clear();
             salad.terms.extend_from_slice(target);
         }
+        else { wco_join_inner(salad, terms, atoms, potato, target) }
     }
-    else { salad.terms.extend(terms.iter().copied()); }
+
+    salad.prune_to(target.iter().copied());
 }
 
+/// Inner workings of the worst-case optimal join step.
+///
+/// This logic happens only after the preparatory logic above, and probably oughtn't be called by itself.
+/// It unambiguously applies per-atom counting, sharding, proposals, and validation.
 #[inline(never)]
 fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
     salad: &mut Salad<T>,
     terms: &BTreeSet<T>,
-    others: &[Box<dyn ExecAtom<T> + '_>],
+    atoms: &[Box<dyn ExecAtom<T> + '_>],
     potato: T,
     target: &[T],
 ) {
     use columnar::primitive::offsets::Strides;
     use crate::facts::{trie::Layer, Lists};
 
+    // Flatten to gain access to facts, to append counts.
     if let Some(mut facts) = salad.facts.flatten() {
-
         let values = vec![255u8; 4 * facts.len()];
         facts.push_layer(Rc::new(Layer { list: Lists {
             bounds: Strides::new(1, facts.len() as u64),
@@ -171,52 +178,60 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
         }}));
         salad.facts.push(facts);
         salad.terms.push(potato);
+    }
 
-        //  1.  For each atom, update proposals (count, index) for each path in `delta` to track the minimum count.
-        for (index, other) in others.iter().enumerate() { other.count(salad, terms, index as u8); }
+    //  1.  For each atom, update proposals (count, index) for each path in `delta` to track the minimum count.
+    for (index, other) in atoms.iter().enumerate() { other.count(salad, terms, index as u8); }
 
-        //  2.  Partition `salad.facts` by atom index, and join to get proposals.
-        // Extract the (count, index) layer to shard paths by index.
-        if let Some(mut facts) = salad.facts.flatten() {
+    //  2.  Partition `salad.facts` by atom index, and join to get proposals.
+    salad.terms.pop();
+    let notes = if let Some(mut facts) = salad.facts.flatten() {
+        let notes = Rc::unwrap_or_clone(facts.pop_layer().unwrap()).list.values.values;
+        salad.extend([facts]);
+        notes
+    } else { Default::default() };
+    let mut bools = std::collections::VecDeque::with_capacity(notes.len()/4);
 
-            // This `Rc::unwrap_or_clone` could be `Rc::try_unwrap` as there *should* be unique ownership, other than bugs in `other.count` above.
-            let notes = Rc::unwrap_or_clone(facts.pop_layer().unwrap()).list.values.values;
-            let mut bools = std::collections::VecDeque::with_capacity(notes.len()/4);
-            salad.terms.pop();
+    let mut shards = Vec::with_capacity(atoms.len());
+    for other_index in 0 .. atoms.len() {
+        // Extract the shard of `delta` marked for this index.
+        bools.clear();
+        bools.extend((0 .. notes.len()/4).map(|i| notes[4*i] > 0 && notes[4*i+1] == other_index as u8));
+        let mut shard = Salad::new(FactLSM::default(), salad.terms.clone());
+        if bools.iter().any(|x| *x) {
+            if let Some(facts) = salad.facts.flatten() {
+                let mut layers = Vec::default();
+                for index in (0 .. salad.terms.len()).rev() { layers.insert(0, Rc::new(facts.layer(index).retain_items(&mut bools))); }
+                shard.facts.push(layers.try_into().expect("non-empty due to bools.any() test"));
+                assert_eq!(salad.terms.len(), facts.arity());
+                salad.facts.push(facts);
+            }
+        }
+        shards.push(shard);
+    }
 
-            for (other_index, other) in others.iter().enumerate().rev() {
+    //  Prepare to absorb contributions from each shard.
+    *salad = Salad::new(FactLSM::default(), target.to_vec());
 
-                // Extract the shard of `delta` marked for this index.
-                bools.clear();
-                bools.extend((0 .. notes.len()/4).map(|i| notes[4*i] > 0 && notes[4*i+1] == other_index as u8));
-                let mut shard = Salad::new(FactLSM::default(), salad.terms.clone());
-                if bools.iter().any(|x| *x) {
-                    let mut layers = Vec::default();
-                    for index in (0 .. salad.terms.len()).rev() { layers.insert(0, Rc::new(facts.layer(index).retain_items(&mut bools))); }
-                    shard.facts.push(layers.try_into().expect("non-empty due to bools.any() test"));
-                }
+    //  3.  For each (shard, atom) pair, join to propose values then semijoin with other atoms.
+    for (shard_index, (mut shard, other)) in shards.into_iter().zip(atoms.iter()).enumerate() {
 
-                // join with atom: permute `shard` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
-                let next_other_idx = if other_index == 0 { 1 } else { 0 };
-                let mut after = Vec::default();
-                after.extend(others[next_other_idx].terms().iter().filter(|t| salad.terms.contains(t) || terms.contains(t)));
-                after.extend(salad.terms.iter().filter(|t| !others[next_other_idx].terms().contains(t)));
-                other.join(&mut shard, terms, &after);
+        // Look forward to the terms of the next atom we'll semijoin with.
+        let next_terms = atoms[if shard_index == 0 { 1 } else { 0 }].terms();
+        let mut after = Vec::default();
+        after.extend(next_terms.iter().filter(|t| salad.terms.contains(t) || terms.contains(t)));
+        after.extend(salad.terms.iter().filter(|t| !next_terms.contains(t)));
+        other.join(&mut shard, terms, &after);
 
-                // semijoin with other atoms.
-                for (next_other_index, next_other) in others.iter().enumerate() {
-                    if next_other_index != other_index {
-                        next_other.join(&mut shard, &Default::default(), Default::default());
-                    }
-                }
-
-                // Put in common layout (`target`) then merge.
-                shard.prune_to(target.iter().copied());
-                if let Some(facts) = shard.facts.flatten() { salad.facts.push(facts); }
+        // semijoin with other atoms.
+        for (next_index, next_atom) in atoms.iter().enumerate() {
+            if next_index != shard_index {
+                next_atom.join(&mut shard, &Default::default(), Default::default());
             }
         }
 
-        salad.terms.clear();
-        salad.terms.extend_from_slice(target);
+        // Put in common layout (`target`) then merge.
+        shard.prune_to(target.iter().copied());
+        salad.extend(shard.facts);
     }
 }

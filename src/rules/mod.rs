@@ -227,42 +227,23 @@ pub mod data {
         }
 
         fn join(&self, salad: &mut Salad<T>, terms: &BTreeSet<T>, after: &[T]) {
-            // TODO: this was needed because of a bad load action on z3.
-            // TODO: is this method responsible for this, or the caller?
-            salad.align_to(self.1.iter().copied());
-
-            // First, check intended invariants on alignment.
-            // The `terms` we are asked to add should immediately follow in `self.1` its shared prefix with `delta_terms`
-            let term_lower = salad.terms.iter().zip(self.1.iter()).take_while(|(t1,t2)| t1 == t2).count();
-            let term_upper = term_lower + terms.len();
-            if &self.1[term_lower .. term_upper].iter().copied().collect::<BTreeSet<_>>() != terms {
-                println!("salad.terms: {:?}", salad.terms);
-                println!("self.1: {:?}", self.1);
-                panic!("post-prefix terms are not the requested terms: {:?} then {:?} v {:?}", &self.1[..term_lower], &self.1[term_lower .. term_upper], terms);
-            }
-
+            let (my_facts, my_terms) = self;
+            let prefix = my_terms.iter().take_while(|t| salad.terms.contains(t)).count();
+            salad.align_to(my_terms[..prefix].iter().copied());
             if !terms.is_empty() {
-                let (other_facts, other_terms) = self;
-
                 // join with atom: permute `salad.terms` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
-                let prefix = other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
-                salad.align_to(other_terms[..prefix].iter().copied());
                 if let Some(delta) = salad.facts.flatten() {
                     let join_terms = salad.terms.iter().chain(salad.terms[..prefix].iter()).chain(terms.iter()).copied().collect::<Vec<_>>();
                     // Our output join order (until we learn how to do FDB shapes) is the first of `others` not equal to ourself.
                     let projection = after.iter().map(|t| join_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
-                    salad.facts.extend(delta.join_many(other_facts.iter().copied(), prefix, &projection[..]));
+                    salad.facts.extend(delta.join_many(my_facts.iter().copied(), prefix, &projection[..]));
                 }
                 salad.terms.clear();
                 salad.terms.extend_from_slice(after);
             }
             else {
-                let (next_other_facts, next_other_terms) = self;
-
-                let prefix = next_other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
-                salad.align_to(next_other_terms[..prefix].iter().copied());
                 if let Some(delta) = salad.facts.flatten() {
-                    let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
+                    let others = my_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
                     salad.facts.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), true));
                 }
             }
@@ -294,13 +275,12 @@ pub mod antijoin {
         fn count(&self, _: &mut Salad<T>, _: &BTreeSet<T>, _: u8) { }
 
         fn join(&self, salad: &mut Salad<T>, terms: &BTreeSet<T>, _after: &[T]) {
-            let (next_other_facts, next_other_terms) = &self.0;
-
-            let prefix = next_other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
-            salad.align_to(next_other_terms[..prefix].iter().copied());
+            let (my_facts, my_terms) = &self.0;
+            let prefix = my_terms.iter().take_while(|t| salad.terms.contains(t)).count();
+            salad.align_to(my_terms[..prefix].iter().copied());
             if let Some(delta) = salad.facts.flatten() {
                 assert!(terms.is_empty());
-                let others = next_other_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
+                let others = my_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();
                 salad.extend(delta.retain_inner(others.iter().map(|o| &o[..prefix]), false));
             }
         }
