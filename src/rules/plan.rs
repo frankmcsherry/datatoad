@@ -39,7 +39,7 @@ pub type Plans<A, T> = BTreeMap<A, Plan<A, T>>;
 pub type Load<T> = (Action<Vec<u8>>, Vec<T>);
 pub type Loads<A, T> = BTreeMap<A, BTreeMap<A, Load<T>>>;
 
-pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a [Atom]) -> (Plans<usize, &'a String>, Loads<usize, &'a String>) {
+pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a [Atom]) -> Result<(Plans<usize, &'a String>, Loads<usize, &'a String>), String> {
 
     // We'll pick a target term order for the first head; other heads may require transforms.
     // If we have multiple heads and one has no literals or repetitions, that would be best.
@@ -48,9 +48,11 @@ pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a
     // Map from atom identifier to boxed `PlanAtom`, containing term and grounding information.
     let atoms = body.iter().enumerate().map(|(index, atom)| {
         let terms = atom.terms.iter().filter_map(|term| term.as_var()).collect::<BTreeSet<_>>();
-        if let Some(logic) = crate::rules::logic::resolve(atom) { (index, Box::new(logic) as Box::<dyn PlanAtom<&'a String> + 'a>) }
-        else if !atom.anti { (index, Box::new(terms) as Box::<dyn PlanAtom<&'a String> + 'a>) }
-        else { (index, Box::new(crate::rules::antijoin::Anti(terms)) as Box::<dyn PlanAtom<&'a String> + 'a>) }
+        let boxed_atom: Box<dyn PlanAtom<&'a String>+'a> =
+        if let Some(logic) = crate::rules::logic::resolve(atom) { Box::new(logic) }
+        else if !atom.anti { Box::new(terms) }
+        else { Box::new(crate::rules::antijoin::Anti(terms)) };
+        (index, boxed_atom)
     }).collect::<BTreeMap<_,_>>();
 
     // We'll want to pre-plan the term orders for each atom update rule, so that we can
@@ -72,12 +74,25 @@ pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a
     // Insert loading actions for plan atoms themselves.
     for (plan_atom, _atom) in body.iter().enumerate() {
         if plans.contains_key(&plan_atom) {
-            // We would like to order the terms by the order they'll be used in the next stage, which will be
-            // by atom foremost, breaking ties by T::cmp. Only really appropriate if the first stage is empty,
-            // other than the plan atom (e.g. if we must semijoin, this order likely won't say put).
+            // We would like to order the terms by the order they'll first be used.
+            // This is either a semijoin, if other atoms participate in the first plan step,
+            // or otherwise aligned to the order of the atoms in the second plan step.
+            // In the absence of other atoms in the first plan step or other plan steps,
+            // the default order makes sense (and we apply an action to the result).
             let plan_terms = atoms[&plan_atom].terms();
             let mut order = Vec::new();
-            if plans[&plan_atom].len() > 1 {
+            if plans[&plan_atom][0].0.len() > 1 {
+                // The first atom that is not `plan_atom` drives the order we want.
+                // More thinking is possible here, e.g. if a different atom order would
+                // be better, or if multiple atoms align on order.
+                for atom in plans[&plan_atom][0].0.iter().filter(|a| **a != plan_atom) {
+                    let atom_terms = atoms[atom].terms();
+                    for term in plan_terms.iter() {
+                        if atom_terms.contains(term) && !order.contains(term) { order.push(*term); }
+                    }
+                }
+            }
+            else if plans[&plan_atom].len() > 1 {
                 for atom in plans[&plan_atom][1].0.iter() {
                     let atom_terms = atoms[atom].terms();
                     for term in plan_terms.iter() {
@@ -98,7 +113,7 @@ pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a
         }
     }
 
-    (plans, load_actions)
+    Ok((plans, load_actions))
 }
 
 /// From per-atom plans, per-atom loading action required to for the right term order.

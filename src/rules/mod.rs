@@ -32,7 +32,7 @@ pub fn implement(rule: &Rule, stable: bool, facts: &mut Relations) {
     let head = &rule.head[..];
     let body = &rule.body[..];
 
-    let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body);
+    let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body).expect("Unable to plan");
 
     let plan_atoms = if stable { 1 } else { body.len() };
 
@@ -72,10 +72,10 @@ pub fn implement(rule: &Rule, stable: bool, facts: &mut Relations) {
         // Stage 1: Semijoin with other atoms that are subsumed by the initial terms.
         let (init_atoms, _init_terms, init_order) = &plan[0];
         for load_atom in init_atoms.iter().filter(|a| a != &&plan_atom) {
-            let (load_action, load_terms) = &loads[&plan_atom][load_atom];
             let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
                 if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
                 else {
+                    let (load_action, load_terms) = &loads[&plan_atom][load_atom];
                     let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
                     let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
                     let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
@@ -91,10 +91,10 @@ pub fn implement(rule: &Rule, stable: bool, facts: &mut Relations) {
         // Stage 2: Each other plan stage.
         for (atoms, terms, order) in plan.iter().skip(1) {
             let others = atoms.iter().map(|load_atom| {
-                let (load_action, load_terms) = &loads[&plan_atom][load_atom];
                 let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
                     if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
                     else {
+                        let (load_action, load_terms) = &loads[&plan_atom][load_atom];
                         let other = &facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
                         let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
                         let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
