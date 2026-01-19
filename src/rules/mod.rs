@@ -299,7 +299,7 @@ pub mod logic {
     use std::collections::BTreeSet;
     use std::rc::Rc;
 
-    use columnar::{Container, Index, Len, Push, Clear, Options};
+    use columnar::{Borrow, Index, Len, Push, Clear, Options};
 
     use crate::types::{Atom, Term};
     use crate::facts::{Lists, Terms};
@@ -343,14 +343,14 @@ pub mod logic {
         ///
         /// When `output` is empty, it is important to emit either `Some(0)` or `Some(1)` to indicate respectively absence or presence.
         /// It is important that this result be accurate, as the type will not be given another chance to decline the records.
-        fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: &BTreeSet<usize>) -> Option<usize>;
+        fn count(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], output: &BTreeSet<usize>) -> Option<usize>;
 
         /// For values of some input columns, populate distinct values for arguments in `output`.
         ///
         /// This method may be called for any concrete values for which `self.count` returned a specific non-zero value (neither `None` nor `Some(0)`).
         /// The number of results should not exceed the value reported by `self.count`, though the only certain correctness requirement
         /// is that it should not plan to return any values if the count was advertised as `Some(0)`, as it may not get the chance.
-        fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms));
+        fn delve(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], output: (usize, &mut Terms));
     }
 
     pub trait BatchLogic {
@@ -361,9 +361,9 @@ pub mod logic {
         /// For a subset of arguments, an upper bound on the number of distinct set of values for arguments in `output`.
         ///
         /// When `output` is empty, it is important to emit variously `Some(0)` or `Some(1)` to indicate respectively absence or presence.
-        fn count(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: &BTreeSet<usize>) -> Vec<Option<usize>>;
+        fn count(&self, args: &[Option<(<Terms as columnar::Borrow>::Borrowed<'_>, Vec<usize>)>], output: &BTreeSet<usize>) -> Vec<Option<usize>>;
         /// For a subset of arguments, populate distinct values for arguments in `output`.
-        fn delve(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: usize) -> Options<Lists<Terms>>;
+        fn delve(&self, args: &[Option<(<Terms as columnar::Borrow>::Borrowed<'_>, Vec<usize>)>], output: usize) -> Options<Lists<Terms>>;
     }
 
     /// A wrapper for general logic-backed relations that manages the terms in each position.
@@ -418,7 +418,7 @@ pub mod logic {
                 for (index, arg) in self.bound.iter().enumerate() { if let Err(lit) = arg { lits[index].push(lit); } }
 
                 //  The arguments themselves, from indicated layers with counts projected forward to `max` layer.
-                let args: Vec<Option<(<Terms as Container>::Borrowed<'_>, Vec<usize>)>> =
+                let args: Vec<Option<(<Terms as Borrow>::Borrowed<'_>, Vec<usize>)>> =
                 self.bound.iter().enumerate().map(|(index, arg)| {
                     match arg {
                         Ok(term) => {
@@ -480,7 +480,7 @@ pub mod logic {
                 for (index, arg) in self.bound.iter().enumerate() { if let Err(lit) = arg { lits[index].push(lit); } }
 
                 //  The arguments themselves, from indicated layers with counts projected forward to `max` layer.
-                let args: Vec<Option<(<Terms as Container>::Borrowed<'_>, Vec<usize>)>> =
+                let args: Vec<Option<(<Terms as Borrow>::Borrowed<'_>, Vec<usize>)>> =
                 self.bound.iter().enumerate().map(|(index, arg)| {
                     match arg {
                         Ok(term) => {
@@ -533,13 +533,13 @@ pub mod logic {
     impl<L: Logic> BatchLogic for BatchedLogic<L> {
         fn arity(&self) -> usize { self.logic.arity() }
         fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { self.logic.bound(args) }
-        fn count(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: &BTreeSet<usize>) -> Vec<Option<usize>> {
+        fn count(&self, args: &[Option<(<Terms as columnar::Borrow>::Borrowed<'_>, Vec<usize>)>], output: &BTreeSet<usize>) -> Vec<Option<usize>> {
 
             // The following is .. neither clear nor performant. It should be at least one of those two things.
             let length = args.iter().flatten().next().map(|a| a.1.iter().sum()).unwrap_or(1);
             let mut counts = Vec::with_capacity(length);
             let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().copied().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
-            let mut values: Vec<Option<<Terms as columnar::Container>::Ref<'_>>> = Vec::default();
+            let mut values: Vec<Option<<Terms as columnar::Borrow>::Ref<'_>>> = Vec::default();
             for _ in 0 .. length {
                 values.clear();
                 Extend::extend(&mut values, indexs.iter_mut().enumerate().map(|(col, i)| i.as_mut().map(|j| args[col].as_ref().unwrap().0.get(j.next().unwrap()))));
@@ -548,12 +548,12 @@ pub mod logic {
 
             counts
         }
-        fn delve(&self, args: &[Option<(<Terms as columnar::Container>::Borrowed<'_>, Vec<usize>)>], output: usize) -> Options<Lists<Terms>> {
+        fn delve(&self, args: &[Option<(<Terms as columnar::Borrow>::Borrowed<'_>, Vec<usize>)>], output: usize) -> Options<Lists<Terms>> {
 
             // The following is .. neither clear nor performant. It should be at least one of those two things.
             let length = args.iter().flatten().next().map(|a| a.1.iter().sum()).unwrap_or(1);
             let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().copied().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
-            let mut values: Vec<Option<<Terms as columnar::Container>::Ref<'_>>> = Vec::default();
+            let mut values: Vec<Option<<Terms as columnar::Borrow>::Ref<'_>>> = Vec::default();
             let mut terms = Terms::default();
             let mut result: Options<Lists<Terms>> = Default::default();
             for _ in 0 .. length {
@@ -589,7 +589,7 @@ pub mod logic {
         /// Decodes a number of optional byte slices as correspondingly optional `u64` data.
         ///
         /// The method returns `None` if the number of arguments is not `K`, if the slice lengths differ, or if any exceed eight.
-        fn decode_u64<const K: usize>(args: &[Option<<Terms as columnar::Container>::Ref<'_>>]) -> Option<([Option<u64>; K], usize)> {
+        fn decode_u64<const K: usize>(args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>]) -> Option<([Option<u64>; K], usize)> {
             let mut width: Option<usize> = None;
             let mut result: [Option<u64>; K] = [None; K];
             for index in 0 .. K {
@@ -607,13 +607,13 @@ pub mod logic {
         impl super::Logic for NotEq {
             fn arity(&self) -> usize { 2 }
             fn bound(&self, _args: &BTreeSet<usize>) -> BTreeSet<usize> { Default::default() }
-            fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
+            fn count(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
                 match (&args[0], &args[1]) {
                     (Some(x), Some(y)) => { if x.as_slice() == y.as_slice() { Some(0) } else { Some(1) } },
                     _ => None,
                 }
             }
-            fn delve(&self, _args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: (usize, &mut Terms)) { panic!("NotEq asked to enumerate values"); }
+            fn delve(&self, _args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: (usize, &mut Terms)) { panic!("NotEq asked to enumerate values"); }
         }
 
         /// The relation R(x,y,z) : x * y = z, for terms all of the same length (up to eight bytes).
@@ -623,7 +623,7 @@ pub mod logic {
             fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> {
                 if args.len() > 1 || args.contains(&2) { (0 .. 3).filter(|i| !args.contains(i)).collect() } else { Default::default() }
             }
-            fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
+            fn count(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
                 // Any two+ bound terms should lead to a `Some(0)` or `Some(1)` determination.
                 if let Some((decoded, width)) = decode_u64::<3>(args) {
                     match decoded {
@@ -638,7 +638,7 @@ pub mod logic {
                 }
                 else { Some(0) }
             }
-            fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms)) {
+            fn delve(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], output: (usize, &mut Terms)) {
                 if let Some((decoded, width)) = decode_u64::<3>(args) {
                     match decoded {
                         [Some(x), Some(y),    None] => { let (mul, ovr) = u64::overflowing_mul(x, y); if !ovr && ((mul >> (8*width)) == 0) { output.1.push(&mul.to_be_bytes()[(8-width)..]) } },
@@ -661,7 +661,7 @@ pub mod logic {
         impl super::Logic for Plus {
             fn arity(&self) -> usize { 3 }
             fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { if args.len() > 1 { (0 .. 3).filter(|i| !args.contains(i)).collect() } else { Default::default() } }
-            fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
+            fn count(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
                 // Any two+ bound terms should lead to a `Some(0)` or `Some(1)` determination.
                 if let Some((decoded, width)) = decode_u64::<3>(args) {
                     match decoded {
@@ -676,7 +676,7 @@ pub mod logic {
                 }
                 else { Some(0) }
             }
-            fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms)) {
+            fn delve(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], output: (usize, &mut Terms)) {
                 if let Some((decoded, width)) = decode_u64::<3>(args) {
                     match decoded {
                         [Some(x), Some(y),    None] => { let (sum, ovr) = u64::overflowing_add(x, y); if !ovr && ((sum >> (8*width)) == 0) { output.1.push(&sum.to_be_bytes()[(8-width)..]) } },
@@ -693,7 +693,7 @@ pub mod logic {
         impl super::Logic for Range {
             fn arity(&self) -> usize { 3 }
             fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { if args.contains(&0) && args.contains(&2) && !args.contains(&1) { [1].into_iter().collect() } else { Default::default() } }
-            fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
+            fn count(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
                 if let Some((decoded, _width)) = decode_u64::<3>(args) {
                     match decoded {
                         [Some(l), None,    Some(u)] => { if l < u { Some((u-l) as usize) } else { Some(0) } },
@@ -703,7 +703,7 @@ pub mod logic {
                 }
                 else { Some(0) }
             }
-            fn delve(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: (usize, &mut Terms)) {
+            fn delve(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], output: (usize, &mut Terms)) {
                 assert_eq!(output.0, 1);
                 let length = args[0].unwrap().as_slice().len();
                 let lower: u64 = as_u64(args[0].unwrap().as_slice()).unwrap();
@@ -719,12 +719,12 @@ pub mod logic {
         impl super::Logic for Print {
             fn arity(&self) -> usize { self.0 }
             fn bound(&self, _args: &BTreeSet<usize>) -> BTreeSet<usize> { Default::default() }
-            fn count(&self, args: &[Option<<Terms as columnar::Container>::Ref<'_>>], output: &BTreeSet<usize>) -> Option<usize> { if output.is_empty() {
+            fn count(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], output: &BTreeSet<usize>) -> Option<usize> { if output.is_empty() {
                 for arg in args.iter() { print!("0x"); for byte in arg.unwrap().as_slice().iter() { print!("{:0>2x}", byte); } print!("\t"); }
                 println!();
                 Some(1)
             } else { None } }
-            fn delve(&self, _args: &[Option<<Terms as columnar::Container>::Ref<'_>>], _output: (usize, &mut Terms)) { unimplemented!() }
+            fn delve(&self, _args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: (usize, &mut Terms)) { unimplemented!() }
         }
     }
 }
