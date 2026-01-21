@@ -6,5 +6,5 @@ edition = "2024"
 [dependencies]
 columnar = "0.11"
 regex = "1.11.1"
-mimalloc = "0.1.48"
+mimalloc = { version = "0.1.48", features = ["v3"] }
 simd-csv = "0.10.3"
