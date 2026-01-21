@@ -46,12 +46,14 @@ impl Relations {
     pub fn entry(&mut self, atom: &crate::types::Atom) -> &mut FactSet<FactCollection> {
         &mut self.relations.entry(atom.name.clone()).or_default().0
     }
-    pub fn advance(&mut self) {
+    pub fn advance(&mut self, comms: &mut crate::comms::Comms) {
         for (facts, transforms) in self.relations.values_mut() {
             facts.advance();
             for (action, transform) in transforms.iter_mut() {
                 transform.stable.extend(transform.recent.take());
-                if let Some(recent) = facts.recent.as_ref().and_then(|r| r.act_on(action).flatten()) {
+                let mut acted_on = if let Some(recent) = facts.recent.as_ref() { recent.act_on(action) } else { FactLSM::default() };
+                comms.exchange(&mut acted_on);
+                if let Some(recent) = acted_on.flatten() {
                     // Non-permutations need to be deduplicated against existing facts.
                     transform.recent = if !action.is_permutation() { recent.antijoin(transform.stable.contents()).flatten() } else { Some(recent) };
                 }
@@ -67,11 +69,21 @@ impl Relations {
             print!("{:>10} {:<2$} [forms: Identity", facts.0.len(), name, max_name_len);
             for (action, _facts) in facts.1.iter() { print!(", {:?}", action); }
             println!("]");
+            for forest in facts.0.stable.contents() {
+                print!("\t");
+                for column in forest.layers.iter() {
+                    use columnar::AsBytes;
+                    print!("[ ");
+                    for (_, bytes) in column.list.borrow().as_bytes() { print!("{:?} ", bytes.len()); }
+                    print!("]\t");
+                }
+                println!();
+            }
         }
     }
 
     /// Ensures that we have an entry for this name and the associated action.
-    pub fn ensure_action(&mut self, name: &str, action: &Action<Vec<u8>>){
+    pub fn ensure_action(&mut self, comms: &mut crate::comms::Comms, name: &str, action: &Action<Vec<u8>>){
         let (base, transforms) = self.relations.entry(name.to_string()).or_default();
         if !action.is_identity() && !transforms.contains_key(action) {
             let mut fact_set = FactSet::default();
@@ -79,10 +91,13 @@ impl Relations {
             for layer in base.stable.contents() {
                 fact_set.stable.extend(layer.act_on(action));
             }
+            comms.exchange(&mut fact_set.stable);
             // Flattening deduplicates, which may be necessary as `action` may introduce collisions
             // across LSM layers.
             if let Some(stable) = fact_set.stable.flatten() { fact_set.stable.push(stable); }
-            if let Some(recent) = base.recent.as_ref().and_then(|r| r.act_on(action).flatten()) {
+            let mut acted_on = if let Some(recent) = base.recent.as_ref() { recent.act_on(action) } else { FactLSM::default() };
+            comms.exchange(&mut acted_on);
+            if let Some(recent) = acted_on.flatten() {
                 fact_set.recent = recent.antijoin(fact_set.stable.contents()).flatten();
             }
             transforms.insert(action.clone(), fact_set);
@@ -161,7 +176,7 @@ pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
     /// Applies an action to the facts, building the corresponding output.
     fn act_on(&self, action: &Action<Vec<u8>>) -> FactLSM<Self>;
     /// Joins `self` and `other` on the first `arity` columns, putting projected results in `builders`.
-    fn join<'a>(&'a self, other: &'a Self, arity: usize, projection: &[usize]) -> FactLSM<Self> { self.join_many([other].into_iter(), arity, projection) }
+    // fn join<'a>(&'a self, other: &'a Self, arity: usize, projection: &[usize]) -> FactLSM<Self> { self.join_many([other].into_iter(), arity, projection) }
     /// The subset of `self` whose facts do not start with any prefix in `others`.
     fn antijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> FactLSM<Self> where Self: 'a;
     /// The subset of `self` whose facts start with some prefix in `others`.
@@ -170,11 +185,12 @@ pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
     /// Joins `self` and `others` on the first `arity` columns, putting projected results in `builders`.
     ///
     /// The default implementation processes `others` in order, but more thoughtful implementations exist.
-    fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize]) -> FactLSM<Self> {
-        let mut result = FactLSM::default();
-        for other in others { result.extend(self.join(other, arity, projection)); }
-        result
-    }
+    fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize], conduit: crate::comms::Conduit) -> FactLSM<Self>;
+    // {
+    //     let mut result = FactLSM::default();
+    //     for other in others { result.extend(self.join(other, arity, projection)); }
+    //     result
+    // }
 }
 
 /// An evolving set of facts.
