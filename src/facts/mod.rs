@@ -370,6 +370,89 @@ pub mod radix_sort {
         }
     }
 
+    /// LSB radix sorting using "pages" rather than contiguous memory.
+    ///
+    /// Rather than expect the input in a large contiguous `[R]` we instead accept a sequence of smaller arrays (pages).
+    /// We are able to fully drain pages as we process them, repurpose empty pages, and also to populate 256 independent
+    /// pages for each byte without knowing their absolute offset in the larger array.
+    ///
+    /// This allows us to incrementally allocate data to sort, maintain a fixed working set as we sort, and to drain the
+    /// results incrementally on the way out. This avoids ever requiring twice as much memory as needs to be sorted.
+    ///
+    /// This approach also allows us to skip counting each byte pattern at each position, and we only really benefit from
+    /// knowing each position where there are at least two distinct byte patterns, which is easier to determine (maybe SIMD).
+    pub use lsb_pages::{PageBuilder, lsb_paged};
+    mod lsb_pages {
+
+        use super::Radixable;
+
+        /// A builder for the paged representation of a sequence of `R` values.
+        ///
+        /// The intended lifecycle is to create a new `PageBuilder` with a page size (try 1024), then repeatedly call `push`
+        /// with items, and finally call `done` to extract the list of pages and the bits that identify avoidable indexes.
+        /// One should likely call `lsb_paged` with a reference to the list of pages and the bits, perhaps after any further
+        /// masking of the bits that may be important (e.g. masking away "payload" bytes).
+        pub struct PageBuilder<R: Radixable, const W: usize> {
+            size: usize,        // page size.
+            diff: [bool; W],    // for each position, have we seen two distinct bytes.
+            byte: [u8; W],      // for each position, the most recently seen byte.
+            data: Vec<Vec<R>>,  // sequence of full pages.
+            page: Vec<R>,       // partial page we are assembling; at most `self.size` in length.
+        }
+        impl<R: Radixable, const W: usize> PageBuilder<R, W> {
+            /// Create a new `Self` with a specific page size.
+            pub fn new(size: usize) -> Self { Self { size, diff: [false; W], byte: [0u8; W], data: Default::default(), page: Vec::with_capacity(size) }}
+            pub fn push(&mut self, item: R) {
+                for index in 0 .. W { self.diff[index] |= self.byte[index] != item.byte(index); self.byte[index] = item.byte(index); }
+                self.page.push(item);
+                if self.page.len() >= self.size { self.data.push(std::mem::replace(&mut self.page, Vec::with_capacity(self.size))); }
+            }
+            pub fn done(mut self) -> (Vec<Vec<R>>, [bool;W]) { if !self.page.is_empty() { self.data.push(std::mem::take(&mut self.page)); } (self.data, self.diff) }
+        }
+
+        /// A page-oriented LSB radix sort, which consumes pages of `data` and shuffles into 256 streams of pages that we reassemble.
+        ///
+        /// The `data` pages should each be the same capacity, though they need not all be equally full.
+        /// The `filter` argument should be as large as `R::WIDTH`, and each position should indicate whether we should sort by this index.
+        /// The sorting happens in the reverse direction, from largest index to smallest, as this is a LSB (bottom-up) radix sort.
+        ///
+        /// The capacity of the first page in `data` will be used as the capacity for all pages; it is best if these capacities are consistent.
+        /// The drained pages from `data` will be re-used, and if their capacities vary there may be either reallocations or unused capacity.
+        pub fn lsb_paged<R: Radixable>(data: &mut Vec<Vec<R>>, filter: &[bool]) {
+
+            if data.is_empty() { return; }
+
+            let page_len = data[0].capacity();
+
+            let mut free: Vec<Vec<R>> = Vec::default();
+            let mut full: [Vec<Vec<R>>; 256] = (0 .. 256).map(|_| Default::default()).collect::<Vec<_>>().try_into().unwrap();
+            let mut part: [Vec<R>; 256] = (0 .. 256).map(|_| Vec::with_capacity(page_len)).collect::<Vec<_>>().try_into().unwrap();
+
+            for index in (0 .. R::WIDTH).rev() {
+                if filter[index] {
+                    for mut page in data.drain(..) {
+                        for item in page.drain(..) {
+                            let byte = item.byte(index) as usize;
+                            part[byte].push(item);
+                            if part[byte].len() >= page_len {
+                                full[byte].push(std::mem::replace(&mut part[byte], free.pop().unwrap_or_else(|| Vec::with_capacity(page_len))));
+                            }
+                        }
+                        free.push(page);
+                    }
+
+                    // Drain each `part` into `full`, and drain `full` into `data`.
+                    for byte in 0 .. 256 {
+                        if !part[byte].is_empty() {
+                            full[byte].push(std::mem::replace(&mut part[byte], free.pop().unwrap_or_else(|| Vec::with_capacity(page_len))));
+                        }
+                        data.append(&mut full[byte]);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn msb2<R: Radixable + Ord>(data: &mut [R]) {
         msb_inner(data, 0);
     }
