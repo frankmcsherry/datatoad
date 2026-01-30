@@ -319,6 +319,11 @@ pub mod terms {
         let mut groups = (0 .. indexs.len()).collect::<Vec<_>>();
         let mut indexs = indexs.to_vec();
 
+        // TODO:    Consider reframing as stepping through those columns that strictly advance the input column,
+        //          and for each addressing each intervening column that does not advance the input columns.
+        //          The intent would be to sort blocks of things of identical cardinality, potentially as rows
+        //          rather than each column individually, where appropriate and easy to recognize.
+
         // Each column of `projection` produces an output layer.
         projection.iter().copied().enumerate().map(|(idx, col)| {
 

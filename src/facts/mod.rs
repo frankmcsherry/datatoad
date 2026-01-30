@@ -443,10 +443,19 @@ pub mod radix_sort {
 
                     // Drain each `part` into `full`, and drain `full` into `data`.
                     for byte in 0 .. 256 {
-                        if !part[byte].is_empty() {
-                            full[byte].push(std::mem::replace(&mut part[byte], free.pop().unwrap_or_else(|| Vec::with_capacity(page_len))));
-                        }
+                        // We want to append `full[byte]` then `part[byte]`.
                         data.append(&mut full[byte]);
+                        // We may be able to copy part of `part[byte]` in rather than append the whole page.
+                        if let Some(last) = data.last_mut() {
+                            // Not helpful if there is another full page immediately afterwards.
+                            if last.len() < page_len && (byte == 255 || full[byte].is_empty()) {
+                                let to_drain = std::cmp::min(page_len - last.len(), part[byte].len());
+                                last.extend(part[byte].drain(0.. to_drain));
+                            }
+                        }
+                        if !part[byte].is_empty() {
+                            data.push(std::mem::replace(&mut part[byte], free.pop().unwrap_or_else(|| Vec::with_capacity(page_len))));
+                        }
                     }
                 }
             }
