@@ -257,11 +257,9 @@ pub mod terms {
 
     /// Produces columns in the order indicated by `projection`, for the subset of indexes in `indexs`.
     #[inline(never)]
-    fn permute_subset(in_layers: &[<Lists<Terms> as Borrow>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Rc<Layer<Terms>>> {
+    fn permute_subset(layers: &[<Lists<Terms> as Borrow>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Rc<Layer<Terms>>> {
 
-        for index in 1 .. in_layers.len() {
-            assert_eq!(in_layers[index-1].values.len(), in_layers[index].len());
-        }
+        for index in 1 .. layers.len() { assert_eq!(layers[index-1].values.len(), layers[index].len()); }
 
         // Determine a leading prefix of the form `0 ..`. These columns can be extracted efficiently.
         let mut prefix = 0;
@@ -273,99 +271,112 @@ pub mod terms {
 
             let mut bounds = indexs.iter().copied().map(|i| (i,i+1)).collect::<Vec<_>>();
             for layer in 0 .. prefix {
-                let mut out_layer = <Lists::<Terms> as Container>::with_capacity_for([in_layers[layer]].into_iter());
-                for (lower, upper) in bounds.iter().copied() { out_layer.extend_from_self(in_layers[layer], lower .. upper); }
+                let mut out_layer = <Lists::<Terms> as Container>::with_capacity_for([layers[layer]].into_iter());
+                for (lower, upper) in bounds.iter().copied() { out_layer.extend_from_self(layers[layer], lower .. upper); }
                 output.push(Rc::new(Layer { list: out_layer }));
-                crate::facts::trie::layers::advance_bounds::<Terms>(in_layers[layer], &mut bounds);
+                crate::facts::trie::layers::advance_bounds::<Terms>(layers[layer], &mut bounds);
             }
 
             // If columns remain, we should reform the input and call into `permute_subset_inner`.
             if projection.len() > prefix {
-                let in_layers2 = &in_layers[prefix..];
+                let layers2 = &layers[prefix..];
                 let projection2 = projection[prefix..].iter().map(|c| *c - prefix).collect::<Vec<_>>();
                 let indexs2 = bounds.iter().copied().flat_map(|(l,u)| l..u).collect::<Vec<_>>();
-                output.extend(permute_subset_inner(in_layers2, &projection2, &indexs2));
+                let groups = (0 .. indexs2.len()).collect::<Vec<_>>();
+                output.extend(permute_subset_inner(layers2, &projection2, &groups, &indexs2));
             }
 
             output
         }
-        else { permute_subset_inner(in_layers, projection, indexs) }
+        else {
+            let groups = (0 .. indexs.len()).collect::<Vec<_>>();
+            permute_subset_inner(layers, projection, &groups, indexs)
+        }
     }
 
-    /// Produces the sequence of layers described by `projection` for the subset of root indexes `indexs` of `in_layers`.
+    /// Permutes the columns of `layers` to match `projection`, while subsetting by `starts` and grouping by `groups`.
     ///
-    /// The implementation is based on the observation that the columns in `projection` come in one of two forms: they are
-    /// either strictly greater than all prior column indexes in `projection` or they are not. In the former case we must
-    /// expand the number of paths under discussion by moving indexes forward to the indicated column, and in the latter we
-    /// only need to advance corresponding values of a prior column forward 1:1 to the current indexes.
+    /// The `layers` argument describes a collection of facts with as many columns as there are layers, numbered in that order.
+    /// The `projection` argument articulates the intended subset and output order of those columns,
     #[inline(never)]
-    fn permute_subset_inner(in_layers: &[<Lists<Terms> as Borrow>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Rc<Layer<Terms>>> {
+    fn permute_subset_inner(layers: &[<Lists<Terms> as Borrow>::Borrowed<'_>], projection: &[usize], groups: &[usize], starts: &[usize]) -> Vec<Rc<Layer<Terms>>> {
 
-        if projection.is_empty() { return Vec::default(); }
+        // Informally, the plan is to move through `projection`, repeatedly taking the next layer index, and then all layer indexes less or equal to it.
+        // The less-or-equal layers each provide exactly one value for each position in the "next" layer, and call for different logic than that layer.
+        // Whenever we discover a next "next layer", we may have multiple values for each position, and need to invoke the
 
         // The plan is to maintain a list `groups` of ordering/grouping identifiers that will correspond with the subset of
-        // items in some maximum layer in `in_layers` determined by starting from `indexs`.
+        // items in some maximum layer in `layers` determined by starting from `starts`.
         // As these paths are shuffled based on `projection`, `group` will reveal where each input path has ended up in the output.
-        // As the maximum layer of `in_layers` advances we'll need to update (and likely expand) `group` to speak to paths identified by that layer's items.
+        // As the maximum layer of `layers` advances we'll need to update (and likely expand) `group` to speak to paths identified by that layer's items.
 
         use crate::facts::trie::advance_bounds;
 
-        // Retain the input indexes, from which we'll need to restart.
-        let in_idxs = indexs;
+        let mut groups_list_layer = 0;
+        let mut groups = groups.to_vec();
 
-        // Group always tracks the subset of lists at some layer; initially the 0th layer.
-        // This will update as soon as we produce any columns, and will track the largest column index observed, plus one.
-        let mut group_list_layer = 0;
-        let mut groups = (0 .. indexs.len()).collect::<Vec<_>>();
-        let mut indexs = indexs.to_vec();
+        let mut result = Vec::with_capacity(projection.len());
 
-        // TODO:    Consider reframing as stepping through those columns that strictly advance the input column,
-        //          and for each addressing each intervening column that does not advance the input columns.
-        //          The intent would be to sort blocks of things of identical cardinality, potentially as rows
-        //          rather than each column individually, where appropriate and easy to recognize.
+        // The algorithmic structure is to move forward through `projection`, maintaining `groups` as we go.
+        // Each column index greater than others we've seen will need to expand both `groups` to track its lists.
+        // Column indexes not greater than ones we've seen instead need to project their layers forward to meet `groups`.
 
-        // Each column of `projection` produces an output layer.
-        projection.iter().copied().enumerate().map(|(idx, col)| {
+        let mut projection_idx = 0;
+        while projection_idx < projection.len() {
 
-            // The column will advance `group_list_layer` if it is equal or greater, as we must move to that item layer.
-            if col < group_list_layer {
+            let col = projection[projection_idx];
+
+            // First, find the ranges of item identifiers in layer `groups_list_layer`, by projecting forward.
+            let mut idents = starts.iter().copied().map(|i| (i,i+1)).collect::<Vec<_>>();
+            advance_bounds::<Terms>(&layers[..groups_list_layer], &mut idents);
+            // Next determine the number of repetitions needed for each group identifier, by projecting forward.
+            assert_eq!(groups.len(), idents.iter().map(|(l,u)| u-l).sum());
+            let mut bounds = Vec::with_capacity(groups.len());
+            bounds.extend(idents.iter().copied().flat_map(|(l,u)| (l..u).map(|i| (i,i+1))));
+            advance_bounds::<Terms>(&layers[groups_list_layer .. col+1], &mut bounds);
+            // Explicitly repeat each group identifier the appropriate number of times.
+            let new_count = bounds.iter().copied().map(|(l,u)| u-l).sum();
+            let mut new_groups = Vec::with_capacity(new_count);
+            let mut indexs = Vec::with_capacity(new_count);
+            new_groups.extend(groups.iter().copied().zip(bounds.iter().map(|(l,u)| u-l)).flat_map(|(g,c)| std::iter::repeat(g).take(c)));
+            indexs.extend(bounds.iter().copied().flat_map(|(l,u)| l..u));
+            groups = new_groups;
+            groups_list_layer = col+1;
+
+            let last = projection_idx == projection.len() - 1;
+            result.push(Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(layers[col], &mut groups, &indexs, last) }));
+
+            projection_idx += 1;
+
+            // TODO:    Consider fusing this work into the preceding `sort_terms`, as these values will be 1:1 with those entries.
+            //          This would require a more advanced `sort_terms` implementation, one capable of accepting a list of layers.
+            //          The advantage would be fewer (but larger) total rounds of sorting, nearly removing the cost of 1:1 columns.
+
+            // For as long as column indexes do not advance, we project values forward 1:1 to meet `groups`.
+            while projection_idx < projection.len() && projection[projection_idx] < groups_list_layer {
+
+                let col = projection[projection_idx];
+
                 // First find the ranges of item identifiers in layer `col` we'll want to involve, by projecting forward.
-                let mut idents = in_idxs.iter().copied().map(|i| (i,i+1)).collect::<Vec<_>>();
-                advance_bounds::<Terms>(&in_layers[..col+1], &mut idents);
+                let mut idents = starts.iter().copied().map(|i| (i,i+1)).collect::<Vec<_>>();
+                advance_bounds::<Terms>(&layers[..col+1], &mut idents);
                 // Next determine the number of repetitions needed for each individual identifier, by projecting forward.
                 let mut bounds = Vec::with_capacity(idents.iter().map(|(l,u)| u-l).sum());
                 bounds.extend(idents.iter().copied().flat_map(|(l,u)| (l..u).map(|i| (i,i+1))));
-                advance_bounds::<Terms>(&in_layers[col+1..group_list_layer], &mut bounds);
+                advance_bounds::<Terms>(&layers[col+1..groups_list_layer], &mut bounds);
                 // Explicitly repeat each item identifier from layer `col` the appropriate number of times.
                 // The length of `indexs` does not increase, so we only need to clear it and refill it.
                 indexs.clear();
                 indexs.extend(idents.iter().copied().flat_map(|(l,u)| l..u).zip(bounds.iter().copied().map(|(l,u)| u-l)).flat_map(|(i,c)| std::iter::repeat(i).take(c)));
+
+                let last = projection_idx == projection.len() - 1;
+                result.push(Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(layers[col], &mut groups, &indexs, last) }));
+
+                projection_idx += 1;
             }
-            else {
-                // First, find the ranges of item identifiers in layer `group_list_layer`, by projecting forward.
-                let mut idents = in_idxs.iter().copied().map(|i| (i,i+1)).collect::<Vec<_>>();
-                advance_bounds::<Terms>(&in_layers[..group_list_layer], &mut idents);
-                // Next determine the number of repetitions needed for each group identifier, by projecting forward.
-                assert_eq!(groups.len(), idents.iter().map(|(l,u)| u-l).sum());
-                let mut bounds = Vec::with_capacity(groups.len());
-                bounds.extend(idents.iter().copied().flat_map(|(l,u)| (l..u).map(|i| (i,i+1))));
-                advance_bounds::<Terms>(&in_layers[group_list_layer .. col+1], &mut bounds);
-                // Explicitly repeat each group identifier the appropriate number of times.
-                let new_count = bounds.iter().copied().map(|(l,u)| u-l).sum();
-                let mut new_groups = Vec::with_capacity(new_count);
-                let mut new_indexs = Vec::with_capacity(new_count);
-                new_groups.extend(groups.iter().copied().zip(bounds.iter().map(|(l,u)| u-l)).flat_map(|(g,c)| std::iter::repeat(g).take(c)));
-                new_indexs.extend(bounds.iter().copied().flat_map(|(l,u)| l..u));
-                groups = new_groups;
-                indexs = new_indexs;
-                group_list_layer = col+1
-            }
+        }
 
-            let last = idx+1 == projection.len();
-            Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(in_layers[col], &mut groups, &indexs, last) })
-
-        }).collect()
-
+        result
     }
 
     /// Aligns blocks of `self` and `other` by their first `arity` columns, and applies supplied projections.
