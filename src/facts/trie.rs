@@ -283,15 +283,58 @@ pub mod terms {
                 let projection2 = projection[prefix..].iter().map(|c| *c - prefix).collect::<Vec<_>>();
                 let indexs2 = bounds.iter().copied().flat_map(|(l,u)| l..u).collect::<Vec<_>>();
                 let groups = (0 .. indexs2.len()).collect::<Vec<_>>();
-                output.extend(permute_subset_inner(layers2, &projection2, &groups, &indexs2));
+                output.extend(permute_subset_scale(layers2, &projection2, &groups, &indexs2));
             }
 
             output
         }
         else {
             let groups = (0 .. indexs.len()).collect::<Vec<_>>();
-            permute_subset_inner(layers, projection, &groups, indexs)
+            permute_subset_scale(layers, projection, &groups, indexs)
         }
+    }
+
+    /// A trampoline for permutation, that prepares the work we have to do in the event that it is too much to do at once.
+    fn permute_subset_scale(layers: &[<Lists<Terms> as Borrow>::Borrowed<'_>], projection: &[usize], groups: &[usize], starts: &[usize]) -> Vec<Rc<Layer<Terms>>> {
+
+        // There are many ways the incoming `[(group, start)]` asks can be overwhelming.
+        // We'll handle one common special case first, to try and learn a bit about how to do this efficiently.
+        // A.   If `groups` has only one value, we can convert the bounds of the first layer to 1:1, and expand `groups` and `starts` to reference the values.
+        //      We are essentially flattening the first layer, retaining the grouping information,
+        if groups.len() == 1 && layers.last().map(|l| l.values.len()).unwrap_or(0) > 100_000_000 {
+
+            // Establish advance bounds, groups, starts.
+            let mut bounds = starts.iter().map(|i| (*i, i+1)).collect::<Vec<_>>();
+            crate::facts::trie::advance_bounds::<Terms>(&layers[..1], &mut bounds);
+            let mut new_groups: Vec<usize> = Vec::with_capacity(bounds.iter().map(|(l,u)| u-l).sum());
+            let mut new_starts: Vec<usize> = Vec::with_capacity(bounds.iter().map(|(l,u)| u-l).sum());
+            new_groups.extend(bounds.iter().copied().zip(groups.iter()).flat_map(|((l,u),g)| std::iter::repeat(*g).take(u-l)));
+            new_starts.extend(bounds.iter().copied().flat_map(|(l,u)| l .. u));
+
+            // Convert the first layer from 1:m to 1:1.
+            let values = layers.last().unwrap().values.len() as u64;
+            let stride = columnar::primitive::offsets::Strides::new(1, values);
+            let mut layers = layers.to_vec();
+            layers[0].bounds = stride.borrow();
+
+            // Establish sizes of each new start.
+            let mut new_bounds = new_starts.iter().map(|i| (*i,i+1)).collect::<Vec<_>>();
+            crate::facts::trie::advance_bounds::<Terms>(&layers[1..], &mut new_bounds);
+
+            let mut merged: FactLSM<Forest<Terms>> = FactLSM::default();
+            let mut cursor = 0;
+            while cursor < new_starts.len() {
+                let mut count = 0;
+                let finger = cursor;
+                while cursor < new_bounds.len() && count < 100_000_000 { count += new_bounds[cursor].1 - new_bounds[cursor].0; cursor += 1; }
+                let layers = permute_subset_inner(&layers, projection, &new_groups[finger .. cursor], &new_starts[finger .. cursor]);
+                merged.push(layers.try_into().unwrap());
+            }
+
+            merged.flatten().unwrap().layers
+
+        }
+        else { permute_subset_inner(layers, projection, groups, starts) }
     }
 
     /// Permutes the columns of `layers` to match `projection`, while subsetting by `starts` and grouping by `groups`.
