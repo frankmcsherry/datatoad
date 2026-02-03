@@ -12,4 +12,4 @@ regex = "1.11.1"
 mimalloc = { version = "0.1.48", features = ["v3"] }
 simd-csv = "0.10.3"
 timely_bytes = "0.25.1"
-timely_communication = "0.25.1"
+timely_communication = "0.26"
