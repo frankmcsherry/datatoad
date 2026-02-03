@@ -42,7 +42,6 @@ impl Comms {
     pub fn broadcast(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
         if let Some(comms) = self.ether.as_mut() {
             let mut comms = comms.borrow_mut();
-            // println!("channel[{:?}] broadcast at worker {:?}", self.count-1, comms.index());
             let (senders, mut receiver) = comms.allocate(self.count);
             let mut countdown = senders.len();
             self.count += 1;
@@ -99,7 +98,6 @@ impl Channel {
         comms.receive();
         // Receive data first, to allow early consolidation.
         while let Some(message) = self.recv.recv() {
-            // println!("recv: {:?} ({:?}; {:?})", message.length_in_bytes(), comms.index(), self.index);
             if let Some(fact) = message.facts {
                 stash.push(fact.into_iter().map(|l| std::rc::Rc::new(Layer { list: l })).collect::<Vec<_>>().try_into().unwrap());
             }
@@ -113,7 +111,6 @@ impl Channel {
                 bools.extend((0 .. facts.layers[0].list.values.len()).map(|i| (*facts.layers[0].list.values.borrow().get(i).as_slice().last().unwrap() as usize) % comms.peers() == index));
                 if let Some(facts) = facts.clone().retain_core(1, bools.clone()).flatten() {
                     let message = FactMessage { facts: Some(facts.layers.into_iter().map(|l| Rc::unwrap_or_clone(l).list).collect::<Vec<_>>()) };
-                    // println!("send: {:?} ({:?} -> {:?})", message.length_in_bytes(), comms.index(), index);
                     sender.send(message);
                 }
                 bools.clear();
@@ -138,17 +135,12 @@ pub struct Conduit {
 impl Conduit {
     /// Supplies facts to the conduit, which are exchanged and then collected.
     pub fn extend(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
-        // let init_len = facts.contents().map(|l| l.len()).sum::<usize>();
         if let Some(channel) = self.comms.as_mut() { channel.exchange(facts); }
-        // let post_len = facts.contents().map(|l| l.len()).sum::<usize>();
-        // println!("extended: {:?} -> {:?}", init_len, post_len);
         self.facts.extend(std::mem::take(facts));
     }
     /// Finalizes the facts awaiting receipt from all other participants.
     pub fn finish(mut self) -> FactLSM<Forest<Terms>> {
         if let Some(channel) = self.comms { self.facts.extend(channel.complete()); }
-        // let post_len = self.facts.contents().map(|l| l.len()).sum::<usize>();
-        // println!("completed: {:?}", post_len);
         self.facts
     }
 }

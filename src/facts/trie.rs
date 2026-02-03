@@ -438,9 +438,7 @@ pub mod terms {
         mut conduit: crate::comms::Conduit,
     ) -> FactLSM<Forest<Terms>> {
 
-        if thats.len() == 0 { return Default::default(); }
-        if this.len() < arity { return Default::default(); }
-        if this.last().is_some_and(|l| l.is_empty()){ return Default::default(); }
+        if thats.len() == 0 { return conduit.finish(); }
 
         for that in thats.iter() { assert_eq!(that.len(), thats[0].len()); }
 
@@ -485,7 +483,7 @@ pub mod terms {
         }
 
         // Ensures that afterwards there will be outputs.
-        if aligneds.last().unwrap().is_empty() { return Default::default(); }
+        if aligneds.last().unwrap().is_empty() { return conduit.finish(); }
 
         // Produce `this_i` and `this_values`, indexes into columns in the order they appear in `projection`.
         let mut this_i = aligneds.last().unwrap().clone();

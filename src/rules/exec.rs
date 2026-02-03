@@ -90,7 +90,6 @@ impl<T: Ord+Copy+std::fmt::Debug> Salad<T> {
         // Maybe necessary if `permutation` is `0 .. k` for k less than the input arity.
         if let PermuteMode::Prune = mode { salad.truncate(permutation.len()); }
 
-        // println!("exchanging[{:?}]: arity {:?}", comms.next_id(), salad.terms);
         comms.exchange(&mut salad.facts);
     }
 }
