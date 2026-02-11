@@ -92,17 +92,8 @@ impl Channel {
     }
     /// Exchanges facts with other participants, drawing from and refilling `facts`.
     fn exchange(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
-        let mut stash = FactLSM::default();
 
         let mut comms = self.comms.borrow_mut();
-        comms.receive();
-        // Receive data first, to allow early consolidation.
-        while let Some(message) = self.recv.recv() {
-            if let Some(fact) = message.facts {
-                stash.push(fact.into_iter().map(|l| std::rc::Rc::new(Layer { list: l })).collect::<Vec<_>>().try_into().unwrap());
-            }
-            else { self.count -= 1; }
-        }
 
         // TODO: put self-sends back in to `facts`.
         if let Some(facts) = facts.flatten() {
@@ -116,9 +107,18 @@ impl Channel {
                 bools.clear();
             }
         }
-        comms.release();
 
-        facts.extend(stash);
+        comms.receive();
+
+        // Receive data first, to allow early consolidation.
+        while let Some(message) = self.recv.recv() {
+            if let Some(fact) = message.facts {
+                facts.push(fact.into_iter().map(|l| std::rc::Rc::new(Layer { list: l })).collect::<Vec<_>>().try_into().unwrap());
+            }
+            else { self.count -= 1; }
+        }
+
+        comms.release();
     }
 }
 

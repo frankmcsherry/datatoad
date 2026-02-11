@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 
 use datatoad::{parse, types};
 
-// use mimalloc::MiMalloc;
+use mimalloc::MiMalloc;
 
-// #[global_allocator]
-// static GLOBAL: MiMalloc = MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() {
 

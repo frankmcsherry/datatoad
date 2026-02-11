@@ -69,16 +69,6 @@ impl Relations {
             print!("{:>10} {:<2$} [forms: Identity", facts.0.len(), name, max_name_len);
             for (action, _facts) in facts.1.iter() { print!(", {:?}", action); }
             println!("]");
-            for forest in facts.0.stable.contents() {
-                print!("\t");
-                for column in forest.layers.iter() {
-                    use columnar::AsBytes;
-                    print!("[ ");
-                    for (_, bytes) in column.list.borrow().as_bytes() { print!("{:?} ", bytes.len()); }
-                    print!("]\t");
-                }
-                println!();
-            }
         }
     }
 

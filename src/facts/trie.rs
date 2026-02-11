@@ -531,7 +531,7 @@ pub mod terms {
             this_bounds.iter().zip(that_bounds.iter()).map(|((l0,u0),(l1,u1))| (u0-l0) * (u1-l1)).collect::<Vec<_>>()
         };
 
-        let mut temp_lsm: FactLSM<Forest<Terms>> = Default::default();
+        let mut output_lsm: FactLSM<Forest<Terms>> = Default::default();
         let mut aligned_pos = 0;
         while aligned_pos < counts.len() {
 
@@ -619,11 +619,10 @@ pub mod terms {
                 Rc::new(Layer { list })
             }).collect::<Vec<_>>();
 
-            temp_lsm.push(layers.try_into().expect("non-empty intersection guarding"));
-            conduit.extend(&mut temp_lsm);
+            output_lsm.push(layers.try_into().expect("non-empty intersection guarding"));
+            conduit.extend(&mut output_lsm);
         }
 
-        // output_lsm
         conduit.finish()
     }
 
@@ -772,7 +771,6 @@ pub mod terms {
             if others.is_empty() { return if semi { Default::default() } else { self.into() }; }
             let other_arity = others[0].len();
             others.iter().for_each(|other| {
-                if self.arity() < other.len() { println!("{:?} < {:?}", self.arity(), other.len()); }
                 assert!(self.arity() >= other.len());
                 assert_eq!(other.len(), other_arity);
             });
