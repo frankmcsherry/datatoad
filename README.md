@@ -67,11 +67,11 @@ Also for me, the PostgreSQL query is still running five minutes later, and has s
 You may have noticed the `:range` and `:plus` above, and wondered what they represent?
 Both are simply relations, but whose contents are backed by logic rather than by data.
 
-* `:range(a, b, c)` contains triples where `a <= b < c`.
-* `:plus(a, b, c))` contains triples where `a + b = c`.
+* `:range(a, b, c)` contains all triples where `a <= b < c`.
+* `:plus(a, b, c))` contains all triples where `a + b = c`.
 
 These two relations are unbounded in size, and we don't store them explicitly.
-Instead, they fit behind a abstraction for relations that is sufficient to participate in worst-case optimal joins.
+Instead, they fit behind an abstraction for relations that is sufficient to participate in worst-case optimal joins.
 
 As another example, the following creates `data(s, r)` of sensors `s` whose readings `r` are either numerous or singular.
 ```
@@ -79,7 +79,7 @@ data(s, r) :- :range(0, s, 256), :range(0, r, 65536).
 data(s, s) :- :range(256, s, 65536).
 ```
 We follow this with `asks(s, l, u)` of queries for the readings of a sensor `s` that lie between a lower `l` and upper `u` bound.
-Reasonably, we will use a narrow interval for sensors with many measurements, and a wide interval for the sensors with singular measurements.
+Reasonably, we will use a narrow interval for sensors with many readings, and a wide interval for the sensors with singular measurements.
 ```
 asks(s, 0, 256) :- :range(0, s, 256).
 asks(s, 0, 65536) :- :range(256, s, 65536).
@@ -93,13 +93,15 @@ How might this unfold in a language like SQL?
 
 In one implementation, we might join `asks` and `data`, and then apply the predicate `WHERE r IS BETWEEN l AND u`.
 This has the potential to enumerate all of `data`, the majority of which will be from sensors with many measurements, the majority of which we will discard.
-
 An alternate implementation might use `generate_series(l, u)` to produce for each `s` the specific values that we are looking for.
-This has the potential to immediately find the one value for each sensor with many measurements and few target targets, but it would be incredibly inefficient for the many sensors with wide query ranges.
+This has the potential to immediately find the few targets for each sensor with many readings, but it would be incredibly inefficient for the many sensors with wide query ranges.
+Neither one seems better than the other, nor either a particularly great idea.
 
 Datatoad's worst-case optimal join computes `back` by choosing for each `s` independently the approach above that produces fewer intermediate results.
 It either enumerates the sensor's readings, or enumerates the ask's range, whichever are fewer.
-The application of worst-case optimal algorithms to logical relations rather than relations defined by data is new to me, and beats having to write either of `BETWEEN` or `generate_series`, to say nothing of having to write both.
+It does this because `:range(l, r, u)` presents as a relation that can participate in the worst-case optimal join.
+
+The application of worst-case optimal algorithms to logical relations not defined by data is new to me, and beats having to write either of `BETWEEN` or `generate_series`, to say nothing of having to write both.
 
 PostgreSQL is now at 30m on each of the three processes.
 

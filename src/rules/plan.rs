@@ -198,9 +198,9 @@ pub trait Strategy<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> {
             if boxed_atoms[&atom].terms() == boxed_atoms[&atom].ground(&Default::default()) {
                 let mut atom_plan = Self::plan_atom(atom, boxed_atoms, &terms_to_atoms);
 
-                // Fuse plan stages with identical atoms.
+                // Fuse plan stages with identical single atoms.
                 for index in (1 .. atom_plan.len()).rev() {
-                    if atom_plan[index].0 == atom_plan[index-1].0 {
+                    if atom_plan[index].0 == atom_plan[index-1].0 && atom_plan[index].0.len() == 1 {
                         let stage = atom_plan.remove(index);
                         atom_plan[index-1].1.extend(stage.1);
                     }

@@ -694,9 +694,15 @@ pub mod logic {
             fn arity(&self) -> usize { 3 }
             fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { if args.contains(&0) && args.contains(&2) && !args.contains(&1) { [1].into_iter().collect() } else { Default::default() } }
             fn count(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
+                // `decode_u64` returns `None` on all input `None`, meaning we must handle that specially to avoid a `Some(0)` response.
+                // TODO: Also, calling this method with all `None` seems like a bad use of everyone's time; find out why and prevent it.
+                if args == &[None, None, None] { return None; }
                 if let Some((decoded, _width)) = decode_u64::<3>(args) {
                     match decoded {
                         [Some(l), None,    Some(u)] => { if l < u { Some((u-l) as usize) } else { Some(0) } },
+                        // TODO: Seemingly, without these next two cases we get wrong results, which seems odd and not the intended/understood implementation requirement.
+                        [None,    Some(v), Some(u)] => { if v < u { None } else { Some(0) } },
+                        [Some(l), Some(v), None   ] => { if l <= v{ None } else { Some(0) } },
                         [Some(l), Some(v), Some(u)] => { if l <= v && v < u { Some(1) } else { Some(0) } },
                         _ => None,
                     }
