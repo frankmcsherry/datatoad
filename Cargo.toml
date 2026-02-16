@@ -3,11 +3,9 @@ name = "datatoad"
 version = "0.1.0"
 edition = "2024"
 
-[profile.release]
-debug = true
-
 [dependencies]
 columnar = "0.11"
+getopts = { version = "0.2.24" }
 regex = "1.11.1"
 mimalloc = { version = "0.1.48", features = ["v3"] }
 simd-csv = "0.10.3"
