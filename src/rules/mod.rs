@@ -167,6 +167,8 @@ pub mod data {
 
             let prefix = other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
             salad.align_to(comms, other_terms[..prefix].iter().copied());
+            // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
+            assert!(prefix > 0 || comms.peers() == 1);
             if let Some(mut delta) = salad.facts.flatten() {
                 let length = if prefix > 0 { delta.layer(prefix-1).list.values.len() } else { 1 };
                 let mut counts = vec![0; length];
@@ -236,6 +238,8 @@ pub mod data {
             let (my_facts, my_terms) = self;
             let prefix = my_terms.iter().take_while(|t| salad.terms.contains(t)).count();
             salad.align_to(comms, my_terms[..prefix].iter().copied());
+            // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
+            assert!(prefix > 0 || comms.peers() == 1);
             if !terms.is_empty() {
                 // join with atom: permute `salad.terms` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
                 let conduit = comms.conduit();
@@ -289,6 +293,8 @@ pub mod antijoin {
             let (my_facts, my_terms) = &self.0;
             let prefix = my_terms.iter().take_while(|t| salad.terms.contains(t)).count();
             salad.align_to(comms, my_terms[..prefix].iter().copied());
+            // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
+            assert!(prefix > 0 || comms.peers() == 1);
             if let Some(delta) = salad.facts.flatten() {
                 assert!(terms.is_empty());
                 let others = my_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();

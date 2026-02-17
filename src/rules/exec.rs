@@ -139,6 +139,9 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
             wco_join_inner(comms, &mut prefix, terms, atoms, potato, &shared_target);
             prefix.align_to(comms, salad.terms[..shared.len()].iter().copied());
 
+            // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
+            assert!(shared.len() > 0 || comms.peers() == 1);
+
             // Re-install sequestered terms.
             let conduit = comms.conduit();
             if let Some(facts) = salad.facts.flatten() {

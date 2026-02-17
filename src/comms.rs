@@ -25,7 +25,7 @@ impl Comms {
             let (sends, recv) = comms.borrow_mut().allocate(self.count);
             self.count += 1;
             let count = sends.len();
-            Channel { comms: comms.clone(), sends, recv, count, index: self.count-1 }
+            Channel { comms: comms.clone(), sends, recv, count }
         });
         Conduit { comms, facts: FactLSM::default() }
     }
@@ -79,7 +79,6 @@ pub struct Channel {
     sends: Vec<Box<dyn Push<FactMessage>>>,
     recv: Box<dyn Pull<FactMessage>>,
     count: usize,
-    index: usize,
 }
 
 impl Channel {
