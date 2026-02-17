@@ -46,7 +46,7 @@ impl Comms {
             let mut countdown = senders.len();
             self.count += 1;
             if let Some(fact) = facts.flatten() {
-                for mut sender in senders { sender.send(FactMessage { facts: Some(fact.layers.iter().map(|l| l.list.clone()).collect::<Vec<_>>()) } ); }
+                for mut sender in senders { sender.send(FactMessage { facts: Some((0 .. fact.arity()).map(|i| fact.layer(i).list.clone()).collect::<Vec<_>>()) } ); }
             }
             else {
                 for mut sender in senders { sender.send(FactMessage { facts: None } ); }
@@ -99,9 +99,11 @@ impl Channel {
         if let Some(facts) = facts.flatten() {
             let mut bools: std::collections::VecDeque<bool> = Default::default();
             for (index, sender) in self.sends.iter_mut().enumerate() {
-                bools.extend((0 .. facts.layers[0].list.values.len()).map(|i| (*facts.layers[0].list.values.borrow().get(i).as_slice().last().unwrap() as usize) % comms.peers() == index));
+                bools.extend((0 .. facts.layer(0).list.values.len()).map(|i| (*facts.layer(0).list.values.borrow().get(i).as_slice().last().unwrap() as usize) % comms.peers() == index));
                 if let Some(facts) = facts.clone().retain_core(1, bools.clone()).flatten() {
-                    let message = FactMessage { facts: Some(facts.layers.into_iter().map(|l| Rc::unwrap_or_clone(l).list).collect::<Vec<_>>()) };
+                    let layers = (0 .. facts.arity()).map(|i| facts.layer(i).clone()).collect::<Vec<_>>();
+                    drop(facts);
+                    let message = FactMessage { facts: Some(layers.into_iter().map(|l| Rc::unwrap_or_clone(l).list).collect::<Vec<_>>()) };
                     sender.send(message);
                 }
                 bools.clear();

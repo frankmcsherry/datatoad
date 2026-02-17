@@ -32,7 +32,7 @@ use crate::facts::Lists;
 /// To represent an optionally empty collection consider an `Option<Forest<C>>` or
 /// a `FactLSM<Forest<C>>`.
 #[derive(Clone, Debug)]
-pub struct Forest<C> { pub layers: Vec<Rc<Layer<C>>> }
+pub struct Forest<C> { layers: Vec<Rc<Layer<C>>> }
 
 impl<C: Container> Forest<C> {
 
