@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 columnar = "0.11"
+getopts = { version = "0.2.24" }
 regex = "1.11.1"
 mimalloc = { version = "0.1.48", features = ["v3"] }
 simd-csv = "0.10.3"
+timely_bytes = { version = "0.26", path = "../timely-dataflow/bytes" }
+timely_communication = { version = "0.26", path = "../timely-dataflow/communication" }

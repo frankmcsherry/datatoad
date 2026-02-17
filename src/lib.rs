@@ -1,6 +1,7 @@
 pub mod parse;
 pub mod facts;
 pub mod rules;
+pub mod comms;
 
 pub mod types {
 
@@ -76,6 +77,7 @@ pub mod types {
     pub struct State {
         pub rules: Vec<(Rule, Vec<std::time::Duration>)>,
         pub facts: facts::Relations,
+        pub comms: super::comms::Comms,
     }
 
     impl State {
@@ -83,18 +85,25 @@ pub mod types {
         pub fn update(&mut self) {
             self.advance();
             while self.active() {
-                for (rule, durs) in self.rules.iter_mut() {
+                for index in 0 .. self.rules.len() {
                     let timer = std::time::Instant::now();
-                    crate::rules::implement(rule, false, &mut self.facts);
-                    durs.push(timer.elapsed());
+                    self.implement(&self.rules[index].0.clone(), false);
+                    self.rules[index].1.push(timer.elapsed());
                 }
                 self.advance();
             }
         }
 
-        pub fn advance(&mut self) { self.facts.advance();}
+        pub fn extend_facts(&mut self, atom: &Atom, mut facts: crate::facts::FactLSM<crate::facts::Forest<crate::facts::Terms>>) {
+            self.comms.exchange(&mut facts);
+            if let Some(columns) = facts.flatten() {
+                self.facts.entry(&atom).extend([columns]);
+            }
+        }
 
-        fn active(&self) -> bool { self.facts.active() }
+        pub fn advance(&mut self) { self.facts.advance(&mut self.comms);}
+
+        fn active(&mut self) -> bool { self.comms.any(self.facts.active()) }
 
         pub fn extend(&mut self, rules: impl IntoIterator<Item=Rule>) {
             for rule in rules.into_iter() { self.push(rule); }
@@ -123,7 +132,7 @@ pub mod types {
             }
             else {
                 let timer = std::time::Instant::now();
-                crate::rules::implement(&rule, true, &mut self.facts);
+                self.implement(&rule, true);
                 self.rules.push((rule, vec![timer.elapsed()]));
             }
         }

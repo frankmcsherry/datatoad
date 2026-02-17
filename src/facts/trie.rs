@@ -435,11 +435,10 @@ pub mod terms {
         thats: &[&[<Lists<Terms> as Borrow>::Borrowed<'_>]],
         arity: usize,
         projection: &[usize],
+        mut conduit: crate::comms::Conduit,
     ) -> FactLSM<Forest<Terms>> {
 
-        if thats.len() == 0 { return Default::default(); }
-        if this.len() < arity { return Default::default(); }
-        if this.last().is_some_and(|l| l.is_empty()){ return Default::default(); }
+        if thats.len() == 0 { return conduit.finish(); }
 
         for that in thats.iter() { assert_eq!(that.len(), thats[0].len()); }
 
@@ -462,7 +461,7 @@ pub mod terms {
             }
             let new_thats = new_thats.iter().map(|x| &x[..]).collect::<Vec<_>>();
             let new_proj = projection.iter().map(|c| if *c < this.len() { *c + 1 } else { *c + 2 }).collect::<Vec<_>>();
-            return join_cols(&new_this, &new_thats, arity+1, &new_proj);
+            return join_cols(&new_this, &new_thats, arity+1, &new_proj, conduit);
         }
 
 
@@ -484,7 +483,7 @@ pub mod terms {
         }
 
         // Ensures that afterwards there will be outputs.
-        if aligneds.last().unwrap().is_empty() { return Default::default(); }
+        if aligneds.last().unwrap().is_empty() { return conduit.finish(); }
 
         // Produce `this_i` and `this_values`, indexes into columns in the order they appear in `projection`.
         let mut this_i = aligneds.last().unwrap().clone();
@@ -621,9 +620,10 @@ pub mod terms {
             }).collect::<Vec<_>>();
 
             output_lsm.push(layers.try_into().expect("non-empty intersection guarding"));
+            conduit.extend(&mut output_lsm);
         }
 
-        output_lsm
+        conduit.finish()
     }
 
     /// For a list of tries with the same shape, extract lists at `[index]` and merge by `[group]`, yielding one sequence of layers in `projection` order.
@@ -738,10 +738,10 @@ pub mod terms {
             result.into()
         }
 
-        fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize]) -> FactLSM<Self> {
+        fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize], conduit: crate::comms::Conduit) -> FactLSM<Self> {
             let others = others.map(|o| o.borrow()).collect::<Vec<_>>();
             let others = others.iter().map(|o| &o[..]).collect::<Vec<_>>();
-            join_cols(&self.borrow()[..], &others[..], arity, projection)
+            join_cols(&self.borrow()[..], &others[..], arity, projection, conduit)
         }
 
         fn antijoin<'a>(self, others: impl Iterator<Item = &'a Self>) -> FactLSM<Self> where Self: 'a { self.retain_join::<'a>(others, false) }

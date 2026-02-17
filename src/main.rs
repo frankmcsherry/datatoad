@@ -11,35 +11,77 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() {
 
-    let mut state = types::State::default();
-    let mut timer = std::time::Instant::now();
-    let mut bytes = BTreeMap::default();
+    use timely_communication::Config;
 
-    // Command-line arguments are treated as files to execute.
-    for filename in std::env::args().skip(1) {
-        println!("> .exec {}", filename);
-        exec_file(filename.as_str(), &mut state, &mut bytes, &mut timer);
-        println!("{:?}", timer.elapsed());
-        println!();
-    }
+    // Extract configurations and free arguments.
+    let (config, mut free) = {
+        let args = std::env::args();
+        let mut opts = getopts::Options::new();
+        Config::install_options(&mut opts);
+        let matches = opts.parse(args).map_err(|e| e.to_string()).unwrap();
+        (Config::from_matches(&matches).unwrap(), matches.free)
+    };
 
-    use std::io::Write;
-    println!();
-    print!("> ");
-    let _ = std::io::stdout().flush();
+    free.remove(0); // remove binary
 
-    let mut text = String::new();
-    while let Ok(size) = std::io::stdin().read_line(&mut text) {
-        // Handle EOF.
-        if size == 0 { break; }
+    // Start multiple workers.
+    // Worker 0 will listen for input and broadcast to all workers.
+    // All workers then respond to each input synchronously.
+    // TODO: A future version should have one command stream, rather than workers that need the same inputs.
+    let guards = timely_communication::initialize(config, move |allocator| {
 
-        handle_command(text.as_str(), &mut state, &mut bytes, &mut timer);
+        let mut state = types::State::default();
+        let mut timer = std::time::Instant::now();
+        let mut bytes = BTreeMap::default();
 
-        println!();
-        print!("> ");
-        let _ = std::io::stdout().flush();
-        text.clear();
-    }
+        state.comms = allocator.into();
+
+        // Command-line arguments are treated as files to execute.
+        for filename in free.iter() { exec_file(filename.as_str(), &mut state, &mut bytes, &mut timer); }
+
+        let mut done = false;
+        while !done {
+
+            use std::rc::Rc;
+            use columnar::{Index, Push};
+            use datatoad::facts::{FactLSM, Lists, Terms, trie::Layer};
+
+            let mut command = FactLSM::default();
+
+            if state.comms.index() == 0 {
+
+                use std::io::Write;
+                println!();
+                print!("> ");
+                let _ = std::io::stdout().flush();
+
+                let mut text = String::new();
+                if let Ok(size) = std::io::stdin().read_line(&mut text) {
+                    // Handle EOF.
+                    if size == 0 || text == ".quit" { }
+                    else {
+                        let mut list: Lists<Terms> = Default::default();
+                        list.push([text.as_bytes()]);
+                        command.push(vec![Rc::new(Layer { list })].try_into().unwrap());
+                    }
+                }
+
+            }
+
+            state.comms.broadcast(&mut command);
+            if let Some(command) = command.flatten() {
+                let text = str::from_utf8(command.borrow()[0].get(0).get(0).as_slice()).unwrap();
+                handle_command(text, &mut state, &mut bytes, &mut timer);
+            }
+            else { done = true; }
+        }
+
+    });
+
+    // computation runs until guards are joined or dropped.
+    if let Ok(guards) = guards { for _guard in guards.join() { } }
+    else { println!("error in computation"); }
+
 }
 
 fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec<u8>, usize>, timer: &mut std::time::Instant) {
@@ -59,7 +101,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
 
                     let args: Result<[_;2],_> = words.take(2).collect::<Vec<_>>().try_into();
                     if let Ok(args) = args {
-                        flow_log::load_rows(args[0], args[1], &mut state.facts);
+                        flow_log::load_rows(args[0], args[1], state);
                         state.update();
                     }
                     else { println!(".flow command requires arguments: <name> <file>"); }
@@ -107,11 +149,11 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                     use columnar::Len;
                                     if columns[0].len() > 100_000_000 {
                                         // Pass ownership of columns so the method can drop them as they are processed.
-                                        state.facts.entry(&atom).extend(Forest::from_columns(columns));
+                                        state.extend_facts(&atom, Forest::from_columns(columns).unwrap().into());
                                         columns = vec![Terms::default(); arity];
                                     }
                                 }
-                                state.facts.entry(&atom).extend(Forest::from_columns(columns));
+                                state.extend_facts(&atom, Forest::from_columns(columns).unwrap().into());
                                 state.update();
                             }
                             else { println!("file not found: {:?}", filename); }
@@ -132,7 +174,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     println!("time:\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());
                     *timer = std::time::Instant::now();
                 }
-                ".wipe" => { *state = Default::default(); *bytes = Default::default(); }
+                ".wipe" => { state.facts = Default::default(); state.rules = Default::default(); *bytes = Default::default(); }
                 _ => { println!("Parse failure: {:?}", text); }
             }
         }
@@ -153,7 +195,7 @@ mod flow_log {
 
     /// Column-oriented loading; usually slower than row-oriented loading for homogenous rows.
     #[allow(unused)]
-    fn load_cols(name: &str, filename: &str, facts: &mut datatoad::facts::Relations) {
+    fn load_cols(name: &str, filename: &str, state: &mut datatoad::types::State) {
 
         if let Ok(file) = std::fs::File::open(filename) {
 
@@ -182,18 +224,18 @@ mod flow_log {
                     if columns[0].len() > 100_000_000 {
                         // Pass ownership of columns so the method can drop them as they are processed.
                         let arity = columns.len();
-                        facts.entry(&atom).extend(Forest::from_columns(columns));
+                        state.extend_facts(&atom, Forest::from_columns(columns).unwrap().into());
                         columns = vec![Terms::default(); arity];
                     }
                 }
-                facts.entry(&atom).extend(Forest::from_columns(columns));
+                state.extend_facts(&atom, Forest::from_columns(columns).unwrap().into());
             }
         }
         else { println!("file not found: {:?}", filename); }
     }
 
     /// Row-oriented loading; usually faster than column-oriented loading, as the rows have a common column type.
-    pub fn load_rows(name: &str, filename: &str, facts: &mut datatoad::facts::Relations) {
+    pub fn load_rows(name: &str, filename: &str, state: &mut datatoad::types::State) {
 
         if let Ok(file) = std::fs::File::open(filename) {
 
@@ -215,7 +257,7 @@ mod flow_log {
                     9 => { to_facts::<_,36>(reader, first) },
                     _ => { unimplemented!("too many columns! (use `load_cols`)") }
                 };
-                facts.entry(&atom).extend(data);
+                state.extend_facts(&atom, data);
             }
         }
         else { println!("file not found: {:?}", filename); }

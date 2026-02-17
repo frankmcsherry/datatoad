@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 use crate::types::Action;
 use crate::facts::{FactContainer, FactLSM};
+use crate::comms::Comms;
 
 /// An atom over terms `T` that supports execution.
 ///
@@ -25,14 +26,14 @@ pub trait ExecAtom<T: Ord> {
     /// For prefixes where this atom would add a less-or-equal log(1+count), it should overwrite that value and the index.
     /// The implementor is not required to update any counts, for example if it is unable to provide ground values.
     /// In this case, the implementor is not expected to respond to `join` for the same arguments.
-    fn count(&self, salad: &mut Salad<T>, added: &BTreeSet<T>, index: u8 );
+    fn count(&self, comms: &mut Comms, salad: &mut Salad<T>, added: &BTreeSet<T>, index: u8);
 
     /// Join or semijoin `facts` with `self` on the shared `terms`, introducing `added`.
     ///
     /// If `terms` is empty, a semijoin is intended.
     /// If `terms` plus `added` cover all of `self.terms()` the result must contain no facts not satisfying `self`.
     /// The `after` term sequence is the order to which `terms` will next be permuted (an optional hint to lay out output).
-    fn join(&self, salad: &mut Salad<T>, added: &BTreeSet<T>, after: &[T]);
+    fn join(&self, comms: &mut Comms, salad: &mut Salad<T>, added: &BTreeSet<T>, after: &[T]);
 }
 
 /// Facts of multiple columns and the names for those columns.
@@ -47,7 +48,7 @@ pub struct Salad<T> {
     pub terms: Vec<T>,
 }
 
-impl<T: Ord+Copy> Salad<T> {
+impl<T: Ord+Copy+std::fmt::Debug> Salad<T> {
     /// Constructs a new `Self` from facts and terms.
     pub fn new(facts: FactLSM<Forest<Terms>>, terms: Vec<T>) -> Self { Self { facts, terms } }
 
@@ -55,9 +56,9 @@ impl<T: Ord+Copy> Salad<T> {
     pub fn arity(&self) -> usize { self.terms.len() }
 
     /// Permutes columns to start with those present in `align`, followed by those not present.
-    pub fn align_to(&mut self, align: impl Iterator<Item = T>) { Self::permute(self, align, PermuteMode::Align); }
+    pub fn align_to(&mut self, comms: &mut Comms, align: impl Iterator<Item = T>) { Self::permute(self, comms, align, PermuteMode::Align); }
     /// Permutes columns to start with those present in `align`, dropping those not present.
-    pub fn prune_to(&mut self, align: impl Iterator<Item = T>) { Self::permute(self, align, PermuteMode::Prune); }
+    pub fn prune_to(&mut self, comms: &mut Comms, align: impl Iterator<Item = T>) { Self::permute(self, comms, align, PermuteMode::Prune); }
 
     /// Removes all but the first `arity` columns.
     pub fn truncate(&mut self, arity: usize) { if let Some(mut facts) = self.facts.flatten() { facts.truncate(arity); self.facts.push(facts); } self.terms.truncate(arity); }
@@ -68,10 +69,11 @@ impl<T: Ord+Copy> Salad<T> {
     /// The method assumes that some prefix of `align` is present in `terms`, and no further terms
     /// from `align` around found there. The caller must restrict `align` to make this the case.
     ///
-    /// The `mode` argument indicates whther columns in `terms` absent from `align` should be discarded.
+    /// The `mode` argument indicates whether columns in `terms` absent from `align` should be discarded.
     /// When `prune` is set they are; otherwise all of `terms` are retained but re-ordered to start with `align`.
     fn permute(
         salad: &mut Salad<T>,
+        comms: &mut Comms,
         align: impl Iterator<Item = T>,
         mode: PermuteMode,
     ) {
@@ -87,6 +89,8 @@ impl<T: Ord+Copy> Salad<T> {
 
         // Maybe necessary if `permutation` is `0 .. k` for k less than the input arity.
         if let PermuteMode::Prune = mode { salad.truncate(permutation.len()); }
+
+        comms.exchange(&mut salad.facts);
     }
 }
 
@@ -113,6 +117,7 @@ enum PermuteMode { Align, Prune }
 use crate::facts::{Forest, Terms};
 #[inline(never)]
 pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
+    comms: &mut Comms,
     salad: &mut Salad<T>,
     terms: &BTreeSet<T>,
     atoms: &[Box<dyn ExecAtom<T> + '_>],
@@ -120,35 +125,42 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
     target: &[T],
 ) {
     // Single atoms are handled using a conventional equijoin.
-    if atoms.len() == 1 { atoms[0].join(salad, terms, target); }
+    if atoms.len() == 1 { atoms[0].join(comms, salad, terms, target); }
     else {
         // Multiple atoms will use worst-case optimal machinery, but we first sequester any columns not referenced by the atoms.
         let shared = salad.terms.iter().filter(|t| atoms.iter().any(|a| a.terms().contains(t))).copied().collect::<Vec<_>>();
         if salad.terms.len() != shared.len() {
-            salad.align_to(shared.iter().copied());
+            salad.align_to(comms, shared.iter().copied());
             let mut prefix = salad.clone();
             prefix.truncate(shared.len());
 
             let mut shared_target = shared.clone();
             shared_target.extend(terms.iter().copied());
-            wco_join_inner(&mut prefix, terms, atoms, potato, &shared_target);
-            prefix.align_to(salad.terms[..shared.len()].iter().copied());
+            wco_join_inner(comms, &mut prefix, terms, atoms, potato, &shared_target);
+            prefix.align_to(comms, salad.terms[..shared.len()].iter().copied());
+
+            // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
+            assert!(shared.len() > 0 || comms.peers() == 1);
 
             // Re-install sequestered terms.
+            let conduit = comms.conduit();
             if let Some(facts) = salad.facts.flatten() {
                 let mut crossed_terms = salad.terms.clone();
                 crossed_terms.extend(salad.terms[..shared.len()].iter().copied());
                 crossed_terms.extend(terms.iter().copied());
                 let projection = target.iter().map(|t| crossed_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
-                salad.facts = facts.join_many(prefix.facts.contents(), shared.len(), &projection[..]);
+                salad.facts = facts.join_many(prefix.facts.contents(), shared.len(), &projection[..], conduit);
+            }
+            else {
+                salad.facts = conduit.finish();
             }
             salad.terms.clear();
             salad.terms.extend_from_slice(target);
         }
-        else { wco_join_inner(salad, terms, atoms, potato, target) }
+        else { wco_join_inner(comms, salad, terms, atoms, potato, target) }
     }
 
-    salad.prune_to(target.iter().copied());
+    salad.prune_to(comms, target.iter().copied());
 }
 
 /// Inner workings of the worst-case optimal join step.
@@ -157,6 +169,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
 /// It unambiguously applies per-atom counting, sharding, proposals, and validation.
 #[inline(never)]
 fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
+    comms: &mut Comms,
     salad: &mut Salad<T>,
     terms: &BTreeSet<T>,
     atoms: &[Box<dyn ExecAtom<T> + '_>],
@@ -177,11 +190,11 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
             },
         }}));
         salad.facts.push(facts);
-        salad.terms.push(potato);
     }
+    salad.terms.push(potato);
 
     //  1.  For each atom, update proposals (count, index) for each path in `delta` to track the minimum count.
-    for (index, other) in atoms.iter().enumerate() { other.count(salad, terms, index as u8); }
+    for (index, other) in atoms.iter().enumerate() { other.count(comms, salad, terms, index as u8); }
 
     //  2.  Partition `salad.facts` by atom index, and join to get proposals.
     salad.terms.pop();
@@ -221,17 +234,17 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
         let mut after = Vec::default();
         after.extend(next_terms.iter().filter(|t| salad.terms.contains(t) || terms.contains(t)));
         after.extend(salad.terms.iter().filter(|t| !next_terms.contains(t)));
-        other.join(&mut shard, terms, &after);
+        other.join(comms, &mut shard, terms, &after);
 
         // semijoin with other atoms.
         for (next_index, next_atom) in atoms.iter().enumerate() {
             if next_index != shard_index {
-                next_atom.join(&mut shard, &Default::default(), Default::default());
+                next_atom.join(comms, &mut shard, &Default::default(), Default::default());
             }
         }
 
         // Put in common layout (`target`) then merge.
-        shard.prune_to(target.iter().copied());
+        shard.prune_to(comms, target.iter().copied());
         salad.extend(shard.facts);
     }
 }
