@@ -447,7 +447,7 @@ pub mod radix_sort {
                         // We may be able to copy part of `part[byte]` in rather than append the whole page.
                         if let Some(last) = data.last_mut() {
                             // Not helpful if there is another full page immediately afterwards.
-                            if last.len() < page_len && (byte == 255 || full[byte].is_empty()) {
+                            if last.len() < page_len && (byte == 255 || full[byte+1].is_empty()) {
                                 let to_drain = std::cmp::min(page_len - last.len(), part[byte].len());
                                 last.extend(part[byte].drain(0.. to_drain));
                             }

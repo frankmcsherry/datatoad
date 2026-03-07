@@ -260,7 +260,8 @@ impl<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> Strategy<A, T> for ByTerm {
             next_terms.sort_by_key(|t| terms_to_atoms[t].len());
             // If we can't find a term, we'll need to pick any groundable term (e.g. a cross join with a data-backed relation).
             if let Some(next_term) = next_terms.last().copied().or_else(|| atoms_to_terms.values().flat_map(|a| a.ground(&terms)).filter(|t| !terms.contains(t) && terms_to_atoms.contains_key(t)).next()) {
-                let next_atoms = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].terms().contains(&next_term)).copied().collect();
+                let mut next_atoms: BTreeSet<A> = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].terms().contains(&next_term) && terms.iter().any(|t| atoms_to_terms[a].terms().contains(t))).copied().collect();
+                if next_atoms.is_empty() { next_atoms = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].terms().contains(&next_term)).copied().collect(); }
                 terms.insert(next_term);
                 plan.push((next_atoms, [next_term].into_iter().collect(), Vec::new()));
             }
