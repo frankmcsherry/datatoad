@@ -29,7 +29,7 @@ impl crate::types::State {
     ///
     /// The `stable` argument indicates whether we should perform a join with all facts (true),
     /// or only a join that involves novel facts (false).
-    pub fn implement(&mut self, rule: &Rule, stable: bool) {
+    pub fn implement(&mut self, rule: &Rule, stable: bool, active_relations: Option<&std::collections::BTreeSet<&str>>) {
 
         let head = &rule.head[..];
         let body = &rule.body[..];
@@ -43,6 +43,13 @@ impl crate::types::State {
         for (plan_atom, atom) in body[..plan_atoms].iter().enumerate() {
 
             if !plans.contains_key(&plan_atom) { continue; }
+
+            // Skip this plan when the starting atom has no recent facts on any worker.
+            if !stable && !atom.anti && logic::resolve(atom).is_none() {
+                if let Some(active) = active_relations {
+                    if !active.contains(atom.name.as_str()) { continue; }
+                }
+            }
 
             let plan = &plans[&plan_atom];
 

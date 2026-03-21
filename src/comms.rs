@@ -30,12 +30,30 @@ impl Comms {
         Conduit { comms, facts: FactLSM::default() }
     }
 
-    /// Commits a bit, and returns the union across all workers.
-    pub fn any(&mut self, bit: bool) -> bool {
+    /// Drains a set of active indices, broadcasts, and refills with the union across all workers.
+    pub fn active_set(&mut self, indices: &mut std::collections::BTreeSet<usize>) {
+        use columnar::Push;
         let mut facts = FactLSM::default();
-        if bit { facts.extend([vec![].try_into().unwrap()]); }
+        if !indices.is_empty() {
+            let mut column = Terms::default();
+            for index in indices.iter() {
+                column.push(&index.to_be_bytes().to_vec());
+            }
+            if let Some(forest) = Forest::from_columns(vec![column]) {
+                facts.extend([forest]);
+            }
+        }
+        indices.clear();
         self.broadcast(&mut facts);
-        facts.flatten().is_some()
+        if let Some(flat) = facts.flatten() {
+            use columnar::Borrow;
+            for i in 0 .. flat.layer(0).list.values.len() {
+                let bytes = flat.layer(0).list.values.borrow().get(i).as_slice();
+                if bytes.len() == 8 {
+                    indices.insert(usize::from_be_bytes(bytes.try_into().unwrap()));
+                }
+            }
+        }
     }
 
     /// Broadcasts facts to all workers.

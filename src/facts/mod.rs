@@ -60,8 +60,16 @@ impl Relations {
             }
         }
     }
-    pub fn active(&self) -> bool {
-        self.relations.values().any(|x| x.0.active())
+    /// Fills the provided set with indices of relations with non-empty recent facts (in BTreeMap iteration order).
+    pub fn active_indices(&self, indices: &mut std::collections::BTreeSet<usize>) {
+        indices.extend(
+            self.relations.values().enumerate()
+                .filter_map(|(i, (base, _))| if base.active() { Some(i) } else { None })
+        );
+    }
+    /// Returns relation names in BTreeMap iteration order, for mapping indices back to names.
+    pub fn relation_names(&self) -> Vec<String> {
+        self.relations.keys().cloned().collect()
     }
     pub fn list(&self) {
         let max_name_len = self.relations.keys().map(|name| name.len()).max().unwrap_or(0);
