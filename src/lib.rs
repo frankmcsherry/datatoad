@@ -84,13 +84,23 @@ pub mod types {
         /// Applies all rules to all facts.
         pub fn update(&mut self) {
             self.advance();
-            while self.active() {
+            let mut active = std::collections::BTreeSet::new();
+            self.facts.active_indices(&mut active);
+            self.comms.active_set(&mut active);
+            while !active.is_empty() {
+                let names = self.facts.relation_names();
+                let active_names: std::collections::BTreeSet<&str> = active.iter()
+                    .filter_map(|&i| names.get(i).map(|s| s.as_str()))
+                    .collect();
                 for index in 0 .. self.rules.len() {
                     let timer = std::time::Instant::now();
-                    self.implement(&self.rules[index].0.clone(), false);
+                    self.implement(&self.rules[index].0.clone(), false, Some(&active_names));
                     self.rules[index].1.push(timer.elapsed());
                 }
                 self.advance();
+                active.clear();
+                self.facts.active_indices(&mut active);
+                self.comms.active_set(&mut active);
             }
         }
 
@@ -103,7 +113,6 @@ pub mod types {
 
         pub fn advance(&mut self) { self.facts.advance(&mut self.comms);}
 
-        fn active(&mut self) -> bool { self.comms.any(self.facts.active()) }
 
         pub fn extend(&mut self, rules: impl IntoIterator<Item=Rule>) {
             for rule in rules.into_iter() { self.push(rule); }
@@ -132,7 +141,7 @@ pub mod types {
             }
             else {
                 let timer = std::time::Instant::now();
-                self.implement(&rule, true);
+                self.implement(&rule, true, None);
                 self.rules.push((rule, vec![timer.elapsed()]));
             }
         }

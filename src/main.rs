@@ -237,24 +237,28 @@ mod flow_log {
     /// Row-oriented loading; usually faster than column-oriented loading, as the rows have a common column type.
     pub fn load_rows(name: &str, filename: &str, state: &mut datatoad::types::State) {
 
+        let index = state.comms.index();
+        let peers = state.comms.peers();
+
         if let Ok(file) = std::fs::File::open(filename) {
 
             let file = std::io::BufReader::new(file);
             let mut reader = simd_csv::ZeroCopyReaderBuilder::default().has_headers(false).from_reader(file);
             if let Some(record) = reader.read_byte_record().unwrap() {
                 let first = record.iter().flat_map(|term| term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32)).to_be_bytes()).collect::<Vec<_>>();
+                for _ in 0 .. index { reader.read_byte_record().unwrap(); }
                 let atom = crate::types::Atom { name: name.to_string(), anti: false, terms: vec![crate::types::Term::Lit(vec![]); first.len()/4] };
                 let data = match first.len()/4 {
-                    0 => { to_facts::<_, 0>(reader, first) },
-                    1 => { to_facts::<_, 4>(reader, first) },
-                    2 => { to_facts::<_, 8>(reader, first) },
-                    3 => { to_facts::<_,12>(reader, first) },
-                    4 => { to_facts::<_,16>(reader, first) },
-                    5 => { to_facts::<_,20>(reader, first) },
-                    6 => { to_facts::<_,24>(reader, first) },
-                    7 => { to_facts::<_,28>(reader, first) },
-                    8 => { to_facts::<_,32>(reader, first) },
-                    9 => { to_facts::<_,36>(reader, first) },
+                    0 => { to_facts::<_, 0>(reader, first, peers) },
+                    1 => { to_facts::<_, 4>(reader, first, peers) },
+                    2 => { to_facts::<_, 8>(reader, first, peers) },
+                    3 => { to_facts::<_,12>(reader, first, peers) },
+                    4 => { to_facts::<_,16>(reader, first, peers) },
+                    5 => { to_facts::<_,20>(reader, first, peers) },
+                    6 => { to_facts::<_,24>(reader, first, peers) },
+                    7 => { to_facts::<_,28>(reader, first, peers) },
+                    8 => { to_facts::<_,32>(reader, first, peers) },
+                    9 => { to_facts::<_,36>(reader, first, peers) },
                     _ => { unimplemented!("too many columns! (use `load_cols`)") }
                 };
                 state.extend_facts(&atom, data);
@@ -267,7 +271,7 @@ mod flow_log {
     use datatoad::facts::radix_sort::{lsb_paged, PageBuilder};
 
     /// Converts a CSV reader into a collection of facts, provided `KW` the bytes per whole record.
-    fn to_facts<R: std::io::Read, const KW: usize>(mut reader: simd_csv::ZeroCopyReader<R>, bytes: Vec<u8>) -> FactLSM<Forest<Terms>> {
+    fn to_facts<R: std::io::Read, const KW: usize>(mut reader: simd_csv::ZeroCopyReader<R>, bytes: Vec<u8>, step: usize) -> FactLSM<Forest<Terms>> {
         let mut array: [u8; KW] = bytes.try_into().unwrap();
         let mut builder = PageBuilder::<[u8;KW], KW>::new(1024);
         let mut counter = 0;
@@ -294,6 +298,8 @@ mod flow_log {
                 }
                 counter = 0;
             }
+
+            for _ in 0 .. step-1 { reader.read_byte_record().unwrap(); }
         }
 
         let (mut data, diff) = builder.done();
