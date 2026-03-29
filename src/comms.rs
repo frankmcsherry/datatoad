@@ -170,7 +170,7 @@ impl Conduit {
 /// The columns are then appended.
 struct FactMessage { facts: Option<Vec<Lists<Terms>>> }
 
-use columnar::{Borrow, Container, Index, Len, bytes::{EncodeDecode, Indexed, stash::Stash}};
+use columnar::{Borrow, Container, Index, Len, bytes::{indexed, stash::Stash}};
 
 impl Bytesable for FactMessage {
     fn from_bytes(mut bytes: timely_bytes::arc::Bytes) -> Self {
@@ -179,8 +179,8 @@ impl Bytesable for FactMessage {
         if count > 0 {
             let mut columns = Vec::with_capacity(count as usize - 1);
             for _ in 1 .. count {
-                let stash: Stash<Lists<Terms>, timely_bytes::arc::Bytes> = bytes.clone().into();
-                let length = Indexed::length_in_bytes(&stash.borrow());
+                let stash: Stash<Lists<Terms>, timely_bytes::arc::Bytes> = Stash::try_from_bytes(bytes.clone()).unwrap();
+                let length = stash.length_in_bytes();
                 let _ = bytes.extract_to(length);
                 let mut column: Lists<Terms> = Default::default();
                 column.extend_from_self(stash.borrow(), 0 .. stash.len());
@@ -191,7 +191,7 @@ impl Bytesable for FactMessage {
         else { FactMessage { facts: None } }
     }
     fn length_in_bytes(&self) -> usize {
-        if let Some(columns) = self.facts.as_ref() { 8 + columns.iter().map(|c| Indexed::length_in_bytes(&c.borrow())).sum::<usize>() }
+        if let Some(columns) = self.facts.as_ref() { 8 + columns.iter().map(|c| indexed::length_in_bytes(&c.borrow())).sum::<usize>() }
         else { 8 }
     }
     fn into_bytes<W: ::std::io::Write>(&self, mut writer: &mut W) {
@@ -199,7 +199,7 @@ impl Bytesable for FactMessage {
             let count: u64 = 1 + columns.len() as u64;
             writer.write_all(&count.to_be_bytes()).unwrap();
             for column in columns.iter() {
-                Indexed::write(&mut writer, &column.borrow()).unwrap();
+                indexed::write(&mut writer, &column.borrow()).unwrap();
             }
         }
         else { writer.write_all(&0u64.to_be_bytes()).unwrap(); }

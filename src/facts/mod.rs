@@ -136,11 +136,7 @@ pub fn upgrade<'a, const K: usize>(terms: <Lists<Terms> as Borrow>::Borrowed<'a>
 
 /// Converts a term list of fixed width byte slices to a general term list.
 pub fn downgrade<const K: usize>(terms: Lists<Vec<[u8; K]>>) -> Lists<Terms> {
-    let strides: Strides = Strides {
-        stride: (K as u64),
-        length: terms.values.len() as u64,
-        bounds: Vec::default(),
-    };
+    let strides: Strides = Strides::new(K as u64, terms.values.len() as u64);
     Vecs {
         bounds: terms.bounds,
         values: Vecs {

@@ -4,10 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-columnar = "0.11"
+columnar = "0.12"
 getopts = { version = "0.2.24" }
 regex = "1.11.1"
 mimalloc = { version = "0.1.48", features = ["v3"] }
 simd-csv = "0.10.3"
-timely_bytes = { version = "0.27", path = "../timely-dataflow/bytes" }
-timely_communication = { version = "0.27", path = "../timely-dataflow/communication" }
+timely_bytes = { version = "0.28", path = "../timely-dataflow/bytes" }
+timely_communication = { version = "0.28", path = "../timely-dataflow/communication" }
+
+[[bench]]
+name = "sort_compare"
+harness = false
+
+[[bench]]
+name = "paged_variants"
+harness = false
+
+[[bench]]
+name = "skew10_only"
+harness = false
