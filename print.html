@@ -1,0 +1,755 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title></title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-b0c0ab71.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-c330b71a.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title"></h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="datatoad"><a class="header" href="#datatoad">Datatoad</a></h1>
+<p>Datatoad is an interactive Datalog engine, written in Rust.</p>
+<p>It is built around a few ideas that, taken together, produce something meaningfully different from other Datalog engines:</p>
+<ol>
+<li>
+<p><strong>Columnar dispatch.</strong>
+Data lives in columns rather than rows.
+Operations like permutation, filtering, and intersection are bulk transformations on contiguous arrays.
+This makes it cheap to rearrange data on the fly, which is what enables everything that follows.</p>
+</li>
+<li>
+<p><strong>Sorted columns as tries.</strong>
+Once columns are sorted lexicographically, prefix-sharing emerges for free.
+A column of values plus a column of bounds <em>is</em> a trie level, with no separate index structure.</p>
+</li>
+<li>
+<p><strong>Joins as trie intersection.</strong>
+Binary joins align two tries by shared prefix.
+Worst-case optimal joins generalize: for each fact, pick whichever trie offers the fewest extensions, propose from that, validate against the others.
+Both are instances of the same operation.</p>
+</li>
+<li>
+<p><strong>Relations as logic.</strong>
+A relation doesn’t have to be a stored table.
+Anything that can count extensions and propose values can participate in a join: arithmetic, ranges, constraints.
+These “logic relations” are bidirectional and first-class.</p>
+</li>
+</ol>
+<p>These ideas compose.
+Columnar dispatch makes worst-case optimal joins practical (not just theoretical) by making per-fact adaptive atom selection a bulk operation.
+Sorted columns give you tries without building them.
+The join framework’s generality lets logic relations slot in alongside stored data.</p>
+<p>This book walks through each idea, how they are realized in datatoad, and what the consequences are.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
+<p>This chapter introduces Datalog, datatoad, and gets you running a first example.</p>
+<p>Datalog is a declarative logic programming language: you state rules about what should be true, and the engine figures out everything that follows.
+Datatoad is an interactive runtime for evaluating Datalog programs, with a focus on robust performance.
+It has a few “big ideas”, revolving around unlocks from columnar data layouts, which are discussed in the next chapter.</p>
+<p>Although a lot of what follows is in the framing of Datalog, relatively little of datatoad is specific to Datalog.
+It just happens that Datalog is also a minimal shell of requirements for streaming, incremental, relational joins.
+Don’t get attached to the logic programming part of the language on my account, at least.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="what-is-datalog"><a class="header" href="#what-is-datalog">What is Datalog?</a></h1>
+<p>Datalog is a declarative language for expressing recursive queries over relations.</p>
+<p>A Datalog program consists of <em>facts</em> (things that are true) and <em>rules</em> (ways to derive new facts from existing ones).</p>
+<p>For example, given edges in a graph:</p>
+<pre><code>edge(1, 2).
+edge(2, 3).
+edge(3, 4).
+</code></pre>
+<p>We can define reachability:</p>
+<pre><code>reach(x, y) :- edge(x, y).
+reach(x, y) :- edge(x, z), reach(z, y).
+</code></pre>
+<p>The first rule says: if there is an edge from <code>x</code> to <code>y</code>, then <code>y</code> is reachable from <code>x</code>.
+The second says: if there is an edge from <code>x</code> to <code>z</code>, and <code>y</code> is reachable from <code>z</code>, then <code>y</code> is reachable from <code>x</code>.</p>
+<p>The engine computes the fixpoint: it repeatedly applies the rules until no new facts are derived.
+The result is every <code>(x, y)</code> pair where <code>y</code> is reachable from <code>x</code>.</p>
+<h2 id="incremental-datalog"><a class="header" href="#incremental-datalog">Incremental Datalog</a></h2>
+<p>The core loop of (semi-naive, bottom-up) Datalog evaluation is</p>
+<ol>
+<li>Starting from some novel facts,</li>
+<li>Determine through rules candidate facts that may be novel,</li>
+<li>Remove any pre-existing facts from the candidates, then call them novel,</li>
+<li>Repeat as long as there are any novel facts.</li>
+</ol>
+<p>This loop is very similar to the bones of streaming, incremental, relational computation.
+Our connection to Datalog is through a shared interest in these properties.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="what-is-datatoad"><a class="header" href="#what-is-datatoad">What is Datatoad?</a></h1>
+<p>Datatoad is an interactive, interpreted Datalog engine written in Rust.</p>
+<p>Datatoad exists to exercise a few “big ideas” in the context of streaming, incremental, relational computation.
+No one of the ideas is fundamentally new, but they come together especially well in datatoad, and complement each other.
+The foundation is datatoad’s columnar data layout, which allows it to efficiently interpret and dispatch at runtime.
+This flexibility unlocks a variety of independently developed concepts, which now compose in ways that were unclear (to me) before.</p>
+<p>Some call-outs, each of which we will develop in greater detail:</p>
+<ul>
+<li>
+<p><strong>Columnar from the ground up.</strong>
+Data is stored and processed in columns, not rows.
+All algorithms and primitives work natively on columns; they do not have the ability to form complete rows.
+This reduces the memory footprint, can simplify data alignment, and makes other features practical.</p>
+</li>
+<li>
+<p><strong>Interpreted, not compiled.</strong>
+You type rules at a REPL and get results immediately.
+There is no compilation step, no generated code, no JIT.
+The engine interprets your program directly.</p>
+</li>
+<li>
+<p><strong>Lean multi-way join processing</strong>
+Multi-way joins are handled using indexes on input relations, but do not maintain intermediate state.
+Updates flow through the join in multiple directions, using per-atom query update plans.</p>
+</li>
+<li>
+<p><strong>Worst-case optimal.</strong>
+Datatoad implements multi-way joins by an instance of the GenericJoin algorithm, which provides worst-case optimal guarantees.
+Following the work of <a href="http://www.vldb.org/pvldb/vol11/p691-ammar.pdf">VLDB2018</a> this gives rise to a worst-case optimal bound for the whole iterative computation.
+Query patterns like triangle enumeration take asymptotically (and empirically) less time than in other systems.</p>
+</li>
+<li>
+<p><strong>Logic relations.</strong>
+Relations like <code>:plus</code>, <code>:range</code>, and <code>:times</code> participate in worst-case optimal joins as first-class atoms.
+They are bidirectional: <code>:plus(x, y, z)</code> can compute <code>z</code> from <code>x</code> and <code>y</code>, or <code>x</code> from <code>y</code> and <code>z</code>.
+The bidirectionality is especially important for multi-way join processing.</p>
+</li>
+<li>
+<p><strong>Distributed execution.</strong>
+Datatoad can shard data across multiple workers and even multiple machines.
+The columnar layout makes sharing and serialization easy and efficient.</p>
+</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="a-first-example"><a class="header" href="#a-first-example">A first example</a></h1>
+<p>Running datatoad (<code>cargo run</code>), you are dropped into a REPL.
+If you would like it to go faster, you can use cargo’s <code>--release</code> flag.</p>
+<p>Let’s compute transitive closure of a small graph:</p>
+<pre><code>&gt; edge(1, 2) :- .
+&gt; edge(2, 3) :- .
+&gt; edge(3, 1) :- .
+
+&gt; reach(x, y) :- edge(x, y).
+&gt; reach(x, y) :- edge(x, z), reach(z, y).
+</code></pre>
+<p>Datatoad evaluates the rules to a fixpoint, and then returns a prompt.</p>
+<p>The <code>.list</code> command prints all relations and their sizes.
+You should see something like</p>
+<pre><code>&gt; .list
+         3 edge  [forms: Identity, Permute-1-0]
+         9 reach [forms: Identity]
+</code></pre>
+<p>To inspect the results you’ll want to use the built-in <code>:print</code> relation:</p>
+<pre><code>&gt; temp(x,y) :- reach(x,y), :print(x,y).
+</code></pre>
+<p>This prompts a query that consults the <code>:print</code> relation, which contains all facts but prints each fact it is queried about.</p>
+<pre><code>&gt; temp(x,y) :- reach(x,y), :print(x,y).
+0x00000001      0x00000001
+0x00000001      0x00000002
+0x00000001      0x00000003
+0x00000002      0x00000001
+0x00000002      0x00000002
+0x00000002      0x00000003
+0x00000003      0x00000001
+0x00000003      0x00000002
+0x00000003      0x00000003
+</code></pre>
+<p>The output is hexadecimal, because the underlying data model is <code>[u8]</code>, and integer literals are parsed as 32 bit integers.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="showing-off"><a class="header" href="#showing-off">Showing off</a></h1>
+<p>The previous example was deliberately simple.
+Let’s look at some things that make datatoad interesting.</p>
+<h2 id="triangle-queries"><a class="header" href="#triangle-queries">Triangle queries</a></h2>
+<p>A triangle query finds all triples <code>(a, b, c)</code> that share all pairwise edges in a graph.
+It’s a standard benchmark because it is deceptively hard for conventional binary join engines.</p>
+<p>First, let’s build a graph with a million edges designed to make binary joins suffer:</p>
+<pre><code>arc(0, x) :- :range(1, x, 1000001).
+arc(x, 0) :- :range(1, x, 1000001).
+arc(x, y) :- :range(1, x, 1000001), :plus(x, 1, y).
+</code></pre>
+<p>This creates a star around node 0 (a million spokes in each direction) plus a long path from one to one million.
+Any binary join plan for triangles on this graph must consider roughly a trillion intermediate results, because joining any two copies of <code>arc</code> produces every pair of edges through node 0: one million, squared.</p>
+<p>The triangle query itself is one line:</p>
+<pre><code>tri(a, b, c) :- arc(a,b), arc(b,c), arc(c,a).
+</code></pre>
+<p>Datatoad handles this in about a second.
+A worst-case optimal join avoids the intermediate blowup entirely: for each <code>(a,b)</code> it finds the <code>c</code> by intersecting values from <code>arc(b,c)</code> and <code>arc(c,a)</code> efficiently, and similarly for the other edge inputs.</p>
+<p>For comparison, the equivalent SQL</p>
+<pre><code class="language-sql">select count(*)
+from arc ab, arc bc, arc ca
+where ab.y = bc.x
+  and bc.y = ca.x
+  and ca.y = ab.x;
+</code></pre>
+<p>will keep PostgreSQL busy for the better part of an hour (at least; I haven’t waited long enough to find out).
+Try it out!</p>
+<h2 id="logic-relations"><a class="header" href="#logic-relations">Logic relations</a></h2>
+<p>You may have noticed <code>:range</code> and <code>:plus</code> in the example above.
+These are <em>logic relations</em>: relations whose contents are defined by logic rather than by stored data.</p>
+<ul>
+<li><code>:range(a, x, b)</code> contains all triples where <code>a &lt;= x &lt; b</code>.</li>
+<li><code>:plus(x, y, z)</code> contains all triples where <code>x + y = z</code>.</li>
+</ul>
+<p>These relations are unbounded in size and are never stored explicitly.
+Instead, they sit behind an abstraction that lets them participate directly in worst-case optimal joins — answering “which values extend this prefix?” on the fly.</p>
+<p>Imagine a set of sensors <code>s</code> with integer readings <code>r</code>, and monitoring intervals <code>[lo, hi)</code> for each sensor:</p>
+<pre><code>hits(s, r) :- asks(s, lo, hi), data(s, r), :range(lo, r, hi).
+</code></pre>
+<p>The right join strategy depends on the sensor, and the relative sizes of <code>[lo, hi)</code> and its number of its readings.
+Noisy sensors with many readings and a tight range should enumerate the range and intersect with the readings.
+Quiet sensors with few readings and a wide range should enumerate their readings and validate each with the range.
+Datatoad picks the right strategy sensor-by-sensor, rather than choosing one join plan for all sensors as in SQL.</p>
+<p>Logic relations are also bidirectional: <code>:plus(x, y, z)</code> can compute <code>z</code> from bound <code>x</code> and <code>y</code>, or solve for <code>x</code> given <code>y</code> and <code>z</code>.
+This means the join planner can use them flexibly, choosing whichever direction produces fewer candidates.
+When presented with a query like</p>
+<pre><code>result(x, y, z) :- in1(x, y), in2(y, z), in3(x, z), :plus(x, y, z).
+</code></pre>
+<p>the introduction of a new tuple through any input can, via <code>:plus</code>, immediately form one candidate result, which then only needs to be validated with the other inputs.
+If <code>:plus</code> could only convert <code>(x, y)</code> to <code>z</code>, and not other directions, then the rule would only be efficient for facts produced through <code>in1(x, y)</code>; the other inputs would need to join to propose <code>x</code> before the predicate could test it.</p>
+<h2 id="distributed-execution"><a class="header" href="#distributed-execution">Distributed execution</a></h2>
+<p>Datatoad can shard work across multiple workers and machines.
+To run with four workers on one machine:</p>
+<pre><code>cargo run --release -- -w 4
+</code></pre>
+<p>Each worker maintains its own shard of the data, exchanging facts by hash as rules produce them.
+The same REPL, the same rules — just more workers.</p>
+<p>To run across multiple machines, provide a common hostfile listing their addresses (as <code>addr:port</code> on new lines) in order:</p>
+<pre><code>cargo run --release -- -n 4 -p 0 --hostfile hostfile.txt
+</code></pre>
+<p>where each machine runs with its own <code>-p</code> index, starting at zero.
+This uses timely-communication’s networking layer under the hood, so the coordination model is the same whether workers are local threads or remote processes.</p>
+<h2 id="planting-face"><a class="header" href="#planting-face">Planting face</a></h2>
+<p>The showing off notwithstanding, datatoad is very much a work in progress.
+There are many things it should do that it doesn’t yet do, for example not crashing in surprising ways.
+Some of the best examples are cherry picked, to make a point more than convince you to use datatoad.</p>
+<p>And yet, it is all meant to work.
+Reach out when you encounter problems, and we can add them to the list.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="columnar-orientation"><a class="header" href="#columnar-orientation">Columnar Orientation</a></h1>
+<p>The foundational choice in datatoad is to represent data in columns rather than rows.</p>
+<p>A relation with three columns is not stored as a vector of 3-tuples.
+Instead, it is three parallel vectors: one per column.
+Operations act on columns in bulk: permuting, filtering, sorting, and intersecting columns are array operations, not per-row decisions.</p>
+<p>These bulk operations matter for more than raw performance; they make it easier to adapt our behavior.</p>
+<ol>
+<li>Interpreted execution comes easily (and efficiently) to columnar models.
+The interpretation overhead is amortized over the bulk operations.</li>
+<li>Isolating each column conceals details, which makes it easier for each column to specialize their behavior.
+We can sort a column of any fixed-width integers faster than a sequence of mixed width integers.</li>
+<li>By abstracting the relations in joins they can be backed by different implementations.
+In addition to conventional joins, both antijoins and logic are applied as if columnar relations.</li>
+</ol>
+<p>This chapter makes the columnar layout concrete.
+We start with the trie representation — how sorted relations decompose into layers of values and bounds — and show how datatoad’s core operations (union, antijoin, intersection) work layer by layer on this structure.
+We then cover sorting, which is the main cost of getting data <em>into</em> this representation.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="columnar-tries"><a class="header" href="#columnar-tries">Columnar tries</a></h1>
+<p>The chapter introduction described how columnar layouts let us cheaply rearrange which columns the engine looks at.
+This section makes the representation concrete: the actual data structures, how they compose, and how runtime specialization works.</p>
+<h2 id="the-representation"><a class="header" href="#the-representation">The representation</a></h2>
+<p>A relation with three columns, sorted and deduplicated, looks like this:</p>
+<pre><code>(A, 1, x),
+(A, 1, y),
+(A, 1, z),
+(A, 2, x),
+(A, 3, x),
+(A, 3, y),
+(B, 2, z),
+(C, 1, x),
+(C, 2, x).
+</code></pre>
+<p>A naive columnar layout stores three parallel arrays, one per column:</p>
+<pre><code>c0  c1  c2
+--  --  --
+A   1   x
+A   1   y
+A   1   z
+A   2   x
+A   3   x
+A   3   y
+B   2   z
+C   1   x
+C   2   x
+</code></pre>
+<p>This is already useful — each column can be stored in a type-appropriate container — but it doesn’t exploit the sortedness.</p>
+<h3 id="prefix-compression"><a class="header" href="#prefix-compression">Prefix compression</a></h3>
+<p>Because the data are sorted, the first column has runs of identical values.
+We can deduplicate it, but we need to remember where each value’s entries begin and end in the next column.
+Peeling off the last column and deduplicating the prefix gives:</p>
+<pre><code>c0  c1  bounds  c2
+--  --  ------  --
+A   1   [0, 3)  x
+A   2   [3, 4)  y
+A   3   [4, 6)  z
+B   2   [6, 7)  x
+C   1   [7, 8)  x
+C   2   [8, 9)  y
+                z
+                x
+                x
+</code></pre>
+<p>The bounds array translates from the second column into the third: each entry in <code>c1</code> owns a range of entries in <code>c2</code>.
+Since bounds are always contiguous (one range’s upper bound is the next’s lower bound), we only need to store the upper bounds:</p>
+<pre><code>c0  c1  b2  c2
+--  --  --  --
+A   1   3   x
+A   2   4   y
+A   3   6   z
+B   2   7   x
+C   1   8   x
+C   2   9   y
+            z
+            x
+            x
+</code></pre>
+<p>Repeating this for the first two columns:</p>
+<pre><code>c0  b1  c1  b2  c2
+--  --  --  --  --
+A   3   1   3   x
+B   4   2   4   y
+C   6   3   6   z
+        2   7   x
+        1   8   x
+        2   9   y
+                z
+                x
+                x
+</code></pre>
+<p>Each column is now a sequence of sorted lists.
+Column 0 has one list (<code>[A, B, C]</code>) — the distinct values extending the empty prefix.
+Column 1 has three lists (<code>[1,2,3]</code>, <code>[2]</code>, <code>[1,2]</code>) — one per distinct value in column 0.
+Column 2 has six lists — one per distinct value in column 1.</p>
+<p>The bounds between columns describe which lists in the next column correspond to which values in the current one.
+Importantly, the bounds belong to the <em>next</em> column, not the current one: they translate forward.
+This keeps the representation clean when multiple independent extensions share the same prefix column, a pattern that shows up in <a href="https://www.cs.ox.ac.uk/dan.olteanu/papers/os-sigrec16.pdf">forward-looking join strategies</a>.</p>
+<h3 id="layers-and-forests"><a class="header" href="#layers-and-forests">Layers and forests</a></h3>
+<p>In code, each column becomes a <code>Layer</code>:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct Layer&lt;C&gt; {
+    pub list: Lists&lt;C&gt;,
+}
+<span class="boring">}</span></code></pre>
+<p>where <code>Lists&lt;C&gt;</code> is a columnar container holding the values and bounds together — the sequence of sorted lists described above.</p>
+<p>A complete trie is a <code>Forest</code>: a sequence of layers, one per column.</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct Forest&lt;C&gt; {
+    layers: Vec&lt;Rc&lt;Layer&lt;C&gt;&gt;&gt;,
+}
+<span class="boring">}</span></code></pre>
+<p>The number of layers equals the arity of the relation.
+Each layer’s values are typed (in datatoad’s case, byte sequences whose widths can be introspected at runtime), and the bounds translate between adjacent layers.</p>
+<p>The name is “forest” because there is no requirement there be a single root, and generally we will work with intermediate runs of layers that have multiple “roots”.</p>
+<h2 id="runtime-specialization"><a class="header" href="#runtime-specialization">Runtime specialization</a></h2>
+<p>A key property of the layer representation is that the boundary between layers carries no type information — just index ranges (bounds) translating from one layer to the next.
+This is what enables per-column specialization at runtime.</p>
+<p>When datatoad encounters a layer whose byte sequences all have width 4 (or 8, or 12), it can upgrade to a fixed-width representation and dispatch to code that compares and copies fixed-size values.
+When the widths vary, it falls back to variable-length byte comparison.
+The choice is made per layer, per operation, at runtime — and because the interface between layers is type-erased, mixing specialized and generic layers in the same trie is free.</p>
+<p>This is where the columnar trie representation pays off for an interpreter.
+A row-oriented engine would need to specialize on the full row type (the product of all column types), which explodes combinatorially.
+A columnar engine specializes each column independently, and the decisions compose without interference.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="columnar-sorting"><a class="header" href="#columnar-sorting">Columnar sorting</a></h1>
+<p>Our data rarely starts out as a columnar trie, and we’ll need to get it in to that shape.
+Moreover, we’ll often find we do have a columnar trie, but would like it in a different order.
+This is the generally challenging problem of “columnar sorting”, which we’ll describe here.</p>
+<p>The problem is “generally challenging” because it is usually slow.
+Top sorting algorithms move data as they sort to localize the work, and columns smear that data across multiple locations.
+We are not going to out-perform row-oriented sorting at what they do best, but we’ll see there is a place for columnar sorting.</p>
+<p>Columnar sorting starts from a sequence of columns (or even tries), and sorts each column in turn, each column passing notes to the next about how to continue the sort.
+Each column sort takes as input a list of integers that order and group its rows, and it sorts them by <code>(group, value)</code>.
+It produces an output list of integers that order and group its rows, to pass to the next column.</p>
+<p>This sort respects the ordering requirement of the preceding columns, without introducing the complexity of the types of those columns.
+In an interpreted setting this is paramount, because we cannot pre-compile the row sort for each of the column orders a user might create.
+In datatoad each type is <code>[u8]</code>, but in each column sort we notice if it is exactly <code>[u8; K]</code> for some <code>K</code> and dispatch to an optimized <code>(usize, [u8;K])</code> sort in each case.</p>
+<h2 id="columnar-trie-sorting"><a class="header" href="#columnar-trie-sorting">Columnar trie sorting</a></h2>
+<p>One of datatoad’s core actions is <em>reshaping</em> columnar tries, and it wants to take as much advantage as it can.</p>
+<p>The columnar sorting story becomes stronger when we start from a columnar trie.
+The layout is already columnar, but it is also helpfully <em>compressed</em>.
+Imagine we want to re-sort a trie from the column order <code>(A, B, C)</code> to the order <code>(B, C, A)</code>.</p>
+<ol>
+<li>The <code>B</code> column may be much shorter than the <code>C</code> column, and so there is less to sort.</li>
+<li>When <code>B</code> is more complicated to sort, text for example, the reduction is especially well felt.</li>
+<li>We can avoid ever materializing the uncompressed representation.</li>
+</ol>
+<p>The columnar trie reveals structure that can make sorting substantially more efficient than flattening and re-forming.</p>
+<h2 id="paged-radix-sorting"><a class="header" href="#paged-radix-sorting">Paged radix sorting</a></h2>
+<p>Datatoad uses a paged radix sort that is worth discussing.
+We use LSB radix sort because we often sort <code>(usize, [u8; K])</code> data, which are narrow and byte-ordered.
+Radix sort excels at this sort of problem.</p>
+<p>Rather than work with one large contiguous array, as LSB radix sort usually does, we’ll work with a sequence of smaller “pages”.
+The pages are small enough that an extra 256 of them are not problematic, but large enough to spend time working through rather than working around.</p>
+<p>One benefit of the paged approach is that we are rarely sorting in-place.
+We have read the data from somewhere (a file, a trie) and want to write it back to somewhere else (a trie).
+The paged approach acquires memory as we fill it (like demand paging), but also <em>releases</em> memory as we finish with it (unlike most allocators).
+The pages allow us to maintain a smaller footprint as we sort.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="operations-union-intersection-and-join"><a class="header" href="#operations-union-intersection-and-join">Operations: union, intersection, and join</a></h1>
+<p>The columnar trie supports column-by-column operation for standard relational operations.
+The key observation, like with columnar sorting, is that each column can provide the information the next needs to continue, without revealing the details of the column itself.
+In sorting this was the ordering and grouping information.
+For these operators it will be <em>alignment</em> information.</p>
+<h2 id="reports"><a class="header" href="#reports">Reports</a></h2>
+<p>The alignment between two layers is a sequence of <code>Report</code> values:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>enum Report {
+    This(usize, usize), // values exclusive to the first input
+    That(usize, usize), // values exclusive to the second input
+    Both(usize, usize), // a matching value in both inputs
+}
+<span class="boring">}</span></code></pre>
+<p>A <code>This(lower, upper)</code> says that values at indices <code>lower..upper</code> in the first input have no match in the second.
+A <code>That(lower, upper)</code> says the same for the second input.
+A <code>Both(i, j)</code> says that value <code>i</code> in the first input equals value <code>j</code> in the second.</p>
+<p>The sequence of reports accounts for every value in both inputs and spells out their sorted order.
+It tells the next layer exactly what to do: leave exclusive ranges as-is, and continue to resolve matching values by their values in the next layer.
+This foundation is sufficient for us to implement union, intersection, and join.</p>
+<h2 id="union"><a class="header" href="#union">Union</a></h2>
+<p>Merging two tries proceeds layer by layer, starting from a single <code>Both(0, 0)</code> report (both inputs have one top-level list to merge).</p>
+<p>At each layer, the merge consumes the current reports and produces new ones for the next layer:</p>
+<ul>
+<li><strong><code>This(lower, upper)</code></strong>: Copy the lists from the first input. Emit <code>This</code> reports with expanded indices.</li>
+<li><strong><code>That(lower, upper)</code></strong>: Copy the lists from the second input. Emit <code>That</code> reports with expanded indices.</li>
+<li><strong><code>Both(i, j)</code></strong>: Merge the two lists (they’re sorted, so this is a linear merge). Emit <code>This</code>, <code>That</code>, and <code>Both</code> reports for the elements within.</li>
+</ul>
+<p>The per-layer merge is generic over the value type, so each layer dispatches to type-appropriate comparison and copy logic.
+At the trie level, the code is compact — it walks the layers and, for each one, checks whether the data can be upgraded to a fixed-width type (e.g., 4-byte values) for a faster path:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub fn union(&amp;self, other: &amp;Self) -&gt; Self {
+    let mut reports = VecDeque::default();
+    reports.push_back(Report::Both(0, 0));
+    for (layer0, layer1) in self.layers.iter().zip(other.layers.iter()) {
+        // Merge this layer using the current reports,
+        // producing new reports for the next layer.
+        // Specialize by value width when possible.
+    }
+    ...
+}
+<span class="boring">}</span></code></pre>
+<p>The <code>This</code> and <code>That</code> ranges are where the real throughput comes from: they identify contiguous runs of values and lists that can be bulk-copied rather than compared element by element.</p>
+<h2 id="intersection"><a class="header" href="#intersection">Intersection</a></h2>
+<p>Intersection reuses the same layer-by-layer walk, but only tracks the <code>Both</code> matches — the <code>This</code> and <code>That</code> ranges are irrelevant, since we only care about what overlaps.
+At each layer, pairs of matching list indices are fed forward, and within those lists, a merge identifies matching values and records them for the next layer.
+The merge uses galloping (exponential search) to skip past non-matching regions efficiently:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>while lower0 &lt; upper0 &amp;&amp; lower1 &lt; upper1 {
+    match val0.cmp(&amp;val1) {
+        Less    =&gt; { lower0 += 1; gallop(list0, &amp;mut lower0, upper0, |x| x &lt; val1); },
+        Equal   =&gt; { reports.push_back((lower0, lower1)); lower0 += 1; lower1 += 1; },
+        Greater =&gt; { lower1 += 1; gallop(list1, &amp;mut lower1, upper1, |x| x &lt; val0); },
+    }
+}
+<span class="boring">}</span></code></pre>
+<p>Intersection shows us where two input tries line up, without spending time on intervals where they do not.
+This ends up as the foundation for joins and antijoins.</p>
+<h2 id="join-and-antijoin"><a class="header" href="#join-and-antijoin">Join (and Antijoin)</a></h2>
+<p>To join two collections by some shared key columns, datatoad forms columnar tries whose first columns are the shared key columns.
+An intersection not only finds the keys in common, but also returns with their offsets in each trie.
+In each trie that offset is the root of a subtree of values that must be crossed with the values of the other trie.
+Once intersected, a join is as easy as just reading all pairs of values out of the tails of the two tries (a “constant time enumerator”).</p>
+<p>Antijoins are similar, in that the intersection indicates which values to <em>avoid</em>, rather than keep.
+The intersection report allows the trie to produce those elements that are exclusive to it.
+This is a core action in Datalog, where we want to retain only the truly novel facts each iteration.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="log-structured-merge-tries"><a class="header" href="#log-structured-merge-tries">Log-structured merge tries</a></h1>
+<p>Rather than maintain a single <code>Forest</code> per relation and modify it in place, datatoad wraps forests in a log-structured merge tree:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct FactLSM&lt;F&gt; {
+    layers: Vec&lt;F&gt;,
+}
+<span class="boring">}</span></code></pre>
+<p>New facts arrive as small forests.</p>
+<p>As soon as two forests have the same size, they are merged to keep the total count logarithmic — the invariant is that sizes should at least halve as you move through the list.
+This keeps individual forests immutable: all mutation happens by appending new forests and merging.
+Immutability plays well with large contiguous allocations, avoids the bookkeeping of in-place updates, and allows reference counted sharing.</p>
+<p>The merge discipline, halving in size, keeps the memory footprint within 2x of what it could possibly be.
+All tries together sum to at most twice the size of the largest, which itself contains only distinct facts.</p>
+<h2 id="products-of-sums"><a class="header" href="#products-of-sums">Products of sums</a></h2>
+<p>The LSM structure means that we’ll need to adapt many of our algorithms to work on sums of tries.
+This turns out to be not that hard; we do not need to flatten the LSM to one trie to union or intersect, for example.
+The requirement paves the way for other moments we might want to sum relations but cannot, for example if they have different representations (data v logic).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="joins"><a class="header" href="#joins">Joins</a></h1>
+<p>A binary equijoin on shared columns is a trie intersection: walk the shared prefix levels in lockstep, keeping only values that appear in both tries.
+For each surviving prefix, the unshared columns from each side are paired up.</p>
+<p>Worst-case optimal joins (GenericJoin) generalize this.
+Given multiple atoms sharing some terms, instead of picking a fixed pair to join first, the engine asks each atom: “for this prefix, how many extensions would you propose?”
+The atom with the fewest proposals wins, proposes its values, and the others validate by semijoin.
+This is a per-fact decision — different facts may route to different atoms, depending on which is cheapest for that particular prefix.</p>
+<p>In datatoad, both binary joins and worst-case optimal joins are implemented as trie operations on sorted columns.
+A single-atom step is a binary join; a multi-atom step is the full count/propose/validate cycle.
+The same columnar machinery handles both.</p>
+<p>This chapter covers how datatoad evaluates joins: the binary join path, the worst-case optimal join path, how they are unified under a single framework, and how the planner decides which to use.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="binary-joins"><a class="header" href="#binary-joins">Binary joins</a></h1>
+<p>TODO: Binary equijoin on sorted columnar data. Prefix alignment, lockstep merge, pairing of unshared columns.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="worst-case-optimal-joins"><a class="header" href="#worst-case-optimal-joins">Worst-case optimal joins</a></h1>
+<p>TODO: The GenericJoin framework. Count/propose/intersect. Per-fact adaptive atom selection. Why this matters for cyclic queries (triangles, etc.).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="unifying-the-two"><a class="header" href="#unifying-the-two">Unifying the two</a></h1>
+<p>TODO: How binary joins and WCOJ are both instances of the same <code>wco_join</code> function. Single atom = binary join. Multiple atoms = full WCOJ machinery. No special cases in the code path.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="planning"><a class="header" href="#planning">Planning</a></h1>
+<p>TODO: How the planner selects join steps. Term grounding, action generation, atom ordering. The role of <code>PlanAtom::ground()</code> in determining what’s computable.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="relations-as-logic"><a class="header" href="#relations-as-logic">Relations as Logic</a></h1>
+<p>In most Datalog engines, an atom in a rule body refers to a stored relation: a table of facts.
+Datatoad generalizes this.
+An atom can be backed by anything that supports two operations: <em>count</em> (how many extensions would you propose?) and <em>propose</em> (enumerate or validate those extensions).
+A stored relation implements these by looking into its trie.
+But so can a computation.</p>
+<p>The relation <code>:plus(x, y, z)</code> represents the constraint <code>x + y = z</code>.
+Given <code>x</code> and <code>y</code>, it can propose <code>z</code>.
+Given <code>x</code> and <code>z</code>, it can propose <code>y</code>.
+Given only <code>z</code>, it cannot propose anything (infinitely many decompositions), so it reports that and the planner knows not to start there.
+This bidirectionality falls out of the <code>count</code>/<code>propose</code> interface — the planner asks each atom what it can contribute given the currently bound terms, and logic relations answer honestly.</p>
+<p>There is no special case for logic relations in the join algorithm.
+They are atoms, like any other.</p>
+<p>This chapter covers how logic-backed relations are defined, how bidirectional computation works, and how they integrate with the join planner.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="abstract-relations"><a class="header" href="#abstract-relations">Abstract relations</a></h1>
+<p>TODO: The abstract relation framework. How relations are introduced (#21). The distinction between stored relations (backed by facts) and computed relations (backed by logic).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="bidirectional-computation"><a class="header" href="#bidirectional-computation">Bidirectional computation</a></h1>
+<p>TODO: The Logic trait and its <code>bound()</code> method. How :plus(x,y,z) can derive any one argument from the other two. How :range(lo, mid, hi) enumerates mid given lo and hi. How NotEq validates without proposing.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="logic-in-join-planning"><a class="header" href="#logic-in-join-planning">Logic in join planning</a></h1>
+<p>TODO: How the planner uses <code>bound()</code> to determine which terms are derivable. How logic relations participate in WCOJ alongside stored relations. How the count/propose/validate interface applies uniformly.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="scaling-out"><a class="header" href="#scaling-out">Scaling Out</a></h1>
+<p>This chapter covers datatoad’s distributed execution: how data is exchanged between workers, and what the current state of distributed scaling looks like.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="exchange-and-broadcast"><a class="header" href="#exchange-and-broadcast">Exchange and broadcast</a></h1>
+<p>TODO: The Comms abstraction over timely-communication. Exchange: sharding facts by hash of a column prefix. Broadcast: all-to-all for coordination. Conduit: tracking completion of a communication round.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="what-works-what-doesnt"><a class="header" href="#what-works-what-doesnt">What works, what doesn’t</a></h1>
+<p>TODO: Current state of distributed execution. What scales, what doesn’t. Known limitations (zero-arity multi-worker, self-sends for consolidation, single command stream). Honest assessment.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="evaluation"><a class="header" href="#evaluation">Evaluation</a></h1>
+<p>TODO: Benchmark results against Soufflé and other engines. Where datatoad is competitive, where it isn’t. Loading time, memory usage, join performance on various benchmarks (GALEN, etc.).</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+
+    </div>
+    </body>
+</html>
