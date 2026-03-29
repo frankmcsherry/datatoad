@@ -1,0 +1,21 @@
+name: deploy
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: cargo install mdbook --version 0.5.2
+      - run: cd mdbook && mdbook build
+      - uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          branch: gh-pages
+          folder: mdbook/book
