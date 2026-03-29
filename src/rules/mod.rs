@@ -45,7 +45,7 @@ impl crate::types::State {
             if !plans.contains_key(&plan_atom) { continue; }
 
             // Skip this plan when the starting atom has no recent facts on any worker.
-            if !stable && !atom.anti && logic::resolve(atom).is_none() {
+            if !stable && !atom.anti {
                 if let Some(active) = active_relations {
                     if !active.contains(atom.name.as_str()) { continue; }
                 }
@@ -58,7 +58,7 @@ impl crate::types::State {
             let mut salad = crate::rules::exec::Salad::new(FactLSM::default(), Vec::default());
             if let Some(logic) = logic::resolve(&body[plan_atom]) {
                 let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = Box::new(logic);
-                salad.extend([Vec::default().try_into().unwrap()]);
+                if stable { salad.extend([Vec::default().try_into().unwrap()]); }
                 boxed_atom.join(&mut self.comms, &mut salad, &terms.iter().copied().collect(), &terms);
             }
             else {
