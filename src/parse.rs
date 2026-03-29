@@ -111,8 +111,7 @@ fn parse_term<I: Iterator<Item=Token>>(tokens: &mut Peekable<I>) -> Option<Term>
 ///
 /// Strings starting with `0x` and continuing with an even number of hex digits are accepted.
 fn parse_lit(term: &str) -> Option<Vec<u8>> {
-    if term.len() < 2 { return None; }
-    if term.len() % 2 == 0 && &term[0..2] == "0x" {
+    if term.len() >= 2 && term.len() % 2 == 0 && &term[0..2] == "0x" {
         let bytes: Result<Vec<u8>, std::num::ParseIntError> = (2..term.len()).step_by(2).map(|i| u8::from_str_radix(&term[i..i + 2], 16)).collect();
         if let Ok(bytes) = bytes { return Some(bytes); }
     }
