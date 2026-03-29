@@ -45,10 +45,8 @@ impl crate::types::State {
             if !plans.contains_key(&plan_atom) { continue; }
 
             // Skip this plan when the starting atom has no recent facts on any worker.
-            if !stable && !atom.anti {
-                if let Some(active) = active_relations {
-                    if !active.contains(atom.name.as_str()) { continue; }
-                }
+            if let Some(active) = active_relations {
+                if !stable && !active.contains(atom.name.as_str()) { continue; }
             }
 
             let plan = &plans[&plan_atom];
