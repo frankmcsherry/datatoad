@@ -11,15 +11,3 @@ mimalloc = { version = "0.1.48", features = ["v3"] }
 simd-csv = "0.10.3"
 timely_bytes = { version = "0.28", path = "../timely-dataflow/bytes" }
 timely_communication = { version = "0.28", path = "../timely-dataflow/communication" }
-
-[[bench]]
-name = "sort_compare"
-harness = false
-
-[[bench]]
-name = "paged_variants"
-harness = false
-
-[[bench]]
-name = "skew10_only"
-harness = false
