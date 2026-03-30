@@ -47,14 +47,22 @@ impl Relations {
         &mut self.relations.entry(atom.name.clone()).or_default().0
     }
     pub fn advance(&mut self, comms: &mut crate::comms::Comms) {
+        let mut conduits = Vec::new();
         for (facts, transforms) in self.relations.values_mut() {
             facts.advance();
             for (action, transform) in transforms.iter_mut() {
                 transform.stable.extend(transform.recent.take());
                 let mut acted_on = if let Some(recent) = facts.recent.as_ref() { recent.act_on(action) } else { FactLSM::default() };
-                comms.exchange(&mut acted_on);
-                if let Some(recent) = acted_on.flatten() {
-                    // Non-permutations need to be deduplicated against existing facts.
+                let mut conduit = comms.conduit();
+                conduit.extend(&mut acted_on);
+                conduit.close();
+                conduits.push(conduit);
+            }
+        }
+        let mut conduits = conduits.into_iter();
+        for (_facts, transforms) in self.relations.values_mut() {
+            for (action, transform) in transforms.iter_mut() {
+                if let Some(recent) = conduits.next().unwrap().finish().flatten() {
                     transform.recent = if !action.is_permutation() { recent.antijoin(transform.stable.contents()).flatten() } else { Some(recent) };
                 }
             }

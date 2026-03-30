@@ -25,7 +25,7 @@ impl Comms {
             let (sends, recv) = comms.borrow_mut().allocate(self.count);
             self.count += 1;
             let count = sends.len();
-            Channel { comms: comms.clone(), sends, recv, count }
+            Channel { comms: comms.clone(), sends, recv, count, done: false }
         });
         Conduit { comms, facts: FactLSM::default() }
     }
@@ -97,18 +97,25 @@ pub struct Channel {
     sends: Vec<Box<dyn Push<FactMessage>>>,
     recv: Box<dyn Pull<FactMessage>>,
     count: usize,
+    done: bool,
 }
 
 impl Channel {
+    fn close(&mut self) { if !self.done {
+        for sender in self.sends.iter_mut() { sender.send(FactMessage { facts: None } ); }
+        self.done = true;
+    }}
     /// Extracts all remaining facts
     fn complete(mut self) -> FactLSM<Forest<Terms>> {
-        for sender in self.sends.iter_mut() { sender.send(FactMessage { facts: None } ); }
+        self.close();
         let mut facts = FactLSM::default();
         while self.count > 0 { let mut temp = FactLSM::default(); self.exchange(&mut temp); facts.extend(temp); }
         facts
     }
     /// Exchanges facts with other participants, drawing from and refilling `facts`.
     fn exchange(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
+
+        if self.done && !facts.is_empty() { panic!("Exchanging on a sealed channel"); }
 
         let mut comms = self.comms.borrow_mut();
 
@@ -157,6 +164,7 @@ impl Conduit {
         if let Some(channel) = self.comms.as_mut() { channel.exchange(facts); }
         self.facts.extend(std::mem::take(facts));
     }
+    pub fn close(&mut self) { if let Some(channel) = self.comms.as_mut() { channel.close(); } }
     /// Finalizes the facts awaiting receipt from all other participants.
     pub fn finish(mut self) -> FactLSM<Forest<Terms>> {
         if let Some(channel) = self.comms { self.facts.extend(channel.complete()); }
