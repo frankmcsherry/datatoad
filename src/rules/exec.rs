@@ -77,12 +77,13 @@ impl<T: Ord+Copy+std::fmt::Debug> Salad<T> {
         align: impl Iterator<Item = T>,
         mode: PermuteMode,
     ) {
+        let thresh = 200_000_000 / comms.peers();
         let mut permutation: Vec<usize> = align.flat_map(|t1| salad.terms.iter().position(|t2| &t1 == t2)).collect();
         if let PermuteMode::Align = mode { for index in 0 .. salad.terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
 
         if permutation.iter().enumerate().any(|(index, i)| &index != i) {
             if let Some(flattened) = salad.facts.flatten() {
-                salad.facts.extend(flattened.act_on(&Action::permutation(permutation.iter().copied())));
+                salad.facts.extend(flattened.act_on(&Action::permutation(permutation.iter().copied()), thresh));
             }
             salad.terms = permutation.iter().map(|i| salad.terms[*i]).collect::<Vec<_>>();
         }

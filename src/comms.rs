@@ -159,6 +159,8 @@ pub struct Conduit {
 }
 
 impl Conduit {
+    /// The number of peers backing the conduit.
+    pub fn peers(&self) -> usize { self.comms.as_ref().map(|c| c.comms.borrow().peers()).unwrap_or(1) }
     /// Supplies facts to the conduit, which are exchanged and then collected.
     pub fn extend(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
         if let Some(channel) = self.comms.as_mut() { channel.exchange(facts); }

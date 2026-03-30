@@ -120,6 +120,8 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                         if let Ok(regex) = regex::Regex::new(pattern) {
                             let names = regex.capture_names().map(|x| x.to_owned()).collect::<Vec<_>>();
                             if let Ok(file) = File::open(filename) {
+                                let peers = state.comms.peers();
+                                let thresh = 200_000_000 / peers;
                                 let mut file = BufReader::new(file);
                                 use columnar::Push;
                                 use datatoad::facts::{Forest, Terms};
@@ -147,7 +149,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                     else { println!("Regex missed line: {:?}", line); }
                                     readline.clear();
                                     use columnar::Len;
-                                    if columns[0].len() > 100_000_000 {
+                                    if columns[0].len() > thresh {
                                         // Pass ownership of columns so the method can drop them as they are processed.
                                         state.extend_facts(&atom, Forest::from_columns(columns).unwrap().into());
                                         columns = vec![Terms::default(); arity];
@@ -215,13 +217,15 @@ mod flow_log {
 
                 let atom = crate::types::Atom { name: name.to_string(), anti: false, terms: vec![crate::types::Term::Lit(vec![]); columns.len()] };
 
+                let peers = state.comms.peers();
+                let thresh = 200_000_000 / peers;
                 while let Some(record) = reader.read_byte_record().unwrap() {
                     for (term, col) in record.iter().zip(columns.iter_mut()) {
                         let num = term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32));
                         col.push(&num.to_be_bytes());
                     }
                     use columnar::Len;
-                    if columns[0].len() > 100_000_000 {
+                    if columns[0].len() > thresh {
                         // Pass ownership of columns so the method can drop them as they are processed.
                         let arity = columns.len();
                         state.extend_facts(&atom, Forest::from_columns(columns).unwrap().into());

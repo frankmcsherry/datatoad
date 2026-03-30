@@ -215,9 +215,9 @@ pub mod terms {
         }
         /// Produces columns in the order indicated by `projection`. Each column should appear at most once.
         #[inline(never)]
-        fn permute(&self, projection: &[usize]) -> Self {
+        fn permute(&self, projection: &[usize], thresh: usize) -> Self {
             let indexs = (0 .. self.layers[0].list.len()).collect::<Vec<_>>();
-            permute_subset(&self.borrow()[..], projection, &indexs).try_into().expect("permutation should not remove facts")
+            permute_subset(&self.borrow()[..], projection, &indexs, thresh).try_into().expect("permutation should not remove facts")
         }
         /// Introduces repeated and literal columns.
         ///
@@ -257,7 +257,7 @@ pub mod terms {
 
     /// Produces columns in the order indicated by `projection`, for the subset of indexes in `indexs`.
     #[inline(never)]
-    fn permute_subset(layers: &[<Lists<Terms> as Borrow>::Borrowed<'_>], projection: &[usize], indexs: &[usize]) -> Vec<Rc<Layer<Terms>>> {
+    fn permute_subset(layers: &[<Lists<Terms> as Borrow>::Borrowed<'_>], projection: &[usize], indexs: &[usize], thresh: usize) -> Vec<Rc<Layer<Terms>>> {
 
         for index in 1 .. layers.len() { assert_eq!(layers[index-1].values.len(), layers[index].len()); }
 
@@ -283,25 +283,25 @@ pub mod terms {
                 let projection2 = projection[prefix..].iter().map(|c| *c - prefix).collect::<Vec<_>>();
                 let indexs2 = bounds.iter().copied().flat_map(|(l,u)| l..u).collect::<Vec<_>>();
                 let groups = (0 .. indexs2.len()).collect::<Vec<_>>();
-                output.extend(permute_subset_scale(layers2, &projection2, &groups, &indexs2));
+                output.extend(permute_subset_scale(layers2, &projection2, &groups, &indexs2, thresh));
             }
 
             output
         }
         else {
             let groups = (0 .. indexs.len()).collect::<Vec<_>>();
-            permute_subset_scale(layers, projection, &groups, indexs)
+            permute_subset_scale(layers, projection, &groups, indexs, thresh)
         }
     }
 
     /// A trampoline for permutation, that prepares the work we have to do in the event that it is too much to do at once.
-    fn permute_subset_scale(layers: &[<Lists<Terms> as Borrow>::Borrowed<'_>], projection: &[usize], groups: &[usize], starts: &[usize]) -> Vec<Rc<Layer<Terms>>> {
+    fn permute_subset_scale(layers: &[<Lists<Terms> as Borrow>::Borrowed<'_>], projection: &[usize], groups: &[usize], starts: &[usize], thresh: usize) -> Vec<Rc<Layer<Terms>>> {
 
         // There are many ways the incoming `[(group, start)]` asks can be overwhelming.
         // We'll handle one common special case first, to try and learn a bit about how to do this efficiently.
         // A.   If `groups` has only one value, we can convert the bounds of the first layer to 1:1, and expand `groups` and `starts` to reference the values.
         //      We are essentially flattening the first layer, retaining the grouping information,
-        if groups.len() == 1 && layers.last().map(|l| l.values.len()).unwrap_or(0) > 100_000_000 {
+        if groups.len() == 1 && layers.last().map(|l| l.values.len()).unwrap_or(0) > thresh {
 
             // Establish advance bounds, groups, starts.
             let mut bounds = starts.iter().map(|i| (*i, i+1)).collect::<Vec<_>>();
@@ -326,7 +326,7 @@ pub mod terms {
             while cursor < new_starts.len() {
                 let mut count = 0;
                 let finger = cursor;
-                while cursor < new_bounds.len() && count < 100_000_000 { count += new_bounds[cursor].1 - new_bounds[cursor].0; cursor += 1; }
+                while cursor < new_bounds.len() && count < thresh { count += new_bounds[cursor].1 - new_bounds[cursor].0; cursor += 1; }
                 let layers = permute_subset_inner(&layers, projection, &new_groups[finger .. cursor], &new_starts[finger .. cursor]);
                 merged.push(layers.try_into().unwrap());
             }
@@ -438,6 +438,8 @@ pub mod terms {
         mut conduit: crate::comms::Conduit,
     ) -> FactLSM<Forest<Terms>> {
 
+        let thresh = 200_000_000 / conduit.peers();
+
         if thats.len() == 0 { return conduit.finish(); }
 
         for that in thats.iter() { assert_eq!(that.len(), thats[0].len()); }
@@ -491,7 +493,7 @@ pub mod terms {
         let mut this_order = Vec::default();
         for col in projection.iter().copied() { if arity <= col && col < this.len() && !this_order.contains(&(col - arity)) { this_order.push(col - arity); } }
         if this_order != (0 .. this_order.len()).collect::<Vec<_>>() {
-            let layers = permute_subset(&this[arity..], &this_order[..], &this_i[..]);
+            let layers = permute_subset(&this[arity..], &this_order[..], &this_i[..], thresh);
             this_values = Some(Forest { layers });
             let this_i = Rc::make_mut(&mut this_i);
             for i in 0 .. this_i.len() { this_i[i] = i; }
@@ -508,7 +510,7 @@ pub mod terms {
             let thats_values = thats.iter().map(|t| &t[arity..]).collect::<Vec<_>>();
             let thats_groups = aligned.iter().map(|(i,_)| &i[..]).collect::<Vec<_>>();
             let thats_indexs = aligned.iter().map(|(_,j)| &j[..]).collect::<Vec<_>>();
-            that_values = Some( Forest { layers: restrict_project_merge(&thats_values, &thats_groups, &thats_indexs, &that_order).unwrap() });
+            that_values = Some( Forest { layers: restrict_project_merge(&thats_values, &thats_groups, &thats_indexs, &that_order, thresh).unwrap() });
             let that_j = Rc::make_mut(&mut that_j); that_j.clear(); that_j.extend(0 .. this_i.len());
         }
         let that_values = that_values.as_ref().map(|x| x.borrow()).unwrap_or(thats[0][arity..].to_vec());
@@ -538,7 +540,7 @@ pub mod terms {
             // Assess the size of the output we'll produce, in order to judge if we should parcel out the work.
             let aligned_prev = aligned_pos;
             let mut aligned_sum = 0;
-            while aligned_pos < counts.len() && aligned_sum < 100_000_000 { aligned_sum += counts[aligned_pos]; aligned_pos += 1; }
+            while aligned_pos < counts.len() && aligned_sum < thresh { aligned_sum += counts[aligned_pos]; aligned_pos += 1; }
 
             // Going in to the next phase, we'll need the following variables in scope:
             // 1. `this_i` and `this_values`: indexes of one into the other; same length as `that_j`. columns in order of appearance in `projection`.
@@ -635,6 +637,7 @@ pub mod terms {
         groups: &[&[usize]],
         indexs: &[&[usize]],
         projection: &[usize],
+        thresh: usize,
     ) -> Option<Vec<Rc<Layer<Terms>>>> {
 
         // Assert intended preconditions.
@@ -652,12 +655,12 @@ pub mod terms {
         if indexs.is_empty() { return None; }
 
         // TODO: can union from indexed layers without having to copy first.
-        if layers.len() == 1 { Some(permute_subset(layers[0], projection, indexs[0])) }
+        if layers.len() == 1 { Some(permute_subset(layers[0], projection, indexs[0], thresh)) }
         else {
             let mut extracted: FactLSM<Forest<Terms>> = FactLSM::default();
             for index in 0 .. layers.len() {
                 if !groups[index].is_empty() {
-                    let mut layers = permute_subset(layers[index], projection, indexs[index]);
+                    let mut layers = permute_subset(layers[index], projection, indexs[index], thresh);
                     let mut base: Layer<Terms> = Default::default();
                     use columnar::Push;
                     // TODO: rework layers to allow this to be something akin to `&groups[index]` without the copy.
@@ -708,7 +711,7 @@ pub mod terms {
     impl FactContainer for Forest<Terms> {
 
         #[inline(never)]
-        fn act_on(&self, action: &Action<Vec<u8>>) -> FactLSM<Self> {
+        fn act_on(&self, action: &Action<Vec<u8>>, thresh: usize) -> FactLSM<Self> {
 
             if action.is_identity() { return self.clone().into(); }
 
@@ -730,7 +733,7 @@ pub mod terms {
             //  2.  Produce distinct columns in order. Literals and repeats will be added next.
             let mut projection = Vec::with_capacity(action.projection.len());
             for col in action.projection.iter().flatten() { if !projection.contains(col) { projection.push(*col); } }
-            let mut result = new_self.permute(&projection[..]);
+            let mut result = new_self.permute(&projection[..], thresh);
 
             //  3.  If there were literals or repeats in projected columns, we need to add them in.
             let new_projection = action.projection.iter().cloned().map(|c| c.map(|i| projection.iter().position(|j| i == *j).unwrap())).collect::<Vec<_>>();

@@ -121,6 +121,7 @@ impl crate::types::State {
                 a.terms.iter().zip(salad.terms.iter()).all(|(h,d)| h.as_var() == Some(d))
             });
 
+            let thresh = 200_000_000 / self.comms.peers();
             for (_, atom) in head.iter().enumerate().filter(|(pos,_)| Some(*pos) != exact_match) {
                 let mut action = Action::with_arity(salad.arity());
                 action.projection = atom.terms.iter().map(|t| match t {
@@ -128,7 +129,7 @@ impl crate::types::State {
                     Term::Lit(data) => Err(data.clone()),
                 }).collect();
                 if let Some(delta) = salad.facts.flatten() {
-                    self.extend_facts(atom, delta.act_on(&action));
+                    self.extend_facts(atom, delta.act_on(&action, thresh));
                     salad.extend([delta]);
                 }
                 else {

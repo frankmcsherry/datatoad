@@ -47,12 +47,13 @@ impl Relations {
         &mut self.relations.entry(atom.name.clone()).or_default().0
     }
     pub fn advance(&mut self, comms: &mut crate::comms::Comms) {
+        let thresh = 200_000_000 / comms.peers();
         let mut conduits = Vec::new();
         for (facts, transforms) in self.relations.values_mut() {
             facts.advance();
             for (action, transform) in transforms.iter_mut() {
                 transform.stable.extend(transform.recent.take());
-                let mut acted_on = if let Some(recent) = facts.recent.as_ref() { recent.act_on(action) } else { FactLSM::default() };
+                let mut acted_on = if let Some(recent) = facts.recent.as_ref() { recent.act_on(action, thresh) } else { FactLSM::default() };
                 let mut conduit = comms.conduit();
                 conduit.extend(&mut acted_on);
                 conduit.close();
@@ -90,18 +91,19 @@ impl Relations {
 
     /// Ensures that we have an entry for this name and the associated action.
     pub fn ensure_action(&mut self, comms: &mut crate::comms::Comms, name: &str, action: &Action<Vec<u8>>){
+        let thresh = 200_000_000 / comms.peers();
         let (base, transforms) = self.relations.entry(name.to_string()).or_default();
         if !action.is_identity() && !transforms.contains_key(action) {
             let mut fact_set = FactSet::default();
             // TODO: Can be more elegant if we see all columns retained, as it means no duplication.
             for layer in base.stable.contents() {
-                fact_set.stable.extend(layer.act_on(action));
+                fact_set.stable.extend(layer.act_on(action, thresh));
             }
             comms.exchange(&mut fact_set.stable);
             // Flattening deduplicates, which may be necessary as `action` may introduce collisions
             // across LSM layers.
             if let Some(stable) = fact_set.stable.flatten() { fact_set.stable.push(stable); }
-            let mut acted_on = if let Some(recent) = base.recent.as_ref() { recent.act_on(action) } else { FactLSM::default() };
+            let mut acted_on = if let Some(recent) = base.recent.as_ref() { recent.act_on(action, thresh) } else { FactLSM::default() };
             comms.exchange(&mut acted_on);
             if let Some(recent) = acted_on.flatten() {
                 fact_set.recent = recent.antijoin(fact_set.stable.contents()).flatten();
@@ -176,7 +178,7 @@ pub trait Arity {
 pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
 
     /// Applies an action to the facts, building the corresponding output.
-    fn act_on(&self, action: &Action<Vec<u8>>) -> FactLSM<Self>;
+    fn act_on(&self, action: &Action<Vec<u8>>, thresh: usize) -> FactLSM<Self>;
     /// The subset of `self` whose facts do not start with any prefix in `others`.
     fn antijoin<'a>(self, _others: impl Iterator<Item = &'a Self>) -> FactLSM<Self> where Self: 'a;
     /// The subset of `self` whose facts start with some prefix in `others`.
