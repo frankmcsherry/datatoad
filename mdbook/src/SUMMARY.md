@@ -15,10 +15,10 @@
     - [Log-structured merge tries](./chapter_1/chapter_1_4.md)
 
 - [Joins](./chapter_2/chapter_2.md)
-    - [Binary joins](./chapter_2/chapter_2_1.md)
-    - [Worst-case optimal joins](./chapter_2/chapter_2_2.md)
-    - [Unifying the two](./chapter_2/chapter_2_3.md)
-    - [Planning](./chapter_2/chapter_2_4.md)
+    - [Planning](./chapter_2/chapter_2_1.md)
+    - [Binary joins](./chapter_2/chapter_2_2.md)
+    - [Worst-case optimal joins](./chapter_2/chapter_2_3.md)
+    - [Execution abstractions](./chapter_2/chapter_2_4.md)
 
 - [Relations as Logic](./chapter_3/chapter_3.md)
     - [Abstract relations](./chapter_3/chapter_3_1.md)

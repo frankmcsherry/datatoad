@@ -1,15 +1,16 @@
 # Joins
 
-A binary equijoin on shared columns is a trie intersection: walk the shared prefix levels in lockstep, keeping only values that appear in both tries.
-For each surviving prefix, the unshared columns from each side are paired up.
+In Datalog each rule is translated to a multi-way equijoin.
+The rule
+```
+head(a, b, c) :- body0(a, x, y), body1(b, x, z), body2(c, y, z).
+```
+is a three-way join between `body0`, `body1`, and `body2`, with equality constraints imposed by the re-use of terms.
+The third field of `body0` must equal the second field of `body2`, for example.
 
-Worst-case optimal joins (GenericJoin) generalize this.
-Given multiple atoms sharing some terms, instead of picking a fixed pair to join first, the engine asks each atom: "for this prefix, how many extensions would you propose?"
-The atom with the fewest proposals wins, proposes its values, and the others validate by semijoin.
-This is a per-fact decision — different facts may route to different atoms, depending on which is cheapest for that particular prefix.
+Not only do we need to perform joins in Datalog, we often perform *incremental* joins.
+These are joins that start from some pre-existing facts, and need to update in response to new facts.
+For example, we might have additions to `body0`, written `d_body0`, and need to produce `d_head` in response.
+We would like to perform this efficiently, proportional only to the new facts we are producing.
 
-In datatoad, both binary joins and worst-case optimal joins are implemented as trie operations on sorted columns.
-A single-atom step is a binary join; a multi-atom step is the full count/propose/validate cycle.
-The same columnar machinery handles both.
-
-This chapter covers how datatoad evaluates joins: the binary join path, the worst-case optimal join path, how they are unified under a single framework, and how the planner decides which to use.
+In this section we discuss how datatoad plans and executes joins.
