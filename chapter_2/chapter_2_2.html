@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Worst-case optimal joins</title>
+        <title>Binary joins</title>
 
 
         <!-- Custom HTML head -->
@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-b0c0ab71.js";
+            window.path_to_searchindex_js = "../searchindex-4e75cc64.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-c330b71a.js"></script>
+        <script src="../toc-209194ab.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -174,8 +174,15 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="worst-case-optimal-joins"><a class="header" href="#worst-case-optimal-joins">Worst-case optimal joins</a></h1>
-<p>TODO: The GenericJoin framework. Count/propose/intersect. Per-fact adaptive atom selection. Why this matters for cyclic queries (triangles, etc.).</p>
+                        <h1 id="binary-joins"><a class="header" href="#binary-joins">Binary joins</a></h1>
+<p>Datatoad’s binary join stages occur when a plan has one atom and any number of terms.</p>
+<p>Binary joins are relatively easy when the two inputs are arranged as tries each starting with the columns to equate, in order.
+The first step is intersection: we find all pairs of indices corresponding to matching prefixes along the equated columns.
+The second step is enumeration: for each pair of indices we enumerate all pairs of remaining values from each input.</p>
+<p>Almost all of the complexity of datatoad’s binary join implementation is in performing a fused enumeration and projection.
+The projections, which lead to the trie layout of the next stage, are the main cost in joining.
+They end up very analogous to trie formation, with columnar radix sorting to form the output layers.</p>
+<p>The spirit here is very close to <a href="https://www.cs.ox.ac.uk/dan.olteanu/papers/os-sigrec16.pdf">factorized databases</a>, where aligning data is cheap, and one avoids materializing results until one is compelled (by a projection, for example).</p>
 
                     </main>
 

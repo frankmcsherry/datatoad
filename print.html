@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-b0c0ab71.js";
+            window.path_to_searchindex_js = "searchindex-4e75cc64.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c330b71a.js"></script>
+        <script src="toc-209194ab.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -644,28 +644,94 @@ This turns out to be not that hard; we do not need to flatten the LSM to one tri
 The requirement paves the way for other moments we might want to sum relations but cannot, for example if they have different representations (data v logic).</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="joins"><a class="header" href="#joins">Joins</a></h1>
-<p>A binary equijoin on shared columns is a trie intersection: walk the shared prefix levels in lockstep, keeping only values that appear in both tries.
-For each surviving prefix, the unshared columns from each side are paired up.</p>
-<p>Worst-case optimal joins (GenericJoin) generalize this.
-Given multiple atoms sharing some terms, instead of picking a fixed pair to join first, the engine asks each atom: “for this prefix, how many extensions would you propose?”
-The atom with the fewest proposals wins, proposes its values, and the others validate by semijoin.
-This is a per-fact decision — different facts may route to different atoms, depending on which is cheapest for that particular prefix.</p>
-<p>In datatoad, both binary joins and worst-case optimal joins are implemented as trie operations on sorted columns.
-A single-atom step is a binary join; a multi-atom step is the full count/propose/validate cycle.
-The same columnar machinery handles both.</p>
-<p>This chapter covers how datatoad evaluates joins: the binary join path, the worst-case optimal join path, how they are unified under a single framework, and how the planner decides which to use.</p>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="binary-joins"><a class="header" href="#binary-joins">Binary joins</a></h1>
-<p>TODO: Binary equijoin on sorted columnar data. Prefix alignment, lockstep merge, pairing of unshared columns.</p>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="worst-case-optimal-joins"><a class="header" href="#worst-case-optimal-joins">Worst-case optimal joins</a></h1>
-<p>TODO: The GenericJoin framework. Count/propose/intersect. Per-fact adaptive atom selection. Why this matters for cyclic queries (triangles, etc.).</p>
-<div style="break-before: page; page-break-before: always;"></div>
-<h1 id="unifying-the-two"><a class="header" href="#unifying-the-two">Unifying the two</a></h1>
-<p>TODO: How binary joins and WCOJ are both instances of the same <code>wco_join</code> function. Single atom = binary join. Multiple atoms = full WCOJ machinery. No special cases in the code path.</p>
+<p>In Datalog each rule is translated to a multi-way equijoin.
+The rule</p>
+<pre><code>head(a, b, c) :- body0(a, x, y), body1(b, x, z), body2(c, y, z).
+</code></pre>
+<p>is a three-way join between <code>body0</code>, <code>body1</code>, and <code>body2</code>, with equality constraints imposed by the re-use of terms.
+The third field of <code>body0</code> must equal the second field of <code>body2</code>, for example.</p>
+<p>Not only do we need to perform joins in Datalog, we often perform <em>incremental</em> joins.
+These are joins that start from some pre-existing facts, and need to update in response to new facts.
+For example, we might have additions to <code>body0</code>, written <code>d_body0</code>, and need to produce <code>d_head</code> in response.
+We would like to perform this efficiently, proportional only to the new facts we are producing.</p>
+<p>In this section we discuss how datatoad plans and executes joins.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="planning"><a class="header" href="#planning">Planning</a></h1>
-<p>TODO: How the planner selects join steps. Term grounding, action generation, atom ordering. The role of <code>PlanAtom::ground()</code> in determining what’s computable.</p>
+<p>Datatoad plans a rule by forming independent plans for each atom.
+Each of these plans is used when the atom presents with new facts.
+Unioned together, the results of these plans produce all new values of the rule head.</p>
+<p>Each individual atom plan is a sequence of pairs of terms and atoms.
+Starting from the terms of the atom, each <code>(terms, atoms)</code> stage adds new <code>terms</code>, and restricts their values by <code>atoms</code>.</p>
+<p>There are two common forms these take:</p>
+<ol>
+<li>Single atom, multiple term (conventional binary join),</li>
+<li>Single term, multiple atom (worst-case optimal join).</li>
+</ol>
+<p>The only requirement on the plan is that by the end of it, each atom has participated while all of its terms were present.
+This ensures that each binding of values to terms that we produce satisfies each atom in the rule.</p>
+<p>When planning a path, all atoms present through a common trait:</p>
+<pre><code>pub trait PlanAtom&lt;T: Ord&gt; {
+    /// Terms the atom references.
+    fn terms(&amp;self) -&gt; BTreeSet&lt;T&gt;;
+    /// For input terms, other terms the atom can ground.
+    fn ground(&amp;self, terms: &amp;BTreeSet&lt;T&gt;) -&gt; BTreeSet&lt;T&gt;;
+}
+</code></pre>
+<p>This trait explains the set of terms, and helps the planner navigate the relationship among terms.</p>
+<p>For most data-based atoms, the terms are those of the atom and every term can be ground.
+These atoms can be used at any moment, as they can always just enumerate their contents.
+Obviously we prefer to do something more clever with them than this.</p>
+<p>For logic-based atoms, the story can be more complicated.
+The operator <code>order(a, b, c) : a &lt; b &lt; c</code> could ground <code>b</code> given <code>(a, c)</code>, but cannot ground <code>c</code> given <code>(a, b)</code>.
+Logic based atoms can have a “direction” to their planning hyper-edge.</p>
+<p>The datatoad planner starts from the terms of the source atom, and repeatedly adds terms that can be ground from the present terms.
+The planner has some heuristic preferences to involve terms that are constrained by multiple atoms, seeking the benefits of worst-case optimal joins early.
+There is much room to improve the depth of thought here, and conversations are welcome.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="binary-joins"><a class="header" href="#binary-joins">Binary joins</a></h1>
+<p>Datatoad’s binary join stages occur when a plan has one atom and any number of terms.</p>
+<p>Binary joins are relatively easy when the two inputs are arranged as tries each starting with the columns to equate, in order.
+The first step is intersection: we find all pairs of indices corresponding to matching prefixes along the equated columns.
+The second step is enumeration: for each pair of indices we enumerate all pairs of remaining values from each input.</p>
+<p>Almost all of the complexity of datatoad’s binary join implementation is in performing a fused enumeration and projection.
+The projections, which lead to the trie layout of the next stage, are the main cost in joining.
+They end up very analogous to trie formation, with columnar radix sorting to form the output layers.</p>
+<p>The spirit here is very close to <a href="https://www.cs.ox.ac.uk/dan.olteanu/papers/os-sigrec16.pdf">factorized databases</a>, where aligning data is cheap, and one avoids materializing results until one is compelled (by a projection, for example).</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="worst-case-optimal-joins"><a class="header" href="#worst-case-optimal-joins">Worst-case optimal joins</a></h1>
+<p>Datatoad’s worst-case optimal (WCO) join stages happen when there is one term and multiple atoms.</p>
+<p>The WCO stages will build on binary joins as a primitive.
+In fact, these stages are just a few binary joins, with a careful switch put in to place.</p>
+<p>When a stage has one term and multiple atoms, each atom involves the term and some other set of existing terms (perhaps none).
+For each tentative partial fact, a list of term bindings, each atom is probed to ask “how many values of the new term would you introduce?”.
+Each atom is then joined with the set of tentative partial facts for which the atom proposes the fewest values of the term.
+Finally, all newly extended facts are semijoined with all atoms, to confirm that each term that was added works for all atoms.</p>
+<p>The operation of counting the values of the term, rather than producing the values, is the new addition.
+A WCO join stage starts with the counting, and partitions the facts.
+The parts are then joined with each of their respective atoms.
+All parts are merged and semijoined with all of the atoms.</p>
+<h2 id="sequestration"><a class="header" href="#sequestration">Sequestration</a></h2>
+<p>When extending terms <code>(a, b, c)</code> to <code>d</code> through <code>body0(b, d)</code> and <code>body1(c, d)</code>, we will “sequester” column <code>a</code>.
+We rotate the terms to be ordered <code>(b, c, a)</code> and then put the last layer to the side.
+We then join <code>(b, c)</code> to get <code>(b, c, d)</code> and re-assemble with the independent <code>a</code> column.
+Holding <code>a</code> to the side reduces the volume of data, potentially asymptotically.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="execution-abstractions"><a class="header" href="#execution-abstractions">Execution abstractions</a></h1>
+<p>Each atom involved in join execution implements a trait with two key methods:</p>
+<pre><code>pub trait ExecAtom&lt;T: Ord&gt; {
+    /// For each fact in `delta`, the number of distinct values for terms in `added`.
+    fn count(&amp;self, delta: &amp;Facts, added: &amp;BTreeSet&lt;T&gt;) -&gt; Vec&lt;u64&gt;;
+    /// Joins `self` with `delta`, introducing terms in `added`, and projected to `after`.
+    fn join(&amp;self, delta: &amp;mut Facts, added: &amp;BTreeSet&lt;T&gt;, after: &amp;[T]);
+}
+</code></pre>
+<p>These methods allow us to implement binary joins, semijoins, and worst-case optimal joins.</p>
+<p>Importantly, these methods can be implemented not only by columnar tries of data.
+Antijoins are implemented using this interface, but are only able to semijoin facts.
+Logic relations are also implemented this way, providing counts and values for any terms they have advertised they can ground.</p>
+<p>There is a contract between <code>PlanAtom</code> and <code>ExecAtom</code>.
+If an atom advertises that it can ground a term as a function of other terms, then it must both propose a count and be able to enumerate the values of the terms.
+Atoms like antijoins will not advertise grounding any term, and can error if asked to count or propose terms; they should correctly semijoin when asked.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="relations-as-logic"><a class="header" href="#relations-as-logic">Relations as Logic</a></h1>
 <p>In most Datalog engines, an atom in a rule body refers to a stored relation: a table of facts.

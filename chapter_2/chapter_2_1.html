@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Binary joins</title>
+        <title>Planning</title>
 
 
         <!-- Custom HTML head -->
@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-b0c0ab71.js";
+            window.path_to_searchindex_js = "../searchindex-4e75cc64.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-c330b71a.js"></script>
+        <script src="../toc-209194ab.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -174,8 +174,37 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="binary-joins"><a class="header" href="#binary-joins">Binary joins</a></h1>
-<p>TODO: Binary equijoin on sorted columnar data. Prefix alignment, lockstep merge, pairing of unshared columns.</p>
+                        <h1 id="planning"><a class="header" href="#planning">Planning</a></h1>
+<p>Datatoad plans a rule by forming independent plans for each atom.
+Each of these plans is used when the atom presents with new facts.
+Unioned together, the results of these plans produce all new values of the rule head.</p>
+<p>Each individual atom plan is a sequence of pairs of terms and atoms.
+Starting from the terms of the atom, each <code>(terms, atoms)</code> stage adds new <code>terms</code>, and restricts their values by <code>atoms</code>.</p>
+<p>There are two common forms these take:</p>
+<ol>
+<li>Single atom, multiple term (conventional binary join),</li>
+<li>Single term, multiple atom (worst-case optimal join).</li>
+</ol>
+<p>The only requirement on the plan is that by the end of it, each atom has participated while all of its terms were present.
+This ensures that each binding of values to terms that we produce satisfies each atom in the rule.</p>
+<p>When planning a path, all atoms present through a common trait:</p>
+<pre><code>pub trait PlanAtom&lt;T: Ord&gt; {
+    /// Terms the atom references.
+    fn terms(&amp;self) -&gt; BTreeSet&lt;T&gt;;
+    /// For input terms, other terms the atom can ground.
+    fn ground(&amp;self, terms: &amp;BTreeSet&lt;T&gt;) -&gt; BTreeSet&lt;T&gt;;
+}
+</code></pre>
+<p>This trait explains the set of terms, and helps the planner navigate the relationship among terms.</p>
+<p>For most data-based atoms, the terms are those of the atom and every term can be ground.
+These atoms can be used at any moment, as they can always just enumerate their contents.
+Obviously we prefer to do something more clever with them than this.</p>
+<p>For logic-based atoms, the story can be more complicated.
+The operator <code>order(a, b, c) : a &lt; b &lt; c</code> could ground <code>b</code> given <code>(a, c)</code>, but cannot ground <code>c</code> given <code>(a, b)</code>.
+Logic based atoms can have a “direction” to their planning hyper-edge.</p>
+<p>The datatoad planner starts from the terms of the source atom, and repeatedly adds terms that can be ground from the present terms.
+The planner has some heuristic preferences to involve terms that are constrained by multiple atoms, seeking the benefits of worst-case optimal joins early.
+There is much room to improve the depth of thought here, and conversations are welcome.</p>
 
                     </main>
 

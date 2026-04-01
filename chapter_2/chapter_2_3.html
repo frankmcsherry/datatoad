@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Unifying the two</title>
+        <title>Worst-case optimal joins</title>
 
 
         <!-- Custom HTML head -->
@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-b0c0ab71.js";
+            window.path_to_searchindex_js = "../searchindex-4e75cc64.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-c330b71a.js"></script>
+        <script src="../toc-209194ab.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -174,8 +174,23 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="unifying-the-two"><a class="header" href="#unifying-the-two">Unifying the two</a></h1>
-<p>TODO: How binary joins and WCOJ are both instances of the same <code>wco_join</code> function. Single atom = binary join. Multiple atoms = full WCOJ machinery. No special cases in the code path.</p>
+                        <h1 id="worst-case-optimal-joins"><a class="header" href="#worst-case-optimal-joins">Worst-case optimal joins</a></h1>
+<p>Datatoad’s worst-case optimal (WCO) join stages happen when there is one term and multiple atoms.</p>
+<p>The WCO stages will build on binary joins as a primitive.
+In fact, these stages are just a few binary joins, with a careful switch put in to place.</p>
+<p>When a stage has one term and multiple atoms, each atom involves the term and some other set of existing terms (perhaps none).
+For each tentative partial fact, a list of term bindings, each atom is probed to ask “how many values of the new term would you introduce?”.
+Each atom is then joined with the set of tentative partial facts for which the atom proposes the fewest values of the term.
+Finally, all newly extended facts are semijoined with all atoms, to confirm that each term that was added works for all atoms.</p>
+<p>The operation of counting the values of the term, rather than producing the values, is the new addition.
+A WCO join stage starts with the counting, and partitions the facts.
+The parts are then joined with each of their respective atoms.
+All parts are merged and semijoined with all of the atoms.</p>
+<h2 id="sequestration"><a class="header" href="#sequestration">Sequestration</a></h2>
+<p>When extending terms <code>(a, b, c)</code> to <code>d</code> through <code>body0(b, d)</code> and <code>body1(c, d)</code>, we will “sequester” column <code>a</code>.
+We rotate the terms to be ordered <code>(b, c, a)</code> and then put the last layer to the side.
+We then join <code>(b, c)</code> to get <code>(b, c, d)</code> and re-assemble with the independent <code>a</code> column.
+Holding <code>a</code> to the side reduces the volume of data, potentially asymptotically.</p>
 
                     </main>
 

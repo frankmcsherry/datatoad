@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Planning</title>
+        <title>Execution abstractions</title>
 
 
         <!-- Custom HTML head -->
@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-b0c0ab71.js";
+            window.path_to_searchindex_js = "../searchindex-4e75cc64.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-c330b71a.js"></script>
+        <script src="../toc-209194ab.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -174,8 +174,22 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="planning"><a class="header" href="#planning">Planning</a></h1>
-<p>TODO: How the planner selects join steps. Term grounding, action generation, atom ordering. The role of <code>PlanAtom::ground()</code> in determining what’s computable.</p>
+                        <h1 id="execution-abstractions"><a class="header" href="#execution-abstractions">Execution abstractions</a></h1>
+<p>Each atom involved in join execution implements a trait with two key methods:</p>
+<pre><code>pub trait ExecAtom&lt;T: Ord&gt; {
+    /// For each fact in `delta`, the number of distinct values for terms in `added`.
+    fn count(&amp;self, delta: &amp;Facts, added: &amp;BTreeSet&lt;T&gt;) -&gt; Vec&lt;u64&gt;;
+    /// Joins `self` with `delta`, introducing terms in `added`, and projected to `after`.
+    fn join(&amp;self, delta: &amp;mut Facts, added: &amp;BTreeSet&lt;T&gt;, after: &amp;[T]);
+}
+</code></pre>
+<p>These methods allow us to implement binary joins, semijoins, and worst-case optimal joins.</p>
+<p>Importantly, these methods can be implemented not only by columnar tries of data.
+Antijoins are implemented using this interface, but are only able to semijoin facts.
+Logic relations are also implemented this way, providing counts and values for any terms they have advertised they can ground.</p>
+<p>There is a contract between <code>PlanAtom</code> and <code>ExecAtom</code>.
+If an atom advertises that it can ground a term as a function of other terms, then it must both propose a count and be able to enumerate the values of the terms.
+Atoms like antijoins will not advertise grounding any term, and can error if asked to count or propose terms; they should correctly semijoin when asked.</p>
 
                     </main>
 

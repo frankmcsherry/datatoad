@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-b0c0ab71.js";
+            window.path_to_searchindex_js = "../searchindex-4e75cc64.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-c330b71a.js"></script>
+        <script src="../toc-209194ab.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -175,16 +175,17 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="joins"><a class="header" href="#joins">Joins</a></h1>
-<p>A binary equijoin on shared columns is a trie intersection: walk the shared prefix levels in lockstep, keeping only values that appear in both tries.
-For each surviving prefix, the unshared columns from each side are paired up.</p>
-<p>Worst-case optimal joins (GenericJoin) generalize this.
-Given multiple atoms sharing some terms, instead of picking a fixed pair to join first, the engine asks each atom: “for this prefix, how many extensions would you propose?”
-The atom with the fewest proposals wins, proposes its values, and the others validate by semijoin.
-This is a per-fact decision — different facts may route to different atoms, depending on which is cheapest for that particular prefix.</p>
-<p>In datatoad, both binary joins and worst-case optimal joins are implemented as trie operations on sorted columns.
-A single-atom step is a binary join; a multi-atom step is the full count/propose/validate cycle.
-The same columnar machinery handles both.</p>
-<p>This chapter covers how datatoad evaluates joins: the binary join path, the worst-case optimal join path, how they are unified under a single framework, and how the planner decides which to use.</p>
+<p>In Datalog each rule is translated to a multi-way equijoin.
+The rule</p>
+<pre><code>head(a, b, c) :- body0(a, x, y), body1(b, x, z), body2(c, y, z).
+</code></pre>
+<p>is a three-way join between <code>body0</code>, <code>body1</code>, and <code>body2</code>, with equality constraints imposed by the re-use of terms.
+The third field of <code>body0</code> must equal the second field of <code>body2</code>, for example.</p>
+<p>Not only do we need to perform joins in Datalog, we often perform <em>incremental</em> joins.
+These are joins that start from some pre-existing facts, and need to update in response to new facts.
+For example, we might have additions to <code>body0</code>, written <code>d_body0</code>, and need to produce <code>d_head</code> in response.
+We would like to perform this efficiently, proportional only to the new facts we are producing.</p>
+<p>In this section we discuss how datatoad plans and executes joins.</p>
 
                     </main>
 
