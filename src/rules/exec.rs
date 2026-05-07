@@ -125,8 +125,17 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
     potato: T,
     target: &[T],
 ) {
-    // Single atoms are handled using a conventional equijoin.
-    if atoms.len() == 1 { atoms[0].join(comms, salad, terms, target); }
+    if atoms.is_empty() {
+        // No constraints to apply; only the trailing `prune_to` runs.
+    }
+    else if atoms.len() == 1 {
+        // Single atom: conventional equijoin or semijoin, dispatched by `terms`.
+        atoms[0].join(comms, salad, terms, target);
+    }
+    else if terms.is_empty() {
+        // Multi-atom with no new terms is a multi-way semijoin; chain per-atom.
+        for atom in atoms { atom.join(comms, salad, terms, target); }
+    }
     else {
         // Multiple atoms will use worst-case optimal machinery, but we first sequester any columns not referenced by the atoms.
         let shared = salad.terms.iter().filter(|t| atoms.iter().any(|a| a.terms().contains(t))).copied().collect::<Vec<_>>();

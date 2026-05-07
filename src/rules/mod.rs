@@ -81,7 +81,17 @@ impl crate::types::State {
             let plan = &plans[&plan_atom];
             let plan_loads = &loads[&plan_atom];
 
-            // Stage 0: Load the recently added facts.
+            // Ensure arranged facts exist before anything else captures conduits — once we
+            // start capturing them it is too late to change others. The pre-pass covers the
+            // driver too (it is present in `plan_loads`), so Stage 0 below need not re-ensure.
+            for (load_atom, (action, _)) in plan_loads.iter() {
+                if logic::resolve(&body[*load_atom]).is_none() {
+                    self.facts.ensure_action(&mut self.comms, body[*load_atom].name.as_str(), action);
+                }
+            }
+
+            // Stage 0: Load the initial added facts.
+            // If `stable` these are all facts, and if not they are only recent novel facts.
             let (action, terms) = &plan_loads[&plan_atom];
             let mut salad = crate::rules::exec::Salad::new(FactLSM::default(), Vec::default());
             if let Some(logic) = logic::resolve(&body[plan_atom]) {
@@ -90,34 +100,24 @@ impl crate::types::State {
                 boxed_atom.join(&mut self.comms, &mut salad, &terms.iter().copied().collect(), &terms);
             }
             else {
-                self.facts.ensure_action(&mut self.comms, body[plan_atom].name.as_str(), action);
                 let dataz = &self.facts.get_action(atom.name.as_str(), action).unwrap();
                 salad.terms = terms.clone();
                 salad.extend(dataz.stable.contents().filter(|_| stable).chain(dataz.recent.as_ref()).cloned());
             }
 
-            // Ensure arranged facts exist first, as once we start capturing them it is too late to change others.
-            for (load_atom, (action, _)) in plan_loads.iter() {
-                if logic::resolve(&body[*load_atom]).is_none() {
-                    self.facts.ensure_action(&mut self.comms, body[*load_atom].name.as_str(), action);
-                }
-            }
-
-            // Stage 1: Semijoin with other atoms that are subsumed by the initial terms.
-            let (init_atoms, _init_terms, init_order) = &plan[0];
-            for load_atom in init_atoms.iter().filter(|a| a != &&plan_atom) {
-                let boxed_atom = build_load_atom(body, plan_atom, *load_atom, plan_loads, &self.facts);
-                boxed_atom.join(&mut self.comms, &mut salad, &Default::default(), init_order);
-            }
-            // We may need to produce the result in a different order.
-            salad.prune_to(&mut self.comms, init_order.iter().copied());
-
-            // Stage 2: Each other plan stage.
-            for (atoms, terms, order) in plan.iter().skip(1) {
-                let others = atoms.iter()
+            // Pre-build all boxed atoms for every plan stage in one pass.
+            // After this operation we no longer read `self.facts` until we need to commit derived facts.
+            let stages_boxed = plan.iter()
+                .map(|(atoms, _, _)| atoms.iter()
+                    .filter(|a| a != &&plan_atom)
                     .map(|load_atom| build_load_atom(body, plan_atom, *load_atom, plan_loads, &self.facts))
-                    .collect::<Vec<_>>();
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>();
 
+            // Each stage goes through `wco_join`, although the first stage modifies its terms,
+            // as they are already present in `salad` and re-adding them would confuse `wco_join`.
+            for (i, ((_, plan_terms, order), others)) in plan.iter().zip(stages_boxed).enumerate() {
+                let terms = if i == 0 { &Default::default() } else { plan_terms };
                 exec::wco_join(&mut self.comms, &mut salad, terms, &others[..], &potato, &order[..]);
             }
 
