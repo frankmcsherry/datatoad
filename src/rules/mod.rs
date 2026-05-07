@@ -15,7 +15,7 @@
 //! These traits are implemented for relations that are *explicit* (represented by data) and *implicit* (represented by code), and in-between (e.g. antijoins).
 
 use crate::types::{Atom, Rule, Action, Term};
-use crate::facts::{FactContainer, FactLSM, Relations};
+use crate::facts::{FactContainer, FactLSM, Forest, Relations, Terms};
 
 pub mod plan;
 pub mod exec;
@@ -29,25 +29,25 @@ pub use exec::ExecAtom;
 /// properties, and threads the appropriate stable/recent split per the
 /// semi-naive convention: atoms whose index exceeds the driver's contribute
 /// their `recent` facts, others contribute only `stable`.
-fn build_load_atom<'a: 'b, 'b>(
+fn build_load_atom<'a>(
     body: &'a [Atom],
     plan_atom: usize,
     load_atom: usize,
-    loads: &'b std::collections::BTreeMap<usize, plan::Load<&'a String>>,
-    facts: &'b Relations,
-) -> Box<dyn exec::ExecAtom<&'a String> + 'b>
-{
+    loads: &std::collections::BTreeMap<usize, plan::Load<&'a String>>,
+    facts: &Relations,
+) -> Box<dyn exec::ExecAtom<&'a String> + 'a> {
     if let Some(logic) = logic::resolve(&body[load_atom]) {
         Box::new(logic)
     } else {
         let (load_action, load_terms) = &loads[&load_atom];
         let other = facts.get_action(body[load_atom].name.as_str(), load_action).unwrap();
         let to_chain = if load_atom > plan_atom { other.recent.as_ref() } else { None };
-        let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
+        let other_facts: Vec<Forest<Terms>> = other.stable.contents().chain(to_chain).cloned().collect();
+        let owned_terms: Vec<&'a String> = load_terms.clone();
         if body[load_atom].anti {
-            Box::new(antijoin::Anti((other_facts, load_terms)))
+            Box::new(antijoin::Anti((other_facts, owned_terms)))
         } else {
-            Box::new((other_facts, load_terms))
+            Box::new((other_facts, owned_terms))
         }
     }
 }
@@ -177,9 +177,9 @@ pub mod data {
         fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T> { self.difference(terms).cloned().collect() }
     }
 
-    impl<'a, T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<&'a Forest<Terms>>, &'a Vec<T>) {
+    impl<T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<T>) {
 
-        fn terms(&self) -> &[T] { self.1 }
+        fn terms(&self) -> &[T] { &self.1 }
 
         fn count(&self, comms: &mut Comms, salad: &mut Salad<T>, terms: &BTreeSet<T>, other_index: u8) {
 
@@ -271,7 +271,7 @@ pub mod data {
                     let join_terms = salad.terms.iter().chain(salad.terms[..prefix].iter()).chain(terms.iter()).copied().collect::<Vec<_>>();
                     // Our output join order (until we learn how to do FDB shapes) is the first of `others` not equal to ourself.
                     let projection = after.iter().map(|t| join_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
-                    salad.facts.extend(delta.join_many(my_facts.iter().copied(), prefix, &projection[..], conduit));
+                    salad.facts.extend(delta.join_many(my_facts.iter(), prefix, &projection[..], conduit));
                 }
                 else {
                     salad.facts.extend(conduit.finish());
@@ -307,9 +307,9 @@ pub mod antijoin {
         fn ground(&self, _terms: &BTreeSet<T>) -> BTreeSet<T> { Default::default() }
     }
 
-    impl<'a, T: Ord + Copy+std::fmt::Debug> ExecAtom<T> for Anti<(Vec<&'a Forest<Terms>>, &'a Vec<T>)> {
+    impl<T: Ord + Copy+std::fmt::Debug> ExecAtom<T> for Anti<(Vec<Forest<Terms>>, Vec<T>)> {
 
-        fn terms(&self) -> &[T] { self.0.1 }
+        fn terms(&self) -> &[T] { &self.0.1 }
 
         fn count(&self, _: &mut Comms, _: &mut Salad<T>, _: &BTreeSet<T>, _: u8) { }
 
