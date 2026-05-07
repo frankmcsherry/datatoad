@@ -1,14 +1,14 @@
 use std::rc::Rc;
 use std::cell::RefCell;
 
-use timely_communication::{Allocate, allocator::Generic, Bytesable};
+use timely_communication::{allocator::Allocator, Bytesable};
 use crate::facts::{FactLSM, Forest, Lists, Terms};
 use crate::facts::trie::Layer;
 
 #[derive(Default)]
 pub struct Comms {
     /// If set, communication infrastructure.
-    pub ether: Option<Rc<RefCell<Generic>>>,
+    pub ether: Option<Rc<RefCell<Allocator>>>,
     /// An incrementing channel identifier.
     count: usize,
 }
@@ -86,14 +86,14 @@ impl Comms {
     }
 }
 
-impl From<Generic> for Comms {
-    fn from(comm: Generic) -> Self { Self { ether: Some(Rc::new(RefCell::new(comm))), count: 0 } }
+impl From<Allocator> for Comms {
+    fn from(comm: Allocator) -> Self { Self { ether: Some(Rc::new(RefCell::new(comm))), count: 0 } }
 }
 
 use timely_communication::{Push, Pull};
 
 pub struct Channel {
-    comms: Rc<RefCell<Generic>>,
+    comms: Rc<RefCell<Allocator>>,
     sends: Vec<Box<dyn Push<FactMessage>>>,
     recv: Box<dyn Pull<FactMessage>>,
     count: usize,
