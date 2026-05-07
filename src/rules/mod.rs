@@ -79,21 +79,39 @@ impl crate::types::State {
 
         let potato = ".potato".to_string();
 
-        for (plan_atom, plan) in plans.iter() {
-            let plan_atom = *plan_atom;
-            let atom = &body[plan_atom];
-            let plan_loads = &loads[&plan_atom];
-
-            // Ensure arranged facts exist before anything else captures conduits — once we
-            // start capturing them it is too late to change others. The pre-pass covers the
-            // driver too (it is present in `plan_loads`), so Stage 0 below need not re-ensure.
+        //  Build phase.
+        //      1. Ensure arranged facts exist for every load atom across every plan_atom.
+        //      2. Pre-build all boxed atoms for every (plan_atom, stage).
+        for (plan_atom, _plan) in plans.iter() {
+            let plan_loads = &loads[plan_atom];
             for (load_atom, (action, _)) in plan_loads.iter() {
                 if logic::resolve(&body[*load_atom]).is_none() {
                     self.facts.ensure_action(&mut self.comms, body[*load_atom].name.as_str(), action);
                 }
             }
+        }
+        let all_stages_boxed: Vec<_> = plans.iter()
+            .map(|(plan_atom, plan)| {
+                let plan_loads = &loads[plan_atom];
+                plan.iter()
+                    .map(|(atoms, _, _)| atoms.iter()
+                        .map(|load_atom| build_load_atom(body, *plan_atom, *load_atom, plan_loads, &self.facts))
+                        .collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
 
-            // Stage 0: Load the initial added facts.
+        //  Execute phase. Each planned delta atom
+        //      1. loads its facts, then
+        //      2. repeatedly joins in new terms, then
+        //      3. commits derived facts to the stores for head atoms.
+
+        for ((plan_atom, plan), stages_boxed) in plans.iter().zip(all_stages_boxed) {
+            let plan_atom = *plan_atom;
+            let atom = &body[plan_atom];
+            let plan_loads = &loads[&plan_atom];
+
+            // Step 1: Load the initial facts to seed the sequence of joins.
             // If `stable` these are all facts, and if not they are only recent novel facts.
             let (action, terms) = &plan_loads[&plan_atom];
             let mut salad = crate::rules::exec::Salad::new(FactLSM::default(), Vec::default());
@@ -108,21 +126,12 @@ impl crate::types::State {
                 salad.extend(dataz.stable.contents().filter(|_| stable).chain(dataz.recent.as_ref()).cloned());
             }
 
-            // Pre-build all boxed atoms for every plan stage in one pass.
-            // After this operation we no longer read `self.facts` until we need to commit derived facts.
-            let stages_boxed = plan.iter()
-                .map(|(atoms, _, _)| atoms.iter()
-                    .map(|load_atom| build_load_atom(body, plan_atom, *load_atom, plan_loads, &self.facts))
-                    .collect::<Vec<_>>())
-                .collect::<Vec<_>>();
-
-            // Each stage goes through `wco_join` uniformly. Stage 0's terms have been cleared
-            // by `plan_rule` (driver-loaded terms aren't introduced by stage 0's atom-side ops).
+            // Step 2: Repeatedly join in sets of terms through sets of atoms.
             for ((_, terms, order), others) in plan.iter().zip(stages_boxed) {
                 exec::wco_join(&mut self.comms, &mut salad, terms, &others[..], &potato, &order[..]);
             }
 
-            // Stage 3: Commit produced facts back to `self.facts`, one head atom at a time.
+            // Stage 3: Commit produced facts back to head atoms in `self.facts`.
             self.emit_head_facts(head, salad);
         }
     }
