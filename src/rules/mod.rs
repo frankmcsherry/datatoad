@@ -63,22 +63,25 @@ impl crate::types::State {
         let head = &rule.head[..];
         let body = &rule.body[..];
 
-        let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body).expect("Unable to plan");
+        // Body atoms that should take a turn as the source of novelty this round.
+        // In `stable` mode only the first body atom drives; in incremental mode every
+        // atom takes a turn, optionally restricted to those whose relation has recent
+        // facts on some worker.
+        let delta_atoms: Vec<usize> = if stable {
+            vec![0]
+        } else if let Some(active) = active_relations {
+            (0..body.len()).filter(|i| active.contains(body[*i].name.as_str())).collect()
+        } else {
+            (0..body.len()).collect()
+        };
 
-        let plan_atoms = if stable { 1 } else { body.len() };
+        let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body, &delta_atoms).expect("Unable to plan");
 
         let potato = ".potato".to_string();
 
-        for (plan_atom, atom) in body[..plan_atoms].iter().enumerate() {
-
-            if !plans.contains_key(&plan_atom) { continue; }
-
-            // Skip this plan when the starting atom has no recent facts on any worker.
-            if let Some(active) = active_relations {
-                if !stable && !active.contains(atom.name.as_str()) { continue; }
-            }
-
-            let plan = &plans[&plan_atom];
+        for (plan_atom, plan) in plans.iter() {
+            let plan_atom = *plan_atom;
+            let atom = &body[plan_atom];
             let plan_loads = &loads[&plan_atom];
 
             // Ensure arranged facts exist before anything else captures conduits — once we
@@ -109,15 +112,13 @@ impl crate::types::State {
             // After this operation we no longer read `self.facts` until we need to commit derived facts.
             let stages_boxed = plan.iter()
                 .map(|(atoms, _, _)| atoms.iter()
-                    .filter(|a| a != &&plan_atom)
                     .map(|load_atom| build_load_atom(body, plan_atom, *load_atom, plan_loads, &self.facts))
                     .collect::<Vec<_>>())
                 .collect::<Vec<_>>();
 
-            // Each stage goes through `wco_join`, although the first stage modifies its terms,
-            // as they are already present in `salad` and re-adding them would confuse `wco_join`.
-            for (i, ((_, plan_terms, order), others)) in plan.iter().zip(stages_boxed).enumerate() {
-                let terms = if i == 0 { &Default::default() } else { plan_terms };
+            // Each stage goes through `wco_join` uniformly. Stage 0's terms have been cleared
+            // by `plan_rule` (driver-loaded terms aren't introduced by stage 0's atom-side ops).
+            for ((_, terms, order), others) in plan.iter().zip(stages_boxed) {
                 exec::wco_join(&mut self.comms, &mut salad, terms, &others[..], &potato, &order[..]);
             }
 

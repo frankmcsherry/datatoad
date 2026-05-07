@@ -39,7 +39,13 @@ pub type Plans<A, T> = BTreeMap<A, Plan<A, T>>;
 pub type Load<T> = (Action<Vec<u8>>, Vec<T>);
 pub type Loads<A, T> = BTreeMap<A, BTreeMap<A, Load<T>>>;
 
-pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a [Atom]) -> Result<(Plans<usize, &'a String>, Loads<usize, &'a String>), String> {
+/// Plan the rule, generating a per-`delta_atoms` update plan.
+///
+/// Each entry in `delta_atoms` names a body atom that should take a turn as the source of
+/// novelty (the semi-naive delta). The returned plans map contains an entry for each
+/// requested delta atom that the strategy can plan (logic atoms that can't ground all
+/// their terms are silently dropped, regardless of the request).
+pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a [Atom], delta_atoms: &[usize]) -> Result<(Plans<usize, &'a String>, Loads<usize, &'a String>), String> {
 
     // We'll pick a target term order for the first head; other heads may require transforms.
     // If we have multiple heads and one has no literals or repetitions, that would be best.
@@ -57,7 +63,7 @@ pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a
 
     // We'll want to pre-plan the term orders for each atom update rule, so that we can
     // pre-ensure that the necessary input shapes exist, with each atom in term order.
-    let plans = S::plan_rule(&atoms, &head_terms);
+    let mut plans = S::plan_rule(&atoms, delta_atoms, &head_terms);
 
     // Actions for each atom that would produce the output in `terms` order.
     // Their output columns should now be ordered as `atoms_to_terms[atom]`.
@@ -110,6 +116,18 @@ pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a
                  .collect();
 
             load_actions.get_mut(&plan_atom).map(|l| l.insert(plan_atom, (action, order)));
+        }
+    }
+
+    // Tidy stage 0 for the executor: drop the driver from its own stage 0 atoms (it is
+    // already loaded as the salad), and clear stage 0's terms (they are present in the
+    // salad from the driver load, not introduced by stage 0's atom-side operations).
+    // Both transformations are post-hoc — the planner's projection logic above relies
+    // on stage 0's terms holding `init_terms`, so we wait until that work is done.
+    for (plan_atom, plan) in plans.iter_mut() {
+        if let Some((atoms, terms, _)) = plan.first_mut() {
+            atoms.remove(plan_atom);
+            terms.clear();
         }
     }
 
@@ -176,8 +194,12 @@ pub trait Strategy<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> {
     /// atom can ground any of their terms as a function of other ground terms.
     fn plan_atom(atom: A, atoms_to_terms: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>, terms_to_atoms: &BTreeMap<T, BTreeSet<A>>) -> Plan<A, T>;
 
-    /// Plans updates for each atom in the rule.
-    fn plan_rule(boxed_atoms: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>, head_terms: &[T]) -> BTreeMap<A, Plan<A, T>> {
+    /// Plans updates for the requested `delta_atoms`.
+    ///
+    /// Each `delta_atom` is a body atom that should take a turn as the source of novelty.
+    /// Atoms that the strategy can't ground (e.g. logic atoms) are silently dropped from
+    /// the result.
+    fn plan_rule(boxed_atoms: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>, delta_atoms: &[A], head_terms: &[T]) -> BTreeMap<A, Plan<A, T>> {
 
         let mut terms_to_atoms: BTreeMap<T, BTreeSet<A>> = Default::default();
         for (atom, boxed) in boxed_atoms.iter() { for term in boxed.terms() { terms_to_atoms.entry(term).or_default().insert(*atom); } }
@@ -194,8 +216,8 @@ pub trait Strategy<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> {
         }
 
         let mut rule_plan = BTreeMap::default();
-        for atom in boxed_atoms.keys().copied() {
-            if boxed_atoms[&atom].terms() == boxed_atoms[&atom].ground(&Default::default()) {
+        for atom in delta_atoms.iter().copied() {
+            if boxed_atoms.get(&atom).is_some_and(|b| b.terms() == b.ground(&Default::default())) {
                 let mut atom_plan = Self::plan_atom(atom, boxed_atoms, &terms_to_atoms);
 
                 // Fuse plan stages with identical single atoms.
