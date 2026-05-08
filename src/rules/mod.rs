@@ -53,17 +53,33 @@ fn build_atom<'a>(
     }
 }
 
+/// One plan stage's pre-built non-driver atoms, in plan order.
+type StageBoxes<'a> = Vec<Box<dyn exec::ExecAtom<&'a String> + 'a>>;
+
+/// All driver-keyed plans' boxed stages, parallel to `Plans`.
+type DriverStages<'a> = Vec<Vec<StageBoxes<'a>>>;
+
 impl crate::types::State {
 
-    /// Implements a provided rule in the context of various facts.
+    /// Plans a rule body and pre-builds the boxed non-driver atoms for every stage.
     ///
-    /// The `stable` argument indicates whether we should perform a join with all facts (true),
-    /// or only a join that involves novel facts (false).
-    pub fn implement(&mut self, rule: &Rule, stable: bool, active_relations: Option<&std::collections::BTreeSet<&str>>) {
-
-        let head = &rule.head[..];
-        let body = &rule.body[..];
-
+    /// Returns the planner's output (`plans`, `loads`) plus, in parallel with `plans`,
+    /// the boxed atoms for each stage of each driver. The caller drives execution per
+    /// driver against this apparatus (and may emit head facts, union into a sum, etc.).
+    ///
+    /// This is steps 1-4 of `implement`: choose drivers, plan, ensure index actions,
+    /// and build boxed atoms. Execution and head emission are the caller's concern.
+    pub fn plan_and_build<'a>(
+        &mut self,
+        body: &'a [Atom],
+        head: &'a [Atom],
+        stable: bool,
+        active_relations: Option<&std::collections::BTreeSet<&str>>,
+    ) -> (
+        plan::Plans<usize, &'a String>,
+        plan::Loads<usize, &'a String>,
+        DriverStages<'a>,
+    ) {
         // Body atoms that should take a turn as the source of novelty this round.
         // In `stable` mode only the first body atom drives; in incremental mode every
         // atom takes a turn, optionally restricted to those whose relation has recent
@@ -78,11 +94,7 @@ impl crate::types::State {
 
         let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body, &delta_atoms).expect("Unable to plan");
 
-        let potato = ".potato".to_string();
-
-        //  Build phase.
-        //      1. Ensure arranged facts exist for every load atom across every plan_atom.
-        //      2. Pre-build all boxed atoms for every (plan_atom, stage).
+        // Ensure arranged facts exist for every load atom across every plan_atom.
         for (plan_atom, _plan) in plans.iter() {
             let plan_loads = &loads[plan_atom];
             for (load_atom, (action, _)) in plan_loads.iter() {
@@ -91,7 +103,8 @@ impl crate::types::State {
                 }
             }
         }
-        let all_stages_boxed: Vec<_> = plans.iter()
+        // Pre-build all boxed atoms for every (plan_atom, stage).
+        let all_stages_boxed: DriverStages<'a> = plans.iter()
             .map(|(plan_atom, plan)| {
                 let plan_loads = &loads[plan_atom];
                 plan.iter()
@@ -101,12 +114,23 @@ impl crate::types::State {
                     .collect::<Vec<_>>()
             })
             .collect();
+        (plans, loads, all_stages_boxed)
+    }
 
-        //  Execute phase. Each planned delta atom
-        //      1. loads its facts, then
-        //      2. repeatedly joins in new terms, then
-        //      3. commits derived facts to the stores for head atoms.
+    /// Implements a provided rule in the context of various facts.
+    ///
+    /// The `stable` argument indicates whether we should perform a join with all facts (true),
+    /// or only a join that involves novel facts (false).
+    pub fn implement(&mut self, rule: &Rule, stable: bool, active_relations: Option<&std::collections::BTreeSet<&str>>) {
 
+        let head = &rule.head[..];
+        let body = &rule.body[..];
+
+        let (plans, loads, all_stages_boxed) = self.plan_and_build(body, head, stable, active_relations);
+
+        let potato = ".potato".to_string();
+
+        // Per driver: seed → wco_join stages → emit head facts.
         for ((plan_atom, plan), stages_boxed) in plans.iter().zip(all_stages_boxed) {
             let plan_atom = *plan_atom;
             let plan_loads = &loads[&plan_atom];
@@ -120,7 +144,7 @@ impl crate::types::State {
                 exec::wco_join(&mut self.comms, &mut salad, terms, &others[..], &potato, &order[..]);
             }
 
-            // Stage 3: Commit produced facts back to head atoms in `self.facts`.
+            // Step 3: Commit produced facts back to head atoms in `self.facts`.
             self.emit_head_facts(head, salad);
         }
     }
