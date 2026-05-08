@@ -55,9 +55,9 @@ pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a
     let atoms = body.iter().enumerate().map(|(index, atom)| {
         let terms = atom.terms.iter().filter_map(|term| term.as_var()).collect::<BTreeSet<_>>();
         let boxed_atom: Box<dyn PlanAtom<&'a String>+'a> =
-        if let Some(logic) = crate::rules::logic::resolve(atom) { Box::new(logic) }
+        if let Some(logic) = crate::rules::atoms::logic::resolve(atom) { Box::new(logic) }
         else if !atom.anti { Box::new(terms) }
-        else { Box::new(crate::rules::antijoin::Anti(terms)) };
+        else { Box::new(crate::rules::atoms::anti::Anti(terms)) };
         (index, boxed_atom)
     }).collect::<BTreeMap<_,_>>();
 
