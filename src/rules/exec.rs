@@ -71,6 +71,8 @@ impl<T: Ord+Copy+std::fmt::Debug> Salad<T> {
     ///
     /// The `mode` argument indicates whether columns in `terms` absent from `align` should be discarded.
     /// When `prune` is set they are; otherwise all of `terms` are retained but re-ordered to start with `align`.
+    ///
+    /// The operation detects identity permutations and does nothing in that case.
     fn permute(
         salad: &mut Salad<T>,
         comms: &mut Comms,
@@ -81,7 +83,10 @@ impl<T: Ord+Copy+std::fmt::Debug> Salad<T> {
         let mut permutation: Vec<usize> = align.flat_map(|t1| salad.terms.iter().position(|t2| &t1 == t2)).collect();
         if let PermuteMode::Align = mode { for index in 0 .. salad.terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
 
-        if permutation.iter().enumerate().any(|(index, i)| &index != i) {
+        let identity = permutation.iter().enumerate().all(|(i, p)| i == *p);
+        let truncates = matches!(mode, PermuteMode::Prune) && permutation.len() < salad.terms.len();
+
+        if !identity {
             if let Some(flattened) = salad.facts.flatten() {
                 salad.facts.extend(flattened.act_on(&Action::permutation(permutation.iter().copied()), thresh));
             }
@@ -91,7 +96,9 @@ impl<T: Ord+Copy+std::fmt::Debug> Salad<T> {
         // Maybe necessary if `permutation` is `0 .. k` for k less than the input arity.
         if let PermuteMode::Prune = mode { salad.truncate(permutation.len()); }
 
-        comms.exchange(&mut salad.facts);
+        // Skip the exchange when nothing about the salad changed: identity permutation,
+        // TODO: Investigate more assertive guards, like column 0 (the partition key) not changing.
+        if !identity || truncates { comms.exchange(&mut salad.facts); }
     }
 }
 
