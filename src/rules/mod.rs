@@ -14,14 +14,43 @@
 //!
 //! These traits are implemented for relations that are *explicit* (represented by data) and *implicit* (represented by code), and in-between (e.g. antijoins).
 
-use crate::types::{Rule, Action, Term};
-use crate::facts::{FactContainer, FactLSM};
+use crate::types::{Atom, Rule, Action, Term};
+use crate::facts::{FactContainer, FactLSM, Forest, Relations, Terms};
 
 pub mod plan;
 pub mod exec;
 
 pub use plan::PlanAtom;
 pub use exec::ExecAtom;
+
+/// Constructs a boxed `ExecAtom` for a non-driver atom in a rule body.
+///
+/// Selects between logic, antijoin, and data variants based on the atom's
+/// properties, and threads the appropriate stable/recent split per the
+/// semi-naive convention: atoms whose index exceeds the driver's contribute
+/// their `recent` facts, others contribute only `stable`.
+fn build_load_atom<'a>(
+    body: &'a [Atom],
+    plan_atom: usize,
+    load_atom: usize,
+    loads: &std::collections::BTreeMap<usize, plan::Load<&'a String>>,
+    facts: &Relations,
+) -> Box<dyn exec::ExecAtom<&'a String> + 'a> {
+    if let Some(logic) = logic::resolve(&body[load_atom]) {
+        Box::new(logic)
+    } else {
+        let (load_action, load_terms) = &loads[&load_atom];
+        let other = facts.get_action(body[load_atom].name.as_str(), load_action).unwrap();
+        let to_chain = if load_atom > plan_atom { other.recent.as_ref() } else { None };
+        let other_facts: Vec<Forest<Terms>> = other.stable.contents().chain(to_chain).cloned().collect();
+        let owned_terms: Vec<&'a String> = load_terms.clone();
+        if body[load_atom].anti {
+            Box::new(antijoin::Anti((other_facts, owned_terms)))
+        } else {
+            Box::new((other_facts, owned_terms))
+        }
+    }
+}
 
 impl crate::types::State {
 
@@ -34,25 +63,57 @@ impl crate::types::State {
         let head = &rule.head[..];
         let body = &rule.body[..];
 
-        let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body).expect("Unable to plan");
+        // Body atoms that should take a turn as the source of novelty this round.
+        // In `stable` mode only the first body atom drives; in incremental mode every
+        // atom takes a turn, optionally restricted to those whose relation has recent
+        // facts on some worker.
+        let delta_atoms: Vec<usize> = if stable {
+            vec![0]
+        } else if let Some(active) = active_relations {
+            (0..body.len()).filter(|i| active.contains(body[*i].name.as_str())).collect()
+        } else {
+            (0..body.len()).collect()
+        };
 
-        let plan_atoms = if stable { 1 } else { body.len() };
+        let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body, &delta_atoms).expect("Unable to plan");
 
         let potato = ".potato".to_string();
 
-        for (plan_atom, atom) in body[..plan_atoms].iter().enumerate() {
-
-            if !plans.contains_key(&plan_atom) { continue; }
-
-            // Skip this plan when the starting atom has no recent facts on any worker.
-            if let Some(active) = active_relations {
-                if !stable && !active.contains(atom.name.as_str()) { continue; }
+        //  Build phase.
+        //      1. Ensure arranged facts exist for every load atom across every plan_atom.
+        //      2. Pre-build all boxed atoms for every (plan_atom, stage).
+        for (plan_atom, _plan) in plans.iter() {
+            let plan_loads = &loads[plan_atom];
+            for (load_atom, (action, _)) in plan_loads.iter() {
+                if logic::resolve(&body[*load_atom]).is_none() {
+                    self.facts.ensure_action(&mut self.comms, body[*load_atom].name.as_str(), action);
+                }
             }
+        }
+        let all_stages_boxed: Vec<_> = plans.iter()
+            .map(|(plan_atom, plan)| {
+                let plan_loads = &loads[plan_atom];
+                plan.iter()
+                    .map(|(atoms, _, _)| atoms.iter()
+                        .map(|load_atom| build_load_atom(body, *plan_atom, *load_atom, plan_loads, &self.facts))
+                        .collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
 
-            let plan = &plans[&plan_atom];
+        //  Execute phase. Each planned delta atom
+        //      1. loads its facts, then
+        //      2. repeatedly joins in new terms, then
+        //      3. commits derived facts to the stores for head atoms.
 
-            // Stage 0: Load the recently added facts.
-            let (action, terms) = &loads[&plan_atom][&plan_atom];
+        for ((plan_atom, plan), stages_boxed) in plans.iter().zip(all_stages_boxed) {
+            let plan_atom = *plan_atom;
+            let atom = &body[plan_atom];
+            let plan_loads = &loads[&plan_atom];
+
+            // Step 1: Load the initial facts to seed the sequence of joins.
+            // If `stable` these are all facts, and if not they are only recent novel facts.
+            let (action, terms) = &plan_loads[&plan_atom];
             let mut salad = crate::rules::exec::Salad::new(FactLSM::default(), Vec::default());
             if let Some(logic) = logic::resolve(&body[plan_atom]) {
                 let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = Box::new(logic);
@@ -60,85 +121,52 @@ impl crate::types::State {
                 boxed_atom.join(&mut self.comms, &mut salad, &terms.iter().copied().collect(), &terms);
             }
             else {
-                self.facts.ensure_action(&mut self.comms, body[plan_atom].name.as_str(), action);
                 let dataz = &self.facts.get_action(atom.name.as_str(), action).unwrap();
                 salad.terms = terms.clone();
                 salad.extend(dataz.stable.contents().filter(|_| stable).chain(dataz.recent.as_ref()).cloned());
             }
 
-            // Ensure arranged facts exist first, as once we start capturing them it is too late to change others.
-            for (load_atom, (action, _)) in loads[&plan_atom].iter() {
-                if logic::resolve(&body[*load_atom]).is_none() {
-                    self.facts.ensure_action(&mut self.comms, body[*load_atom].name.as_str(), action);
-                }
-            }
-
-            // Stage 1: Semijoin with other atoms that are subsumed by the initial terms.
-            let (init_atoms, _init_terms, init_order) = &plan[0];
-            for load_atom in init_atoms.iter().filter(|a| a != &&plan_atom) {
-                let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
-                    if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
-                    else {
-                        let (load_action, load_terms) = &loads[&plan_atom][load_atom];
-                        let other = &self.facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
-                        let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
-                        let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
-                        if body[*load_atom].anti { Box::new(antijoin::Anti((other_facts, load_terms))) }
-                        else { Box::new((other_facts, load_terms)) }
-                    }
-                };
-                boxed_atom.join(&mut self.comms, &mut salad, &Default::default(), init_order);
-            }
-            // We may need to produce the result in a different order.
-            salad.prune_to(&mut self.comms, init_order.iter().copied());
-
-            // Stage 2: Each other plan stage.
-            for (atoms, terms, order) in plan.iter().skip(1) {
-                let others = atoms.iter().map(|load_atom| {
-                    let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = {
-                        if let Some(logic) = logic::resolve(&body[*load_atom]) { Box::new(logic) }
-                        else {
-                            let (load_action, load_terms) = &loads[&plan_atom][load_atom];
-                            let other = &self.facts.get_action(body[*load_atom].name.as_str(), load_action).unwrap();
-                            let to_chain = if load_atom > &plan_atom { other.recent.as_ref() } else { None };
-                            let other_facts = other.stable.contents().chain(to_chain).collect::<Vec<_>>();
-                            if body[*load_atom].anti { Box::new(antijoin::Anti((other_facts, load_terms))) }
-                            else { Box::new((other_facts, load_terms)) }
-                        }
-                    };
-                    boxed_atom
-                }).collect::<Vec<_>>();
-
+            // Step 2: Repeatedly join in sets of terms through sets of atoms.
+            for ((_, terms, order), others) in plan.iter().zip(stages_boxed) {
                 exec::wco_join(&mut self.comms, &mut salad, terms, &others[..], &potato, &order[..]);
             }
 
-            // Stage 3: We now need to form up the facts to commit back to `facts`.
-            // It is possible that with a single head we have the terms in the right order,
-            // and can simply commit `delta`. There could be multiple heads, and the action
-            // could be not the identity.
-            let exact_match = head.iter().position(|a| {
-                a.terms.len() == salad.arity() &&
-                a.terms.iter().zip(salad.terms.iter()).all(|(h,d)| h.as_var() == Some(d))
-            });
+            // Stage 3: Commit produced facts back to head atoms in `self.facts`.
+            self.emit_head_facts(head, salad);
+        }
+    }
 
-            let thresh = 200_000_000 / self.comms.peers();
-            for (_, atom) in head.iter().enumerate().filter(|(pos,_)| Some(*pos) != exact_match) {
-                let mut action = Action::with_arity(salad.arity());
-                action.projection = atom.terms.iter().map(|t| match t {
-                    Term::Var(name) => Ok(salad.terms.iter().position(|t2| t2 == &name).expect(format!("Failed to find {:?} in {:?}", name, salad.terms).as_str())),
-                    Term::Lit(data) => Err(data.clone()),
-                }).collect();
-                if let Some(delta) = salad.facts.flatten() {
-                    self.extend_facts(atom, delta.act_on(&action, thresh));
-                    salad.extend([delta]);
-                }
-                else {
-                    self.extend_facts(atom, Default::default());
-                }
+    /// Projects `salad` through each head atom and extends the corresponding relation.
+    ///
+    /// If a head atom's term order matches `salad` exactly, its facts are committed
+    /// without re-projection; otherwise, an `Action` is built for the head and applied.
+    fn emit_head_facts(&mut self, head: &[Atom], mut salad: crate::rules::exec::Salad<&String>) {
+
+        // It is possible that with a single head we have the terms in the right order,
+        // and can simply commit `delta`. There could be multiple heads, and the action
+        // could be not the identity.
+        let exact_match = head.iter().position(|a| {
+            a.terms.len() == salad.arity() &&
+            a.terms.iter().zip(salad.terms.iter()).all(|(h,d)| h.as_var() == Some(d))
+        });
+
+        let thresh = 200_000_000 / self.comms.peers();
+        for (_, atom) in head.iter().enumerate().filter(|(pos,_)| Some(*pos) != exact_match) {
+            let mut action = Action::with_arity(salad.arity());
+            action.projection = atom.terms.iter().map(|t| match t {
+                Term::Var(name) => Ok(salad.terms.iter().position(|t2| t2 == &name).expect(format!("Failed to find {:?} in {:?}", name, salad.terms).as_str())),
+                Term::Lit(data) => Err(data.clone()),
+            }).collect();
+            if let Some(delta) = salad.facts.flatten() {
+                self.extend_facts(atom, delta.act_on(&action, thresh));
+                salad.extend([delta]);
             }
-            if let Some(pos) = exact_match {
-                self.extend_facts(&head[pos], salad.facts);
+            else {
+                self.extend_facts(atom, Default::default());
             }
+        }
+        if let Some(pos) = exact_match {
+            self.extend_facts(&head[pos], salad.facts);
         }
     }
 }
@@ -159,9 +187,9 @@ pub mod data {
         fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T> { self.difference(terms).cloned().collect() }
     }
 
-    impl<'a, T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<&'a Forest<Terms>>, &'a Vec<T>) {
+    impl<T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<T>) {
 
-        fn terms(&self) -> &[T] { self.1 }
+        fn terms(&self) -> &[T] { &self.1 }
 
         fn count(&self, comms: &mut Comms, salad: &mut Salad<T>, terms: &BTreeSet<T>, other_index: u8) {
 
@@ -253,7 +281,7 @@ pub mod data {
                     let join_terms = salad.terms.iter().chain(salad.terms[..prefix].iter()).chain(terms.iter()).copied().collect::<Vec<_>>();
                     // Our output join order (until we learn how to do FDB shapes) is the first of `others` not equal to ourself.
                     let projection = after.iter().map(|t| join_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
-                    salad.facts.extend(delta.join_many(my_facts.iter().copied(), prefix, &projection[..], conduit));
+                    salad.facts.extend(delta.join_many(my_facts.iter(), prefix, &projection[..], conduit));
                 }
                 else {
                     salad.facts.extend(conduit.finish());
@@ -289,9 +317,9 @@ pub mod antijoin {
         fn ground(&self, _terms: &BTreeSet<T>) -> BTreeSet<T> { Default::default() }
     }
 
-    impl<'a, T: Ord + Copy+std::fmt::Debug> ExecAtom<T> for Anti<(Vec<&'a Forest<Terms>>, &'a Vec<T>)> {
+    impl<T: Ord + Copy+std::fmt::Debug> ExecAtom<T> for Anti<(Vec<Forest<Terms>>, Vec<T>)> {
 
-        fn terms(&self) -> &[T] { self.0.1 }
+        fn terms(&self) -> &[T] { &self.0.1 }
 
         fn count(&self, _: &mut Comms, _: &mut Salad<T>, _: &BTreeSet<T>, _: u8) { }
 
