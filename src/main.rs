@@ -176,11 +176,70 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     println!("time:\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());
                     *timer = std::time::Instant::now();
                 }
-                ".wipe" => { state.facts = Default::default(); state.rules = Default::default(); *bytes = Default::default(); }
+                ".decl" => {
+                    // `.decl name(_, _, ...) [flags]` declares a relation's arity and any
+                    // attribute flags (currently just `virtual`). If the name has already
+                    // been seen (explicitly or implicitly) the arity must match, and any
+                    // explicit prior declaration cannot be reissued with conflicting flags.
+                    let rest: String = words.collect::<Vec<_>>().join(" ");
+                    match parse_decl(rest.as_str()) {
+                        Some((name, arity, flags)) => {
+                            let virt = flags.iter().any(|f| f == "virtual");
+                            for flag in flags.iter() {
+                                if flag != "virtual" {
+                                    println!(".decl: unknown flag `{}` (known flags: virtual)", flag);
+                                    return;
+                                }
+                            }
+                            match state.decls.get(&name) {
+                                Some(prior) if prior.arity != arity => {
+                                    println!(
+                                        ".decl: name `{}` already used with arity {}; cannot redeclare with arity {}.",
+                                        name, prior.arity, arity
+                                    );
+                                }
+                                Some(prior) if prior.explicit && (prior.virt != virt) => {
+                                    println!(
+                                        ".decl: name `{}` already declared; cannot reissue with conflicting flags.",
+                                        name
+                                    );
+                                }
+                                _ => {
+                                    state.decls.insert(
+                                        name,
+                                        types::RelationDecl { arity, explicit: true, virt },
+                                    );
+                                }
+                            }
+                        }
+                        None => { println!(".decl requires `.decl name(_, _, ...) [flags]`"); }
+                    }
+                }
+                ".wipe" => { state.facts = Default::default(); state.rules = Default::default(); state.decls = Default::default(); *bytes = Default::default(); }
                 _ => { println!("Parse failure: {:?}", text); }
             }
         }
     }
+}
+
+/// Parses a `.decl` directive's argument: `name(_, _, ...) [flags]` (with optional
+/// trailing `.`), returning `(name, arity, flags)`. Arity is the number of
+/// comma-separated placeholders; flags are space-separated tokens after the closing
+/// paren. An empty argument list `name()` yields arity 0.
+fn parse_decl(text: &str) -> Option<(String, usize, Vec<String>)> {
+    let trimmed = text.trim().trim_end_matches('.').trim();
+    let lparen = trimmed.find('(')?;
+    let rparen = trimmed.rfind(')')?;
+    if rparen < lparen { return None; }
+    let name = trimmed[..lparen].trim().to_string();
+    if name.is_empty() { return None; }
+    let inside = trimmed[lparen + 1..rparen].trim();
+    let arity = if inside.is_empty() { 0 } else { inside.split(',').count() };
+    let flags = trimmed[rparen + 1..]
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+    Some((name, arity, flags))
 }
 
 fn exec_file(filename: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec<u8>, usize>, timer: &mut std::time::Instant) {
