@@ -13,9 +13,17 @@ impl<T: Ord + Copy> PlanAtom<T> for BTreeSet<T> {
     fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T> { self.difference(terms).cloned().collect() }
 }
 
-impl<T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<T>) {
+impl<T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<T>, Option<Forest<Terms>>) {
 
     fn terms(&self) -> &[T] { &self.1 }
+
+    fn seed(&self, _comms: &mut Comms, recent: bool) -> Salad<T> {
+        let mut salad = crate::rules::exec::Salad::new(Default::default(), Vec::default());
+        salad.terms = self.1.clone();
+        if recent { salad.extend(self.2.iter().cloned()) }
+        else { salad.extend(self.0.iter().cloned()) }
+        salad
+    }
 
     fn count(&self, comms: &mut Comms, salad: &mut Salad<T>, terms: &BTreeSet<T>, other_index: u8) {
 
@@ -23,7 +31,7 @@ impl<T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<T
         use crate::facts::trie::layers::advance_bounds;
         use crate::facts::trie::layers::intersection;
 
-        let (other_facts, other_terms) = self;
+        let (other_facts, other_terms, _other_recent) = self;
 
         let prefix = other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
         salad.align_to(comms, other_terms[..prefix].iter().copied());
@@ -95,7 +103,7 @@ impl<T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<T
     }
 
     fn join(&self, comms: &mut Comms, salad: &mut Salad<T>, terms: &BTreeSet<T>, after: &[T]) {
-        let (my_facts, my_terms) = self;
+        let (my_facts, my_terms, _) = self;
         let prefix = my_terms.iter().take_while(|t| salad.terms.contains(t)).count();
         salad.align_to(comms, my_terms[..prefix].iter().copied());
         // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.

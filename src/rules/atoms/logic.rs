@@ -111,6 +111,16 @@ impl<T: Ord + Copy> exec::ExecAtom<T> for LogicRel<T> {
     // Lightly odd, in that we have no preference on term order.
     fn terms(&self) -> &[T] { &self.terms }
 
+    fn seed(&self, comms: &mut Comms, recent: bool) -> Salad<T> {
+        if recent { return Salad::new(Default::default(), self.terms.clone()); }
+        else {
+            let mut salad = crate::rules::exec::Salad::new(Default::default(), Vec::default());
+            salad.extend([Vec::default().try_into().unwrap()]);
+            self.join(comms, &mut salad, &self.terms.iter().copied().collect(), &self.terms);
+            salad
+        }
+    }
+
     fn count(&self, _: &mut Comms, salad: &mut Salad<T>, added: &BTreeSet<T>, my_index: u8) {
         //  Flatten the input, to make our life easier.
         if let Some(mut delta) = salad.facts.flatten() {

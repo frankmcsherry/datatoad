@@ -19,6 +19,8 @@ impl<T: Ord + Copy+std::fmt::Debug> ExecAtom<T> for Anti<(Vec<Forest<Terms>>, Ve
 
     fn terms(&self) -> &[T] { &self.0.1 }
 
+    fn seed(&self, _comms: &mut Comms, _recent: bool) -> Salad<T> { unimplemented!("Anti cannot seed facts") }
+
     fn count(&self, _: &mut Comms, _: &mut Salad<T>, _: &BTreeSet<T>, _: u8) { }
 
     fn join(&self, comms: &mut Comms, salad: &mut Salad<T>, terms: &BTreeSet<T>, _after: &[T]) {

@@ -15,7 +15,7 @@
 //! These traits are implemented for relations that are *explicit* (represented by data) and *implicit* (represented by code), and in-between (e.g. antijoins).
 
 use crate::types::{Atom, Rule, Action, Term};
-use crate::facts::{FactContainer, FactLSM, Forest, Relations, Terms};
+use crate::facts::{FactContainer, Forest, Relations, Terms};
 
 pub mod plan;
 pub mod exec;
@@ -24,13 +24,14 @@ pub mod atoms;
 pub use plan::PlanAtom;
 pub use exec::ExecAtom;
 
-/// Constructs a boxed `ExecAtom` for a non-driver atom in a rule body.
+/// Constructs a boxed `ExecAtom` for an atom in a rule body.
 ///
 /// Selects between logic, antijoin, and data variants based on the atom's
 /// properties, and threads the appropriate stable/recent split per the
 /// semi-naive convention: atoms whose index exceeds the driver's contribute
 /// their `recent` facts, others contribute only `stable`.
-fn build_load_atom<'a>(
+/// The driver itself contributes both `recent` and `stable` facts.
+fn build_atom<'a>(
     body: &'a [Atom],
     plan_atom: usize,
     load_atom: usize,
@@ -43,14 +44,12 @@ fn build_load_atom<'a>(
     } else {
         let (load_action, load_terms) = &loads[&load_atom];
         let other = facts.get_action(body[load_atom].name.as_str(), load_action).unwrap();
-        let to_chain = if load_atom > plan_atom { other.recent.as_ref() } else { None };
+        let to_chain = if load_atom >= plan_atom { other.recent.as_ref() } else { None };
         let other_facts: Vec<Forest<Terms>> = other.stable.contents().chain(to_chain).cloned().collect();
+        let other_recent: Option<Forest<Terms>> = if plan_atom == load_atom { other.recent.clone() } else { None };
         let owned_terms: Vec<&'a String> = load_terms.clone();
-        if body[load_atom].anti {
-            Box::new(atoms::anti::Anti((other_facts, owned_terms)))
-        } else {
-            Box::new((other_facts, owned_terms))
-        }
+        if body[load_atom].anti { Box::new(atoms::anti::Anti((other_facts, owned_terms))) }
+        else                    { Box::new((other_facts, owned_terms, other_recent)) }
     }
 }
 
@@ -97,7 +96,7 @@ impl crate::types::State {
                 let plan_loads = &loads[plan_atom];
                 plan.iter()
                     .map(|(atoms, _, _)| atoms.iter()
-                        .map(|load_atom| build_load_atom(body, *plan_atom, *load_atom, plan_loads, &self.facts))
+                        .map(|load_atom| build_atom(body, *plan_atom, *load_atom, plan_loads, &self.facts))
                         .collect::<Vec<_>>())
                     .collect::<Vec<_>>()
             })
@@ -110,23 +109,11 @@ impl crate::types::State {
 
         for ((plan_atom, plan), stages_boxed) in plans.iter().zip(all_stages_boxed) {
             let plan_atom = *plan_atom;
-            let atom = &body[plan_atom];
             let plan_loads = &loads[&plan_atom];
 
             // Step 1: Load the initial facts to seed the sequence of joins.
-            // If `stable` these are all facts, and if not they are only recent novel facts.
-            let (action, terms) = &plan_loads[&plan_atom];
-            let mut salad = crate::rules::exec::Salad::new(FactLSM::default(), Vec::default());
-            if let Some(logic) = crate::rules::atoms::logic::resolve(&body[plan_atom]) {
-                let boxed_atom: Box::<dyn exec::ExecAtom<&String>+'_> = Box::new(logic);
-                if stable { salad.extend([Vec::default().try_into().unwrap()]); }
-                boxed_atom.join(&mut self.comms, &mut salad, &terms.iter().copied().collect(), &terms);
-            }
-            else {
-                let dataz = &self.facts.get_action(atom.name.as_str(), action).unwrap();
-                salad.terms = terms.clone();
-                salad.extend(dataz.stable.contents().filter(|_| stable).chain(dataz.recent.as_ref()).cloned());
-            }
+            let root = build_atom(body, plan_atom, plan_atom, plan_loads, &self.facts);
+            let mut salad = root.seed(&mut self.comms, !stable);
 
             // Step 2: Repeatedly join in sets of terms through sets of atoms.
             for ((_, terms, order), others) in plan.iter().zip(stages_boxed) {

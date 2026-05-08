@@ -20,6 +20,9 @@ pub trait ExecAtom<T: Ord> {
     /// This is used primarily as a hint for how to lay out facts that will next interact with the atom.
     fn terms(&self) -> &[T];
 
+    /// Create an initial set of facts, either the only recent facts or all facts.
+    fn seed(&self, comms: &mut Comms, recent: bool) -> Salad<T>;
+
     /// Update the number of distinct values of `added` terms that would extend each fact.
     ///
     /// The last layer of `facts` is expected to be a 1:1 layer `[u8;4]` containing `[log1p(count), index, 255u8, 255u8]`.
@@ -48,7 +51,7 @@ pub struct Salad<T> {
     pub terms: Vec<T>,
 }
 
-impl<T: Ord+Copy+std::fmt::Debug> Salad<T> {
+impl<T: Ord+Copy> Salad<T> {
     /// Constructs a new `Self` from facts and terms.
     pub fn new(facts: FactLSM<Forest<Terms>>, terms: Vec<T>) -> Self { Self { facts, terms } }
 
