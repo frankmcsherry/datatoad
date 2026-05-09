@@ -12,7 +12,7 @@ use crate::comms::Comms;
 use crate::facts::{FactContainer, FactLSM, Forest, Relations, Terms};
 use crate::rules::exec::Salad;
 use crate::rules::plan::{self, PlanAtom};
-use crate::rules::{ExecAtom, DriverApparatus, StageBoxes};
+use crate::rules::{ExecAtom, SeedApparatus, StageBoxes};
 use crate::types::{Action, Atom, RelationDecl, Rule, Term};
 
 /// A `&'static String` placeholder used as the count-metadata column name in `wco_join`.
@@ -42,7 +42,7 @@ pub struct SeedDisjunct<'a> {
     pub rule: &'a Rule,
     pub plans: plan::Plans<usize, &'a String>,
     pub loads: plan::Loads<usize, &'a String>,
-    pub apparatus: DriverApparatus<'a>,
+    pub apparatus: SeedApparatus<'a>,
 }
 
 /// One disjunct of the join apparatus: phantom-driven plan + per-stage atoms,
@@ -72,7 +72,7 @@ pub struct JoinApparatus<'a> {
 pub struct Sum<'a> {
     pub use_site: &'a Atom,
     pub head_terms: Vec<&'a String>,
-    /// Apparatus for `seed` (when sum is itself the driver). Always present.
+    /// Apparatus for `seed` (when sum is itself the seed). Always present.
     pub seed_disjuncts: Vec<SeedDisjunct<'a>>,
     /// Apparatus for `join` for a single pre-known approach pattern. Present when
     /// the construction site identified a pattern via the parent plan.
@@ -83,7 +83,7 @@ impl<'a> Sum<'a> {
     /// Constructs a `Sum` for a virtual reference at `body[load_atom]`.
     ///
     /// Always builds the seed apparatus from the virtual relation's defining rules.
-    /// If `parent_plan` is provided (sum used as a non-driver in a join), also
+    /// If `parent_plan` is provided (sum used as a non-seed in a join), also
     /// pre-plans a join apparatus for the inferred approach pattern; if any disjunct
     /// can't support seeded eval at that pattern, the join apparatus is `None` and
     /// `Sum::join` falls back to materialize-and-delegate.
@@ -124,7 +124,7 @@ impl<'a> Sum<'a> {
     }
 }
 
-/// Computes the approach pattern for a virtual atom in a given (driver, stage) context
+/// Computes the approach pattern for a virtual atom in a given (seed, stage) context
 /// and pre-builds a `JoinApparatus` for it. Returns `None` if any disjunct can't
 /// support seeded eval at this pattern (e.g., a disjunct head has a literal at a
 /// pattern position).
@@ -144,7 +144,7 @@ fn build_join_apparatus<'a>(
     // Find the stage in `plan` containing `load_atom`.
     let stage_idx = plan.iter().position(|(stage_atoms, _, _)| stage_atoms.contains(&load_atom))?;
 
-    // Variables bound at the start of stage `stage_idx`: the driver's own terms plus
+    // Variables bound at the start of stage `stage_idx`: the seed's own terms plus
     // every prior stage's `terms_to_introduce`.
     let mut bound_at_stage: BTreeSet<&'a String> =
         body[plan_atom].terms.iter().filter_map(|t| t.as_var()).collect();
@@ -179,19 +179,16 @@ fn build_join_apparatus<'a>(
         // If the disjunct head has a literal at any pattern position, we can't seed it
         // without literal-filter support — bail and force the materialize fallback.
         let var_mapping = compute_var_mapping(&pattern, use_site, disjunct_head)?;
-        let body_pre_bound: BTreeSet<&'a String> =
+        let body_pre_bound: Vec<&'a String> =
             var_mapping.iter().map(|(_, dj)| *dj).collect();
 
-        // Phantom-driven plan for this disjunct's body.
-        let (plan, loads) = plan::plan_rule_seeded::<plan::ByTerm>(
-            &rule.head[..], &rule.body[..], body_pre_bound, decls,
-        ).ok()?;
+        let (plan, loads) = plan::plan_rule_seeded(&rule.head[0], &rule.body[..], &body_pre_bound, decls);
 
         // Ensure index actions for each load action in the seeded plan.
         crate::rules::ensure_actions_for_loads(facts, comms, decls, &rule.body[..], &loads);
 
-        // Build per-stage atoms. Use the disjunct's body atoms as non-drivers (the
-        // input salad acts as the driver). Pass `pattern_info: None` so any nested
+        // Build per-stage atoms. Use the disjunct's body atoms as non-seeds (the
+        // input salad acts as the seed). Pass `pattern_info: None` so any nested
         // virtuals in the disjunct's body fall back to materialize for now.
         let stages: Vec<StageBoxes<'a>> = plan.iter()
             .map(|(atoms, _, _)| atoms.iter()

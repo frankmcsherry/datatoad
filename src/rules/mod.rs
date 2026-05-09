@@ -31,9 +31,9 @@ pub use exec::ExecAtom;
 /// stable/recent split per the semi-naive convention. For virtual atoms, delegates
 /// to `Sum::build`.
 ///
-/// `parent_plan` is the surrounding rule's plan for this driver, threaded through so
+/// `parent_plan` is the surrounding rule's plan for this seed, threaded through so
 /// virtual atoms can compute their approach pattern from where they appear. `None`
-/// means the atom is itself the driver (no surrounding plan to inspect).
+/// means the atom is itself the seed (no surrounding plan to inspect).
 pub(crate) fn build_atom<'a>(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
@@ -64,17 +64,17 @@ pub(crate) fn build_atom<'a>(
     }
 }
 
-/// One plan stage's pre-built non-driver atoms, in plan order.
+/// One plan stage's pre-built non-seed atoms, in plan order.
 pub type StageBoxes<'a> = Vec<Box<dyn exec::ExecAtom<&'a String> + 'a>>;
 
-/// One driver's pre-built apparatus: the driver atom (used for `seed`) and the
-/// per-stage non-driver atoms (used for `wco_join`).
-type DriverWork<'a> = (Box<dyn exec::ExecAtom<&'a String> + 'a>, Vec<StageBoxes<'a>>);
+/// One seed's pre-built apparatus: the seed atom (whose `.seed()` produces the initial
+/// salad) and the per-stage non-seed atoms (used for `wco_join`).
+type SeedWork<'a> = (Box<dyn exec::ExecAtom<&'a String> + 'a>, Vec<StageBoxes<'a>>);
 
-/// All drivers' apparatus, parallel to `Plans` iteration order.
-type DriverApparatus<'a> = Vec<DriverWork<'a>>;
+/// All seeds' apparatus, parallel to `Plans` iteration order.
+type SeedApparatus<'a> = Vec<SeedWork<'a>>;
 
-/// Plans a rule body and pre-builds the boxed atoms for every (driver, stage).
+/// Plans a rule body and pre-builds the boxed atoms for every (seed, stage).
 ///
 /// Lives as a free function (not a method) because virtual references recursively
 /// invoke this with the same field borrows. Callers split a `&mut State` into its
@@ -92,7 +92,7 @@ pub fn plan_and_build_with_fields<'a>(
 ) -> (
     plan::Plans<usize, &'a String>,
     plan::Loads<usize, &'a String>,
-    DriverApparatus<'a>,
+    SeedApparatus<'a>,
 ) {
     // Body atoms that should take a turn as the source of novelty this round.
     // In `stable` mode only the first body atom drives; in incremental mode every
@@ -106,17 +106,17 @@ pub fn plan_and_build_with_fields<'a>(
         (0..body.len()).collect()
     };
 
-    let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body, &delta_atoms, decls).expect("Unable to plan");
+    let (plans, loads) = plan::plan_rule(head, body, &delta_atoms, decls);
 
     // Ensure arranged facts exist for every load atom across every plan_atom.
     for (plan_atom, _plan) in plans.iter() {
         ensure_actions_for_loads(facts, comms, decls, body, &loads[plan_atom]);
     }
-    // Pre-build the driver atom and all non-driver stage atoms per planned driver.
-    // Pre-building all drivers (rather than building them inline during execution)
-    // means each driver sees the round's input state, not facts an earlier driver
+    // Pre-build the seed atom and all non-seed stage atoms per planned seed.
+    // Pre-building all seeds (rather than building them inline during execution)
+    // means each seed sees the round's input state, not facts an earlier seed
     // committed mid-loop — keeping semi-naive's "this round vs. next round" line clean.
-    let apparatus: DriverApparatus<'a> = plans.iter()
+    let apparatus: SeedApparatus<'a> = plans.iter()
         .map(|(plan_atom, plan)| {
             let plan_loads = &loads[plan_atom];
             let driver = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None);
@@ -144,7 +144,7 @@ impl crate::types::State {
 
         // Split `self` into independent field borrows so that the apparatus (which holds
         // a borrow of `decls` and `rules` for as long as it lives) can coexist with
-        // mutations to `facts` and `comms` during per-driver execution and head emission.
+        // mutations to `facts` and `comms` during per-seed execution and head emission.
         let facts = &mut self.facts;
         let comms = &mut self.comms;
         let decls = &self.decls;
@@ -154,9 +154,9 @@ impl crate::types::State {
 
         let potato = ".potato".to_string();
 
-        // Per driver: seed → wco_join stages → emit head facts.
-        // Driver atoms are pre-built, so each driver sees the round's input state
-        // rather than facts that earlier drivers may have committed.
+        // Per seed: seed → wco_join stages → emit head facts.
+        // Seed atoms are pre-built, so each seed sees the round's input state
+        // rather than facts that earlier seeds may have committed.
         for ((_plan_atom, plan), (driver, stages_boxed)) in plans.iter().zip(apparatus) {
             let mut salad = driver.seed(comms, !stable);
             run_wco_stages(comms, &mut salad, plan, &stages_boxed, &potato);
@@ -223,6 +223,12 @@ pub fn ensure_actions_for_loads<'a>(
 /// The single shared loop pattern used by `State::implement`, `Sum::seed`, and
 /// `Sum::join_seeded`. Each stage's `(terms, atoms, order)` triple feeds one
 /// `wco_join` call; `potato` is the column-name placeholder for count metadata.
+///
+/// Stage 0 is special: its `terms` document the seed's pre-bound bindings (already
+/// present in `salad`), not new columns to introduce. We pass an empty `terms` set so
+/// `wco_join` semijoins against `init_atoms` instead of routing through
+/// `wco_join_inner` and trying to re-introduce already-bound columns. Stages 1+
+/// follow the usual interpretation of `terms` as the new columns to extend with.
 pub fn run_wco_stages<'a>(
     comms: &mut crate::comms::Comms,
     salad: &mut exec::Salad<&'a String>,
@@ -230,8 +236,9 @@ pub fn run_wco_stages<'a>(
     stages: &[StageBoxes<'a>],
     potato: &'a String,
 ) {
-    for ((_, terms, order), atoms) in plan.iter().zip(stages.iter()) {
-        exec::wco_join(comms, salad, terms, atoms, potato, &order[..]);
+    for (i, ((_, terms, order), atoms)) in plan.iter().zip(stages.iter()).enumerate() {
+        let stage_terms = if i == 0 { &Default::default() } else { terms };
+        exec::wco_join(comms, salad, stage_terms, atoms, potato, &order[..]);
     }
 }
 
