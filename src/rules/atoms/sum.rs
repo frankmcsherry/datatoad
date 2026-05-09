@@ -45,8 +45,9 @@ pub struct SeedDisjunct<'a> {
     pub apparatus: SeedApparatus<'a>,
 }
 
-/// One disjunct of the join apparatus: phantom-driven plan + per-stage atoms,
-/// with the variable mapping from use-site space to disjunct head var space.
+/// One disjunct of the join apparatus: a seeded plan for the disjunct's body, plus
+/// the variable mapping from use-site space to disjunct head var space. The seed is
+/// the caller's salad — projected through `var_mapping` and fed to the plan's stages.
 pub struct JoinDisjunct<'a> {
     pub rule: &'a Rule,
     /// For each pattern term (in use-site space), the disjunct's head var at the
@@ -55,7 +56,7 @@ pub struct JoinDisjunct<'a> {
     /// `compute_var_mapping` returns `None` and this disjunct (and the surrounding
     /// `JoinApparatus`) is never built — `Sum::join` falls back to materialize.
     pub var_mapping: Vec<(&'a String, &'a String)>,
-    /// The phantom-driven plan stages.
+    /// The seeded plan for the disjunct's body, with the use-site bindings as the seed.
     pub plan: plan::Plan<usize, &'a String>,
     /// Pre-built atoms per stage, in plan order (one per atom in each stage).
     pub stages: Vec<StageBoxes<'a>>,

@@ -79,15 +79,20 @@ pub trait PlanAtom<T: Ord> {
 use std::collections::{BTreeSet, BTreeMap};
 use crate::types::{Atom, Action};
 
-/// A plan is a sequence of sets of atoms and terms, and an output term order.
+/// A plan is a sequence of stages, each a tuple of (atoms, terms, output order).
 ///
-/// Each plan stage uses the atoms to express their thoughts about the terms,
-/// each either joining or semijoining, depending on which terms are present.
-/// The term sets are disjoint, as each term can be *introduced* at most once,
-/// but the atom sets may repeat atoms as their many terms are introduced.
+/// Each stage indicates terms that are added, and the atoms that participate in the
+/// introduction of those terms. Each atom name restricts the solution space by their
+/// projection onto all terms added through this stage. Each term is added only once.
 ///
-/// The output term order discards columns that are no longer needed, and in
-/// the last plan stage ensures that the order matches that of the rule head.
+/// The output term order indicates the terms that survive the stage, and a preference
+/// for their order that may be beneficial for the next stage. Terms not present in the
+/// output order should be pruned.
+///
+/// The first stage is special, in that its terms are specified exogenously by a "seed"
+/// relation that starts the sequence of joins. The atoms of the first stage intersect
+/// these terms, but they may not fully span it, and it should not be distressing that
+/// the plan cannot independently substantiate those terms.
 pub type Plan<A, T> = Vec<(BTreeSet<A>, BTreeSet<T>, Vec<T>)>;
 pub type Plans<A, T> = BTreeMap<A, Plan<A, T>>;
 pub type Load<T> = (Action<Vec<u8>>, Vec<T>);
@@ -171,7 +176,7 @@ fn seed_load<'a>(
 ///
 /// For each body atom, loads the atom's terms in the order the plan binds them.
 /// This order aims to minimize the number of distinct term orders to maintain.
-pub fn body_load<'a, A: Ord + Copy, T: Ord + Copy>(
+fn body_load<'a, A: Ord + Copy, T: Ord + Copy>(
     plan: &Plan<A, T>,
     body: &BTreeMap<A, Box<dyn PlanAtom<T> + 'a>>,
     base_actions: &BTreeMap<A, Action<Vec<u8>>>,
