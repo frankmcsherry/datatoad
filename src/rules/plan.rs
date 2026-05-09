@@ -45,6 +45,39 @@ pub type Loads<A, T> = BTreeMap<A, BTreeMap<A, Load<T>>>;
 /// novelty (the semi-naive delta). The returned plans map contains an entry for each
 /// requested delta atom that the strategy can plan (logic atoms that can't ground all
 /// their terms are silently dropped, regardless of the request).
+/// Builds the per-body-atom `PlanAtom` map that both `plan_rule` and `plan_rule_seeded`
+/// feed to the strategy. Dispatches on logic, virtual, anti, or data-relation atom kind.
+fn build_atoms_map<'a>(
+    body: &'a [Atom],
+    decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
+) -> BTreeMap<usize, Box<dyn PlanAtom<&'a String> + 'a>> {
+    body.iter().enumerate().map(|(index, atom)| {
+        let terms = atom.terms.iter().filter_map(|term| term.as_var()).collect::<BTreeSet<_>>();
+        let boxed_atom: Box<dyn PlanAtom<&'a String>+'a> =
+        if let Some(logic) = crate::rules::atoms::logic::resolve(atom) { Box::new(logic) }
+        else if decls.get(atom.name.as_str()).map_or(false, |d| d.virt) {
+            Box::new(crate::rules::atoms::sum::SumPlan { head_terms: terms })
+        }
+        else if !atom.anti { Box::new(terms) }
+        else { Box::new(crate::rules::atoms::anti::Anti(terms)) };
+        (index, boxed_atom)
+    }).collect()
+}
+
+/// Removes the driver from its own stage-0 atom set and clears stage 0's terms.
+/// The driver is already loaded as the seed salad; stage 0's atoms and terms in the
+/// raw plan are an artifact of the planner's projection logic.
+///
+/// Must run *after* the projection-target computation in `plan_rule`: that logic
+/// uses stage 0's `init_terms` to size the projection action, so we can't clear
+/// them until that work is done.
+fn tidy_stage_zero<'a>(plan: &mut Plan<usize, &'a String>, driver: &usize) {
+    if let Some((atoms, terms, _)) = plan.first_mut() {
+        atoms.remove(driver);
+        terms.clear();
+    }
+}
+
 pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(
     head: &'a [Atom],
     body: &'a [Atom],
@@ -56,18 +89,7 @@ pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(
     // If we have multiple heads and one has no literals or repetitions, that would be best.
     let head_terms = head_order(head);
 
-    // Map from atom identifier to boxed `PlanAtom`, containing term and grounding information.
-    let atoms = body.iter().enumerate().map(|(index, atom)| {
-        let terms = atom.terms.iter().filter_map(|term| term.as_var()).collect::<BTreeSet<_>>();
-        let boxed_atom: Box<dyn PlanAtom<&'a String>+'a> =
-        if let Some(logic) = crate::rules::atoms::logic::resolve(atom) { Box::new(logic) }
-        else if decls.get(atom.name.as_str()).map_or(false, |d| d.virt) {
-            Box::new(crate::rules::atoms::sum::SumPlan { head_terms: terms })
-        }
-        else if !atom.anti { Box::new(terms) }
-        else { Box::new(crate::rules::atoms::anti::Anti(terms)) };
-        (index, boxed_atom)
-    }).collect::<BTreeMap<_,_>>();
+    let atoms = build_atoms_map(body, decls);
 
     // We'll want to pre-plan the term orders for each atom update rule, so that we can
     // pre-ensure that the necessary input shapes exist, with each atom in term order.
@@ -127,16 +149,9 @@ pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(
         }
     }
 
-    // Tidy stage 0 for the executor: drop the driver from its own stage 0 atoms (it is
-    // already loaded as the salad), and clear stage 0's terms (they are present in the
-    // salad from the driver load, not introduced by stage 0's atom-side operations).
-    // Both transformations are post-hoc — the planner's projection logic above relies
-    // on stage 0's terms holding `init_terms`, so we wait until that work is done.
+    // Tidy stage 0 for the executor — defer until after the projection logic above.
     for (plan_atom, plan) in plans.iter_mut() {
-        if let Some((atoms, terms, _)) = plan.first_mut() {
-            atoms.remove(plan_atom);
-            terms.clear();
-        }
+        tidy_stage_zero(plan, plan_atom);
     }
 
     Ok((plans, load_actions))
@@ -191,6 +206,61 @@ pub fn load_actions<A: Ord + Copy, T: Ord + Copy>(
 fn head_order<'a>(head: &'a [Atom]) -> Vec<&'a String> {
     let mut seen: BTreeSet<&'a String> = BTreeSet::default();
     head.iter().flat_map(|a| a.terms.iter()).filter_map(|t| t.as_var()).filter(|t| seen.insert(t)).collect()
+}
+
+/// A `PlanAtom` representing a synthetic driver whose terms are pre-bound from outside.
+///
+/// `terms()` returns the pre-bound set; `ground()` returns it for any input (the
+/// phantom can always provide its terms — they came from the caller's salad).
+struct Phantom<T> {
+    terms: BTreeSet<T>,
+}
+
+impl<T: Ord + Copy> PlanAtom<T> for Phantom<T> {
+    fn terms(&self) -> BTreeSet<T> { self.terms.clone() }
+    fn ground(&self, _: &BTreeSet<T>) -> BTreeSet<T> { self.terms.clone() }
+}
+
+/// Plans a rule body with a phantom driver representing pre-bound terms.
+///
+/// Returns a single `Plan` and the corresponding loads, both indexed by body atom
+/// position (the phantom uses index `body.len()` and is invisible to the caller).
+/// The plan is keyed for the phantom driver — execution should seed from the
+/// caller-provided salad rather than from any body atom.
+pub fn plan_rule_seeded<'a, S: Strategy<usize, &'a String>>(
+    head: &'a [Atom],
+    body: &'a [Atom],
+    pre_bound: BTreeSet<&'a String>,
+    decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
+) -> Result<(Plan<usize, &'a String>, BTreeMap<usize, Load<&'a String>>), String> {
+
+    let head_terms = head_order(head);
+    let mut atoms = build_atoms_map(body, decls);
+
+    // Insert the phantom driver at `body.len()` and use it as the sole delta atom.
+    let phantom_idx = body.len();
+    atoms.insert(phantom_idx, Box::new(Phantom { terms: pre_bound }));
+
+    let mut plans = S::plan_rule(&atoms, &[phantom_idx], &head_terms);
+    let mut plan = plans.remove(&phantom_idx).ok_or_else(|| "seeded plan failed".to_string())?;
+
+    // Compute base actions (only for body atoms; phantom isn't a real atom).
+    let base_actions = body.iter().enumerate().map(|(index, atom)| {
+        let mut action = Action::from_body(atom);
+        action.projection.sort_by_key(|p| atom.terms[*p.as_ref().unwrap()].as_var().unwrap());
+        (index, action)
+    }).collect::<BTreeMap<_,_>>();
+
+    // Compute load actions for the single phantom-driven plan.
+    let atoms_to_terms = atoms.iter().map(|(index, boxed)| (*index, boxed.terms())).collect::<BTreeMap<_,_>>();
+    let single_plan_map: BTreeMap<usize, Plan<usize, &'a String>> =
+        std::iter::once((phantom_idx, plan.clone())).collect();
+    let mut all_loads = load_actions(&single_plan_map, &atoms_to_terms, &base_actions);
+    let loads = all_loads.remove(&phantom_idx).unwrap_or_default();
+
+    tidy_stage_zero(&mut plan, &phantom_idx);
+
+    Ok((plan, loads))
 }
 
 /// A type that can produce an update plan for a rule.

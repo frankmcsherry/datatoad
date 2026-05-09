@@ -28,11 +28,13 @@ pub use exec::ExecAtom;
 ///
 /// Dispatches between logic, virtual (sum), antijoin, and data variants based on the
 /// atom's name and the declarations. For data atoms, threads the appropriate
-/// stable/recent split per the semi-naive convention: atoms whose index exceeds the
-/// driver's contribute their `recent` facts, others contribute only `stable`. The
-/// driver itself contributes both. For virtual atoms, recursively plans and builds
-/// the defining rules' apparatus and constructs a `Sum`.
-fn build_atom<'a>(
+/// stable/recent split per the semi-naive convention. For virtual atoms, delegates
+/// to `Sum::build`.
+///
+/// `parent_plan` is the surrounding rule's plan for this driver, threaded through so
+/// virtual atoms can compute their approach pattern from where they appear. `None`
+/// means the atom is itself the driver (no surrounding plan to inspect).
+pub(crate) fn build_atom<'a>(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
     decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
@@ -41,29 +43,15 @@ fn build_atom<'a>(
     plan_atom: usize,
     load_atom: usize,
     loads: &std::collections::BTreeMap<usize, plan::Load<&'a String>>,
+    parent_plan: Option<&plan::Plan<usize, &'a String>>,
 ) -> Box<dyn exec::ExecAtom<&'a String> + 'a> {
     use crate::rules::atoms;
     if let Some(logic) = atoms::logic::resolve(&body[load_atom]) {
         Box::new(logic)
     } else if decls.get(body[load_atom].name.as_str()).map_or(false, |d| d.virt) {
-        // Virtual: pre-build apparatus per defining rule, construct a Sum.
-        let virt_name = body[load_atom].name.as_str();
-        let defining: Vec<&'a Rule> = rules.iter()
-            .map(|(r, _)| r)
-            .filter(|r| !r.head.is_empty() && r.head[0].name.as_str() == virt_name)
-            .collect();
-        let mut disjuncts: Vec<atoms::sum::Disjunct<'a>> = Vec::with_capacity(defining.len());
-        for rule in defining {
-            let (plans, loads, apparatus) = plan_and_build_with_fields(
-                facts, comms, decls, rules,
-                &rule.body[..], &rule.head[..],
-                true, None,
-            );
-            disjuncts.push(atoms::sum::Disjunct { rule, plans, loads, apparatus });
-        }
-        let use_site = &body[load_atom];
-        let head_terms: Vec<&'a String> = use_site.terms.iter().filter_map(|t| t.as_var()).collect();
-        Box::new(atoms::sum::Sum { use_site, head_terms, disjuncts })
+        Box::new(atoms::sum::Sum::build(
+            facts, comms, decls, rules, body, plan_atom, load_atom, parent_plan,
+        ))
     } else {
         let (load_action, load_terms) = &loads[&load_atom];
         let other = facts.get_action(body[load_atom].name.as_str(), load_action).unwrap();
@@ -77,7 +65,7 @@ fn build_atom<'a>(
 }
 
 /// One plan stage's pre-built non-driver atoms, in plan order.
-type StageBoxes<'a> = Vec<Box<dyn exec::ExecAtom<&'a String> + 'a>>;
+pub type StageBoxes<'a> = Vec<Box<dyn exec::ExecAtom<&'a String> + 'a>>;
 
 /// One driver's pre-built apparatus: the driver atom (used for `seed`) and the
 /// per-stage non-driver atoms (used for `wco_join`).
@@ -121,28 +109,20 @@ pub fn plan_and_build_with_fields<'a>(
     let (plans, loads) = plan::plan_rule::<plan::ByTerm>(head, body, &delta_atoms, decls).expect("Unable to plan");
 
     // Ensure arranged facts exist for every load atom across every plan_atom.
-    // Skip logic and virtual atoms — neither has stored data to arrange.
     for (plan_atom, _plan) in plans.iter() {
-        let plan_loads = &loads[plan_atom];
-        for (load_atom, (action, _)) in plan_loads.iter() {
-            let name = body[*load_atom].name.as_str();
-            let is_logic = crate::rules::atoms::logic::resolve(&body[*load_atom]).is_some();
-            let is_virtual = decls.get(name).map_or(false, |d| d.virt);
-            if !is_logic && !is_virtual {
-                facts.ensure_action(comms, name, action);
-            }
-        }
+        ensure_actions_for_loads(facts, comms, decls, body, &loads[plan_atom]);
     }
     // Pre-build the driver atom and all non-driver stage atoms per planned driver.
-    // Pre-building drivers (in addition to non-drivers) means the apparatus is
-    // self-contained: callers can execute without any further trips into the state.
+    // Pre-building all drivers (rather than building them inline during execution)
+    // means each driver sees the round's input state, not facts an earlier driver
+    // committed mid-loop — keeping semi-naive's "this round vs. next round" line clean.
     let apparatus: DriverApparatus<'a> = plans.iter()
         .map(|(plan_atom, plan)| {
             let plan_loads = &loads[plan_atom];
-            let driver = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads);
+            let driver = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None);
             let stages: Vec<StageBoxes<'a>> = plan.iter()
                 .map(|(atoms, _, _)| atoms.iter()
-                    .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads))
+                    .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan)))
                     .collect::<Vec<_>>())
                 .collect();
             (driver, stages)
@@ -153,14 +133,6 @@ pub fn plan_and_build_with_fields<'a>(
 
 impl crate::types::State {
 
-    /// Plans a rule body and pre-builds the boxed non-driver atoms for every stage.
-    ///
-    /// Returns the planner's output (`plans`, `loads`) plus, in parallel with `plans`,
-    /// the boxed atoms for each stage of each driver. The caller drives execution per
-    /// driver against this apparatus (and may emit head facts, union into a sum, etc.).
-    ///
-    /// This is steps 1-4 of `implement`: choose drivers, plan, ensure index actions,
-    /// and build boxed atoms. Execution and head emission are the caller's concern.
     /// Implements a provided rule in the context of various facts.
     ///
     /// The `stable` argument indicates whether we should perform a join with all facts (true),
@@ -187,9 +159,7 @@ impl crate::types::State {
         // rather than facts that earlier drivers may have committed.
         for ((_plan_atom, plan), (driver, stages_boxed)) in plans.iter().zip(apparatus) {
             let mut salad = driver.seed(comms, !stable);
-            for ((_, terms, order), others) in plan.iter().zip(stages_boxed) {
-                exec::wco_join(comms, &mut salad, terms, &others[..], &potato, &order[..]);
-            }
+            run_wco_stages(comms, &mut salad, plan, &stages_boxed, &potato);
             emit_head_facts(facts, comms, head, salad);
         }
     }
@@ -226,6 +196,42 @@ fn emit_head_facts<'a>(
     }
     if let Some(pos) = exact_match {
         extend_facts_with_fields(facts, comms, &head[pos], salad.facts);
+    }
+}
+
+/// Ensures index actions exist for every non-logic, non-virtual atom referenced by the
+/// loads. This prepares the relations to serve queries in the orders the plan needs.
+pub fn ensure_actions_for_loads<'a>(
+    facts: &mut Relations,
+    comms: &mut crate::comms::Comms,
+    decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
+    body: &'a [Atom],
+    loads: &std::collections::BTreeMap<usize, plan::Load<&'a String>>,
+) {
+    for (load_atom, (action, _)) in loads.iter() {
+        let name = body[*load_atom].name.as_str();
+        let is_logic = crate::rules::atoms::logic::resolve(&body[*load_atom]).is_some();
+        let is_virtual = decls.get(name).map_or(false, |d| d.virt);
+        if !is_logic && !is_virtual {
+            facts.ensure_action(comms, name, action);
+        }
+    }
+}
+
+/// Runs the wco_join stages of a plan against a salad, mutating the salad in place.
+///
+/// The single shared loop pattern used by `State::implement`, `Sum::seed`, and
+/// `Sum::join_seeded`. Each stage's `(terms, atoms, order)` triple feeds one
+/// `wco_join` call; `potato` is the column-name placeholder for count metadata.
+pub fn run_wco_stages<'a>(
+    comms: &mut crate::comms::Comms,
+    salad: &mut exec::Salad<&'a String>,
+    plan: &plan::Plan<usize, &'a String>,
+    stages: &[StageBoxes<'a>],
+    potato: &'a String,
+) {
+    for ((_, terms, order), atoms) in plan.iter().zip(stages.iter()) {
+        exec::wco_join(comms, salad, terms, atoms, potato, &order[..]);
     }
 }
 
