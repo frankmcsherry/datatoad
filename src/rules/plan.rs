@@ -45,7 +45,12 @@ pub type Loads<A, T> = BTreeMap<A, BTreeMap<A, Load<T>>>;
 /// novelty (the semi-naive delta). The returned plans map contains an entry for each
 /// requested delta atom that the strategy can plan (logic atoms that can't ground all
 /// their terms are silently dropped, regardless of the request).
-pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a [Atom], delta_atoms: &[usize]) -> Result<(Plans<usize, &'a String>, Loads<usize, &'a String>), String> {
+pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(
+    head: &'a [Atom],
+    body: &'a [Atom],
+    delta_atoms: &[usize],
+    decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
+) -> Result<(Plans<usize, &'a String>, Loads<usize, &'a String>), String> {
 
     // We'll pick a target term order for the first head; other heads may require transforms.
     // If we have multiple heads and one has no literals or repetitions, that would be best.
@@ -56,6 +61,9 @@ pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a
         let terms = atom.terms.iter().filter_map(|term| term.as_var()).collect::<BTreeSet<_>>();
         let boxed_atom: Box<dyn PlanAtom<&'a String>+'a> =
         if let Some(logic) = crate::rules::atoms::logic::resolve(atom) { Box::new(logic) }
+        else if decls.get(atom.name.as_str()).map_or(false, |d| d.virt) {
+            Box::new(crate::rules::atoms::sum::SumPlan { head_terms: terms })
+        }
         else if !atom.anti { Box::new(terms) }
         else { Box::new(crate::rules::atoms::anti::Anti(terms)) };
         (index, boxed_atom)

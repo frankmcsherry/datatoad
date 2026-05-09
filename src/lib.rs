@@ -112,6 +112,12 @@ pub mod types {
                     .filter_map(|&i| names.get(i).map(|s| s.as_str()))
                     .collect();
                 for index in 0 .. self.rules.len() {
+                    // Skip rules whose head names a virtual relation; these are
+                    // defining rules, evaluated on demand via SumAtom rather than fired.
+                    let head_is_virtual = self.rules[index].0.head.iter().any(|atom|
+                        self.decls.get(&atom.name).map_or(false, |d| d.virt)
+                    );
+                    if head_is_virtual { continue; }
                     let timer = std::time::Instant::now();
                     self.implement(&self.rules[index].0.clone(), false, Some(&active_names));
                     self.rules[index].1.push(timer.elapsed());
@@ -161,13 +167,9 @@ pub mod types {
                             ));
                             reported.insert(name.to_string());
                         }
-                        else if decl.virt && !reported.contains(name) {
-                            errors.push(format!(
-                                "rule references virtual relation `{}`, but sum-atom support is not yet implemented.",
-                                name
-                            ));
-                            reported.insert(name.to_string());
-                        }
+                        // Note: virtual references are now allowed in both head (defining
+                        // rule, stored but not auto-fired) and body (resolved via SumAtom
+                        // during planning).
                     }
                     None => {
                         match to_insert.get(name) {
@@ -213,9 +215,19 @@ pub mod types {
                 }
             }
             else {
-                let timer = std::time::Instant::now();
-                self.implement(&rule, true, None);
-                self.rules.push((rule, vec![timer.elapsed()]));
+                // If any head atom names a virtual relation, this is a defining rule:
+                // store it (so it can be looked up during sum-atom construction) but skip
+                // the immediate `implement` call (we don't materialize virtual relations).
+                let head_is_virtual = rule.head.iter().any(|atom|
+                    self.decls.get(&atom.name).map_or(false, |d| d.virt)
+                );
+                if head_is_virtual {
+                    self.rules.push((rule, vec![std::time::Duration::ZERO]));
+                } else {
+                    let timer = std::time::Instant::now();
+                    self.implement(&rule, true, None);
+                    self.rules.push((rule, vec![timer.elapsed()]));
+                }
             }
         }
     }
