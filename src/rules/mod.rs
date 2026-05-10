@@ -34,20 +34,19 @@ pub use exec::ExecAtom;
 /// `parent_plan` is the surrounding rule's plan for this seed, threaded through so
 /// view atoms can compute their approach pattern from where they appear. `None`
 /// means the atom is itself the seed (no surrounding plan to inspect).
-pub(crate) fn build_atom<'a>(
+pub(crate) fn build_atom(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
-    decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
-    rules: &'a [(Rule, Vec<std::time::Duration>)],
-    body: &'a [Atom],
+    decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
+    rules: &[(Rule, Vec<std::time::Duration>)],
+    body: &[Atom],
     plan_atom: usize,
     load_atom: usize,
-    loads: &std::collections::BTreeMap<usize, plan::Load<&'a String>>,
-    parent_plan: Option<&plan::Plan<usize, &'a String>>,
-    subst: &plan::Subst<'a>,
-) -> Box<dyn exec::ExecAtom<&'a String> + 'a> {
+    loads: &std::collections::BTreeMap<usize, plan::Load<String>>,
+    parent_plan: Option<&plan::Plan<usize, String>>,
+) -> Box<dyn exec::ExecAtom<String>> {
     use crate::rules::atoms;
-    if let Some(logic) = atoms::logic::resolve_with_subst(&body[load_atom], subst) {
+    if let Some(logic) = atoms::logic::resolve(&body[load_atom]) {
         Box::new(logic)
     } else if decls.get(body[load_atom].name.as_str()).map_or(false, |d| d.view) {
         Box::new(atoms::view::View::build(
@@ -59,21 +58,33 @@ pub(crate) fn build_atom<'a>(
         let to_chain = if load_atom >= plan_atom { other.recent.as_ref() } else { None };
         let other_facts: Vec<Forest<Terms>> = other.stable.contents().chain(to_chain).cloned().collect();
         let other_recent: Option<Forest<Terms>> = if plan_atom == load_atom { other.recent.clone() } else { None };
-        let owned_terms: Vec<&'a String> = load_terms.clone();
+        let owned_terms: Vec<String> = load_terms.clone();
         if body[load_atom].anti { Box::new(atoms::anti::Anti((other_facts, owned_terms))) }
         else                    { Box::new((other_facts, owned_terms, other_recent)) }
     }
 }
 
-/// One plan stage's pre-built non-seed atoms, in plan order.
-pub type StageBoxes<'a> = Vec<Box<dyn exec::ExecAtom<&'a String> + 'a>>;
+/// One plan stage's runtime form: which terms to introduce, the post-stage column
+/// order, and the pre-built atoms to apply. Built from a `Plan` stage's
+/// `(atom_set, terms, output_order)` triple — the atom indices are consumed at
+/// build time and the resulting `atoms` are the executable form.
+pub struct StageExec {
+    /// Columns this stage introduces (per `Plan`'s stage `terms` set). Stage 0
+    /// carries the seed-relevant pre-bindings; `run_wco_stages` overrides to
+    /// empty there.
+    pub terms: std::collections::BTreeSet<String>,
+    /// Salad column order to leave behind after this stage.
+    pub output_order: Vec<String>,
+    /// Pre-built atoms participating in this stage, in plan order.
+    pub atoms: Vec<Box<dyn exec::ExecAtom<String>>>,
+}
 
-/// One seed's pre-built apparatus: the seed atom (whose `.seed()` produces the initial
-/// salad) and the per-stage non-seed atoms (used for `wco_join`).
-type SeedWork<'a> = (Box<dyn exec::ExecAtom<&'a String> + 'a>, Vec<StageBoxes<'a>>);
-
-/// All seeds' apparatus, parallel to `Plans` iteration order.
-type SeedApparatus<'a> = Vec<SeedWork<'a>>;
+/// Pre-built apparatus for one seed of a rule: the seed atom (whose `.seed()`
+/// produces the initial salad) followed by the per-stage executables.
+pub struct SeedExec {
+    pub seed: Box<dyn exec::ExecAtom<String>>,
+    pub stages: Vec<StageExec>,
+}
 
 /// Plans a rule body and pre-builds the boxed atoms for every (seed, stage).
 ///
@@ -81,20 +92,21 @@ type SeedApparatus<'a> = Vec<SeedWork<'a>>;
 /// invoke this with the same field borrows. Callers split a `&mut State` into its
 /// fields and pass them through. `rules` is the State's rule list, used to look up
 /// views' defining rules during view-atom construction.
-pub fn plan_and_build_with_fields<'a>(
+///
+/// Returns one `SeedExec` per planned seed atom. The intermediate `Plans`/`Loads`
+/// from `plan::plan_rule` are consumed internally — their structural information
+/// (per-stage terms and output orders) is baked into each `StageExec`, and the
+/// load actions are used during atom construction and then dropped.
+pub fn plan_and_build_with_fields(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
-    decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
-    rules: &'a [(Rule, Vec<std::time::Duration>)],
-    body: &'a [Atom],
-    head: &'a [Atom],
+    decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
+    rules: &[(Rule, Vec<std::time::Duration>)],
+    body: &[Atom],
+    head: &[Atom],
     stable: bool,
     active_relations: Option<&std::collections::BTreeSet<&str>>,
-) -> (
-    plan::Plans<usize, &'a String>,
-    plan::Loads<usize, &'a String>,
-    SeedApparatus<'a>,
-) {
+) -> Vec<SeedExec> {
     // Body atoms that should take a turn as the source of novelty this round.
     // In `stable` mode only the first body atom drives; in incremental mode every
     // atom takes a turn, optionally restricted to those whose relation has recent
@@ -113,24 +125,29 @@ pub fn plan_and_build_with_fields<'a>(
     for (plan_atom, _plan) in plans.iter() {
         ensure_actions_for_loads(facts, comms, decls, body, &loads[plan_atom]);
     }
-    // Pre-build the seed atom and all non-seed stage atoms per planned seed.
-    // Pre-building all seeds (rather than building them inline during execution)
-    // means each seed sees the round's input state, not facts an earlier seed
-    // committed mid-loop — keeping semi-naive's "this round vs. next round" line clean.
-    let apparatus: SeedApparatus<'a> = plans.iter()
+    // Pre-build the seed atom and per-stage executables for each planned seed.
+    // Pre-building (rather than building inline during execution) means each seed
+    // sees the round's input state, not facts an earlier seed committed mid-loop —
+    // keeping semi-naive's "this round vs. next round" line clean.
+    plans.iter()
         .map(|(plan_atom, plan)| {
             let plan_loads = &loads[plan_atom];
-            let empty_subst = plan::Subst::new();
-            let driver = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None, &empty_subst);
-            let stages: Vec<StageBoxes<'a>> = plan.iter()
-                .map(|(atoms, _, _)| atoms.iter()
-                    .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan), &empty_subst))
-                    .collect::<Vec<_>>())
+            let seed = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None);
+            let stages: Vec<StageExec> = plan.iter()
+                .map(|(atom_set, terms, output_order)| {
+                    let atoms = atom_set.iter()
+                        .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan)))
+                        .collect();
+                    StageExec {
+                        terms: terms.clone(),
+                        output_order: output_order.clone(),
+                        atoms,
+                    }
+                })
                 .collect();
-            (driver, stages)
+            SeedExec { seed, stages }
         })
-        .collect();
-    (plans, loads, apparatus)
+        .collect()
 }
 
 impl crate::types::State {
@@ -152,16 +169,14 @@ impl crate::types::State {
         let decls = &self.decls;
         let rules = &self.rules[..];
 
-        let (plans, _loads, apparatus) = plan_and_build_with_fields(facts, comms, decls, rules, body, head, stable, active_relations);
-
-        let potato = ".potato".to_string();
+        let seed_execs = plan_and_build_with_fields(facts, comms, decls, rules, body, head, stable, active_relations);
 
         // Per seed: seed → wco_join stages → emit head facts.
         // Seed atoms are pre-built, so each seed sees the round's input state
         // rather than facts that earlier seeds may have committed.
-        for ((_plan_atom, plan), (driver, stages_boxed)) in plans.iter().zip(apparatus) {
-            let mut salad = driver.seed(comms, !stable);
-            run_wco_stages(comms, &mut salad, plan, &stages_boxed, &potato);
+        for SeedExec { seed, stages } in seed_execs {
+            let mut salad = seed.seed(comms, !stable);
+            run_wco_stages(comms, &mut salad, &stages);
             emit_head_facts(facts, comms, head, salad);
         }
     }
@@ -170,11 +185,11 @@ impl crate::types::State {
 /// Projects `salad` through each head atom and extends the corresponding relation.
 ///
 /// Free function so it can coexist with an outstanding apparatus borrow on `decls`.
-fn emit_head_facts<'a>(
+fn emit_head_facts(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
     head: &[Atom],
-    mut salad: crate::rules::exec::Salad<&'a String>,
+    mut salad: crate::rules::exec::Salad<String>,
 ) {
     let exact_match = head.iter().position(|a| {
         a.terms.len() == salad.arity() &&
@@ -185,7 +200,7 @@ fn emit_head_facts<'a>(
     for (_, atom) in head.iter().enumerate().filter(|(pos,_)| Some(*pos) != exact_match) {
         let mut action = Action::with_arity(salad.arity());
         action.projection = atom.terms.iter().map(|t| match t {
-            Term::Var(name) => Ok(salad.terms.iter().position(|t2| t2 == &name).expect(format!("Failed to find {:?} in {:?}", name, salad.terms).as_str())),
+            Term::Var(name) => Ok(salad.terms.iter().position(|t2| t2 == name).expect(format!("Failed to find {:?} in {:?}", name, salad.terms).as_str())),
             Term::Lit(data) => Err(data.clone()),
         }).collect();
         if let Some(delta) = salad.facts.flatten() {
@@ -203,12 +218,12 @@ fn emit_head_facts<'a>(
 
 /// Ensures index actions exist for every non-logic, non-view atom referenced by the
 /// loads. This prepares the relations to serve queries in the orders the plan needs.
-pub fn ensure_actions_for_loads<'a>(
+pub fn ensure_actions_for_loads(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
     decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
-    body: &'a [Atom],
-    loads: &std::collections::BTreeMap<usize, plan::Load<&'a String>>,
+    body: &[Atom],
+    loads: &std::collections::BTreeMap<usize, plan::Load<String>>,
 ) {
     for (load_atom, (action, _)) in loads.iter() {
         let name = body[*load_atom].name.as_str();
@@ -220,27 +235,28 @@ pub fn ensure_actions_for_loads<'a>(
     }
 }
 
-/// Runs the wco_join stages of a plan against a salad, mutating the salad in place.
+/// Runs the wco_join stages against a salad, mutating the salad in place.
 ///
-/// The single shared loop pattern used by `State::implement`, `Sum::seed`, and
-/// `Sum::join_seeded`. Each stage's `(terms, atoms, order)` triple feeds one
-/// `wco_join` call; `potato` is the column-name placeholder for count metadata.
+/// The single shared loop pattern used by `State::implement`, `View::seed`, and
+/// `View::join_seeded`. Each `StageExec` (with its terms, output order, and atoms)
+/// feeds one `wco_join` call; `potato` is the column-name placeholder for count
+/// metadata.
 ///
 /// Stage 0 is special: its `terms` document the seed's pre-bound bindings (already
 /// present in `salad`), not new columns to introduce. We pass an empty `terms` set so
 /// `wco_join` semijoins against `init_atoms` instead of routing through
 /// `wco_join_inner` and trying to re-introduce already-bound columns. Stages 1+
 /// follow the usual interpretation of `terms` as the new columns to extend with.
-pub fn run_wco_stages<'a>(
+pub fn run_wco_stages(
     comms: &mut crate::comms::Comms,
-    salad: &mut exec::Salad<&'a String>,
-    plan: &plan::Plan<usize, &'a String>,
-    stages: &[StageBoxes<'a>],
-    potato: &'a String,
+    salad: &mut exec::Salad<String>,
+    stages: &[StageExec],
 ) {
-    for (i, ((_, terms, order), atoms)) in plan.iter().zip(stages.iter()).enumerate() {
-        let stage_terms = if i == 0 { &Default::default() } else { terms };
-        exec::wco_join(comms, salad, stage_terms, atoms, potato, &order[..]);
+    let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::default();
+    let potato = ".potato".to_string();
+    for (i, stage) in stages.iter().enumerate() {
+        let stage_terms = if i == 0 { &empty } else { &stage.terms };
+        exec::wco_join(comms, salad, stage_terms, &stage.atoms, potato.clone(), &stage.output_order[..]);
     }
 }
 

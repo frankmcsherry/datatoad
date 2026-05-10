@@ -20,20 +20,13 @@ use crate::comms::Comms;
 /// Looks for the atom's name in a known list, and returns an implementation if found.
 ///
 /// The implementation is a type that implements both `PlanAtom` and `ExecAtom`, and can be boxed as either.
-pub fn resolve(atom: &Atom) -> Option<LogicRel<&String>> {
-    resolve_with_subst(atom, &plan::Subst::new())
-}
-
-/// Substitution-aware variant of `resolve`. Used by view planning so that head-var
-/// renames (and lit pushdown) flow into the logic atom's `bound`/`terms`. For the
-/// non-view path, an empty `subst` (via `resolve`) gives the original behavior.
-pub fn resolve_with_subst<'a>(atom: &'a Atom, subst: &plan::Subst<'a>) -> Option<LogicRel<&'a String>> {
+pub fn resolve(atom: &Atom) -> Option<LogicRel<String>> {
     match atom.name.as_str() {
-        ":noteq" => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::NotEq } ), atom, subst)),
-        ":range" => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::Range } ), atom, subst)),
-        ":plus"  => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::Plus } ),  atom, subst)),
-        ":times" => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::Times } ), atom, subst)),
-        ":print" => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::Print(atom.terms.len()) } ), atom, subst)),
+        ":noteq" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::NotEq } ), atom)),
+        ":range" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Range } ), atom)),
+        ":plus"  => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Plus } ),  atom)),
+        ":times" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Times } ), atom)),
+        ":print" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Print(atom.terms.len()) } ), atom)),
         _ => None,
     }
 }
@@ -93,45 +86,30 @@ pub struct LogicRel<T> {
     pub terms: Vec<T>,
 }
 
-impl<'a> LogicRel<&'a String> {
+impl LogicRel<String> {
     /// Create a new instance of `Self` from batch logic and the atom itself.
-    pub fn new(logic: Box<dyn super::logic::BatchLogic>, atom: &'a Atom) -> Self {
-        Self::new_with_subst(logic, atom, &plan::Subst::new())
-    }
-
-    /// Substitution-aware variant: walks atom terms applying `subst`, so a body var
-    /// renamed via `Term::Var(new_name)` appears under its new name in `bound`/`terms`,
-    /// and a body var pushed down to `Term::Lit(value)` becomes a positional literal.
-    pub fn new_with_subst(
-        logic: Box<dyn super::logic::BatchLogic>,
-        atom: &'a Atom,
-        subst: &plan::Subst<'a>,
-    ) -> Self {
-        let bound: Vec<Result<&'a String, Vec<u8>>> = atom.terms.iter().map(|t| match t {
-            Term::Var(name) => match subst.get(name).copied() {
-                Some(Term::Var(new_name)) => Ok(new_name),
-                Some(Term::Lit(data)) => Err(data.clone()),
-                None => Ok(name),
-            },
+    pub fn new(logic: Box<dyn super::logic::BatchLogic>, atom: &Atom) -> Self {
+        let bound: Vec<Result<String, Vec<u8>>> = atom.terms.iter().map(|t| match t {
+            Term::Var(name) => Ok(name.clone()),
             Term::Lit(data) => Err(data.clone()),
         }).collect();
-        let terms = bound.iter().flatten().collect::<BTreeSet<_>>().into_iter().copied().collect::<Vec<_>>();
+        let terms = bound.iter().flatten().collect::<BTreeSet<_>>().into_iter().cloned().collect::<Vec<_>>();
         Self { logic, bound, terms }
     }
 }
 
-impl <T: Ord + Copy> plan::PlanAtom<T> for LogicRel<T> {
+impl <T: Ord + Clone> plan::PlanAtom<T> for LogicRel<T> {
     fn terms(&self) -> BTreeSet<T> { self.terms.iter().cloned().collect() }
     fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T> {
         let indexes = self.bound.iter().enumerate().filter(|(_index, term)| match term {
             Ok(name) => terms.contains(name),
             Err(_) => true,
         }).map(|(index,_term)| index).collect();
-        self.logic.bound(&indexes).into_iter().map(|index| self.bound[index].as_ref().unwrap()).copied().collect()
+        self.logic.bound(&indexes).into_iter().map(|index| self.bound[index].as_ref().unwrap()).cloned().collect()
     }
 }
 
-impl<T: Ord + Copy> exec::ExecAtom<T> for LogicRel<T> {
+impl<T: Ord + Clone> exec::ExecAtom<T> for LogicRel<T> {
 
     // Lightly odd, in that we have no preference on term order.
     fn terms(&self) -> &[T] { &self.terms }
@@ -141,7 +119,7 @@ impl<T: Ord + Copy> exec::ExecAtom<T> for LogicRel<T> {
         else {
             let mut salad = crate::rules::exec::Salad::new(Default::default(), Vec::default());
             salad.extend([Vec::default().try_into().unwrap()]);
-            self.join(comms, &mut salad, &self.terms.iter().copied().collect(), &self.terms);
+            self.join(comms, &mut salad, &self.terms.iter().cloned().collect(), &self.terms);
             salad
         }
     }
@@ -264,11 +242,11 @@ impl<T: Ord + Copy> exec::ExecAtom<T> for LogicRel<T> {
                     delta.push_layer(Rc::new(Layer { list: colnew }));
                     salad.facts.push(delta);
                 }
-                salad.terms.push(*added.iter().next().unwrap());
+                salad.terms.push(added.iter().next().unwrap().clone());
             }
 
         }
-        else { Extend::extend(&mut salad.terms, added.iter().take(1).copied()); }
+        else { Extend::extend(&mut salad.terms, added.iter().take(1).cloned()); }
     }
 }
 
@@ -282,7 +260,7 @@ impl<L: Logic> BatchLogic for BatchedLogic<L> {
         // The following is .. neither clear nor performant. It should be at least one of those two things.
         let length = args.iter().flatten().next().map(|a| a.1.iter().sum()).unwrap_or(1);
         let mut counts = Vec::with_capacity(length);
-        let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().copied().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
+        let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().cloned().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
         let mut values: Vec<Option<<Terms as columnar::Borrow>::Ref<'_>>> = Vec::default();
         for _ in 0 .. length {
             values.clear();
@@ -296,7 +274,7 @@ impl<L: Logic> BatchLogic for BatchedLogic<L> {
 
         // The following is .. neither clear nor performant. It should be at least one of those two things.
         let length = args.iter().flatten().next().map(|a| a.1.iter().sum()).unwrap_or(1);
-        let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().copied().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
+        let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().cloned().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
         let mut values: Vec<Option<<Terms as columnar::Borrow>::Ref<'_>>> = Vec::default();
         let mut terms = Terms::default();
         let mut result: Options<Lists<Terms>> = Default::default();

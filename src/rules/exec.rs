@@ -51,7 +51,7 @@ pub struct Salad<T> {
     pub terms: Vec<T>,
 }
 
-impl<T: Ord+Copy> Salad<T> {
+impl<T: Ord+Clone> Salad<T> {
     /// Constructs a new `Self` from facts and terms.
     pub fn new(facts: FactLSM<Forest<Terms>>, terms: Vec<T>) -> Self { Self { facts, terms } }
 
@@ -91,9 +91,9 @@ impl<T: Ord+Copy> Salad<T> {
 
         if !identity {
             if let Some(flattened) = salad.facts.flatten() {
-                salad.facts.extend(flattened.act_on(&Action::permutation(permutation.iter().copied()), thresh));
+                salad.facts.extend(flattened.act_on(&Action::permutation(permutation.iter().cloned()), thresh));
             }
-            salad.terms = permutation.iter().map(|i| salad.terms[*i]).collect::<Vec<_>>();
+            salad.terms = permutation.iter().map(|i| salad.terms[*i].clone()).collect::<Vec<_>>();
         }
 
         // Maybe necessary if `permutation` is `0 .. k` for k less than the input arity.
@@ -127,7 +127,7 @@ enum PermuteMode { Align, Prune }
 /// The `target` argument is the intended term order, which the output may be restricted to if appropriate.
 use crate::facts::{Forest, Terms};
 #[inline(never)]
-pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
+pub fn wco_join<T: Ord + Clone + std::fmt::Debug>(
     comms: &mut Comms,
     salad: &mut Salad<T>,
     terms: &BTreeSet<T>,
@@ -148,16 +148,16 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
     }
     else {
         // Multiple atoms will use worst-case optimal machinery, but we first sequester any columns not referenced by the atoms.
-        let shared = salad.terms.iter().filter(|t| atoms.iter().any(|a| a.terms().contains(t))).copied().collect::<Vec<_>>();
+        let shared = salad.terms.iter().filter(|t| atoms.iter().any(|a| a.terms().contains(t))).cloned().collect::<Vec<_>>();
         if salad.terms.len() != shared.len() {
-            salad.align_to(comms, shared.iter().copied());
+            salad.align_to(comms, shared.iter().cloned());
             let mut prefix = salad.clone();
             prefix.truncate(shared.len());
 
             let mut shared_target = shared.clone();
-            shared_target.extend(terms.iter().copied());
+            shared_target.extend(terms.iter().cloned());
             wco_join_inner(comms, &mut prefix, terms, atoms, potato, &shared_target);
-            prefix.align_to(comms, salad.terms[..shared.len()].iter().copied());
+            prefix.align_to(comms, salad.terms[..shared.len()].iter().cloned());
 
             // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
             assert!(shared.len() > 0 || comms.peers() == 1);
@@ -166,8 +166,8 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
             let conduit = comms.conduit();
             if let Some(facts) = salad.facts.flatten() {
                 let mut crossed_terms = salad.terms.clone();
-                crossed_terms.extend(salad.terms[..shared.len()].iter().copied());
-                crossed_terms.extend(terms.iter().copied());
+                crossed_terms.extend(salad.terms[..shared.len()].iter().cloned());
+                crossed_terms.extend(terms.iter().cloned());
                 let projection = target.iter().map(|t| crossed_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
                 salad.facts = facts.join_many(prefix.facts.contents(), shared.len(), &projection[..], conduit);
             }
@@ -180,7 +180,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
         else { wco_join_inner(comms, salad, terms, atoms, potato, target) }
     }
 
-    salad.prune_to(comms, target.iter().copied());
+    salad.prune_to(comms, target.iter().cloned());
 }
 
 /// Inner workings of the worst-case optimal join step.
@@ -188,7 +188,7 @@ pub fn wco_join<T: Ord + Copy + std::fmt::Debug>(
 /// This logic happens only after the preparatory logic above, and probably oughtn't be called by itself.
 /// It unambiguously applies per-atom counting, sharding, proposals, and validation.
 #[inline(never)]
-fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
+fn wco_join_inner<T: Ord + Clone + std::fmt::Debug>(
     comms: &mut Comms,
     salad: &mut Salad<T>,
     terms: &BTreeSet<T>,
@@ -251,9 +251,9 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
 
         // Look forward to the terms of the next atom we'll semijoin with.
         let next_terms = atoms[if shard_index == 0 { 1 } else { 0 }].terms();
-        let mut after = Vec::default();
-        after.extend(next_terms.iter().filter(|t| salad.terms.contains(t) || terms.contains(t)));
-        after.extend(salad.terms.iter().filter(|t| !next_terms.contains(t)));
+        let mut after: Vec<T> = Vec::default();
+        after.extend(next_terms.iter().filter(|t| salad.terms.contains(t) || terms.contains(t)).cloned());
+        after.extend(salad.terms.iter().filter(|t| !next_terms.contains(t)).cloned());
         other.join(comms, &mut shard, terms, &after);
 
         // semijoin with other atoms.
@@ -264,7 +264,7 @@ fn wco_join_inner<T: Ord + Copy + std::fmt::Debug>(
         }
 
         // Put in common layout (`target`) then merge.
-        shard.prune_to(comms, target.iter().copied());
+        shard.prune_to(comms, target.iter().cloned());
         salad.extend(shard.facts);
     }
 }
