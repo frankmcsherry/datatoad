@@ -5,12 +5,24 @@ use timely_communication::{allocator::Allocator, Bytesable};
 use crate::facts::{FactLSM, Forest, Lists, Terms};
 use crate::facts::trie::Layer;
 
-#[derive(Default)]
+/// Cluster-wide default budget (bytes) for in-flight intermediate tuples.
+/// Per-peer slice is `mem_budget / peers()`. See `Comms::thresh`.
+pub const DEFAULT_MEM_BUDGET: usize = 200_000_000;
+
 pub struct Comms {
     /// If set, communication infrastructure.
     pub ether: Option<Rc<RefCell<Allocator>>>,
     /// An incrementing channel identifier.
     count: usize,
+    /// Cluster-wide budget for in-flight intermediate tuples (bytes).
+    /// Configurable via `-m`/`--memory` CLI flag or `DATATOAD_MEMORY` env var.
+    mem_budget: usize,
+}
+
+impl Default for Comms {
+    fn default() -> Self {
+        Self { ether: None, count: 0, mem_budget: DEFAULT_MEM_BUDGET }
+    }
 }
 
 impl Comms {
@@ -18,16 +30,24 @@ impl Comms {
     pub fn index(&self) -> usize { self.ether.as_ref().map(|e| e.borrow().index()).unwrap_or(0) }
     pub fn peers(&self) -> usize { self.ether.as_ref().map(|e| e.borrow().peers()).unwrap_or(1) }
 
+    /// Cluster-wide budget for in-flight intermediate tuples (bytes).
+    pub fn mem_budget(&self) -> usize { self.mem_budget }
+    /// Per-peer slice of the cluster-wide budget. The constant most call sites want.
+    pub fn thresh(&self) -> usize { self.mem_budget / self.peers() }
+    /// Set the cluster-wide memory budget. Typically called once at startup.
+    pub fn set_mem_budget(&mut self, budget: usize) { self.mem_budget = budget; }
+
     pub fn next_id(&self) -> usize { self.count }
 
     pub fn conduit(&mut self) -> Conduit {
+        let budget = self.mem_budget;
         let comms = self.ether.as_mut().map(|comms| {
             let (sends, recv) = comms.borrow_mut().allocate(self.count);
             self.count += 1;
             let count = sends.len();
             Channel { comms: comms.clone(), sends, recv, count, done: false }
         });
-        Conduit { comms, facts: FactLSM::default() }
+        Conduit { comms, facts: FactLSM::default(), mem_budget: budget }
     }
 
     /// Drains a set of active indices, broadcasts, and refills with the union across all workers.
@@ -87,7 +107,9 @@ impl Comms {
 }
 
 impl From<Allocator> for Comms {
-    fn from(comm: Allocator) -> Self { Self { ether: Some(Rc::new(RefCell::new(comm))), count: 0 } }
+    fn from(comm: Allocator) -> Self {
+        Self { ether: Some(Rc::new(RefCell::new(comm))), count: 0, mem_budget: DEFAULT_MEM_BUDGET }
+    }
 }
 
 use timely_communication::{Push, Pull};
@@ -156,11 +178,15 @@ pub struct Conduit {
     /// Communication infrastructure.
     comms: Option<Channel>,
     facts: FactLSM<Forest<Terms>>,
+    /// Snapshot of the cluster-wide budget at allocation time.
+    mem_budget: usize,
 }
 
 impl Conduit {
     /// The number of peers backing the conduit.
     pub fn peers(&self) -> usize { self.comms.as_ref().map(|c| c.comms.borrow().peers()).unwrap_or(1) }
+    /// Per-peer slice of the cluster-wide budget. Mirrors `Comms::thresh`.
+    pub fn thresh(&self) -> usize { self.mem_budget / self.peers() }
     /// Supplies facts to the conduit, which are exchanged and then collected.
     pub fn extend(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
         if let Some(channel) = self.comms.as_mut() { channel.exchange(facts); }

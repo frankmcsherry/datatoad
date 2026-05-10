@@ -136,8 +136,11 @@ pub mod types {
 
         pub fn extend_facts(&mut self, atom: &Atom, mut facts: crate::facts::FactLSM<crate::facts::Forest<crate::facts::Terms>>) {
             self.comms.exchange(&mut facts);
+            // Always materialize the relation entry — see extend_facts_with_fields
+            // in src/rules/mod.rs for the rationale.
+            let entry = self.facts.entry(&atom);
             if let Some(columns) = facts.flatten() {
-                self.facts.entry(&atom).extend([columns]);
+                entry.extend([columns]);
             }
         }
 

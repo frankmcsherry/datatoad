@@ -438,7 +438,7 @@ pub mod terms {
         mut conduit: crate::comms::Conduit,
     ) -> FactLSM<Forest<Terms>> {
 
-        let thresh = 200_000_000 / conduit.peers();
+        let thresh = conduit.thresh();
 
         if thats.len() == 0 { return conduit.finish(); }
 

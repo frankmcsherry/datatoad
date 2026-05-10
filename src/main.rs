@@ -14,12 +14,18 @@ fn main() {
     use timely_communication::Config;
 
     // Extract configurations and free arguments.
-    let (config, mut free) = {
+    let (config, mem_budget, mut free) = {
         let args = std::env::args();
         let mut opts = getopts::Options::new();
         Config::install_options(&mut opts);
+        opts.optopt("m", "memory", "cluster-wide memory budget for in-flight tuples (e.g. 200M, 1G, 200000000); default 200M", "BYTES");
         let matches = opts.parse(args).map_err(|e| e.to_string()).unwrap();
-        (Config::from_matches(&matches).unwrap(), matches.free)
+        let config = Config::from_matches(&matches).unwrap();
+        let mem_budget = matches.opt_str("m")
+            .or_else(|| std::env::var("DATATOAD_MEMORY").ok())
+            .map(|s| parse_byte_size(&s).expect("invalid -m/DATATOAD_MEMORY value"))
+            .unwrap_or(datatoad::comms::DEFAULT_MEM_BUDGET);
+        (config, mem_budget, matches.free)
     };
 
     free.remove(0); // remove binary
@@ -35,6 +41,7 @@ fn main() {
         let mut bytes = BTreeMap::default();
 
         state.comms = allocator.into();
+        state.comms.set_mem_budget(mem_budget);
 
         // Command-line arguments are treated as files to execute.
         for filename in free.iter() { exec_file(filename.as_str(), &mut state, &mut bytes, &mut timer); }
@@ -120,8 +127,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                         if let Ok(regex) = regex::Regex::new(pattern) {
                             let names = regex.capture_names().map(|x| x.to_owned()).collect::<Vec<_>>();
                             if let Ok(file) = File::open(filename) {
-                                let peers = state.comms.peers();
-                                let thresh = 200_000_000 / peers;
+                                let thresh = state.comms.thresh();
                                 let mut file = BufReader::new(file);
                                 use columnar::Push;
                                 use datatoad::facts::{Forest, Terms};
@@ -242,6 +248,17 @@ fn parse_decl(text: &str) -> Option<(String, usize, Vec<String>)> {
     Some((name, arity, flags))
 }
 
+/// Parses a byte-size string: accepts trailing `K`/`M`/`G` (decimal, base 1000)
+/// or a raw integer. Whitespace around the value and unit is allowed.
+fn parse_byte_size(s: &str) -> Option<usize> {
+    let s = s.trim();
+    let (digits, mult) = if let Some(rest) = s.strip_suffix(['G', 'g']) { (rest, 1_000_000_000) }
+                         else if let Some(rest) = s.strip_suffix(['M', 'm']) { (rest, 1_000_000) }
+                         else if let Some(rest) = s.strip_suffix(['K', 'k']) { (rest, 1_000) }
+                         else { (s, 1) };
+    digits.trim().parse::<usize>().ok().map(|n| n * mult)
+}
+
 fn exec_file(filename: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec<u8>, usize>, timer: &mut std::time::Instant) {
     if let Ok(file) = File::open(filename) {
         let file = BufReader::new(file);
@@ -276,8 +293,7 @@ mod flow_log {
 
                 let atom = crate::types::Atom { name: name.to_string(), anti: false, terms: vec![crate::types::Term::Lit(vec![]); columns.len()] };
 
-                let peers = state.comms.peers();
-                let thresh = 200_000_000 / peers;
+                let thresh = state.comms.thresh();
                 while let Some(record) = reader.read_byte_record().unwrap() {
                     for (term, col) in record.iter().zip(columns.iter_mut()) {
                         let num = term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32));

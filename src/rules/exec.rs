@@ -82,7 +82,7 @@ impl<T: Ord+Clone> Salad<T> {
         align: impl Iterator<Item = T>,
         mode: PermuteMode,
     ) {
-        let thresh = 200_000_000 / comms.peers();
+        let thresh = comms.thresh();
         let mut permutation: Vec<usize> = align.flat_map(|t1| salad.terms.iter().position(|t2| &t1 == t2)).collect();
         if let PermuteMode::Align = mode { for index in 0 .. salad.terms.len() { if !permutation.contains(&index) { permutation.push(index); }} }
 
