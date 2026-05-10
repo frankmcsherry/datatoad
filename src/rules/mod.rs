@@ -34,20 +34,19 @@ pub use exec::ExecAtom;
 /// `parent_plan` is the surrounding rule's plan for this seed, threaded through so
 /// view atoms can compute their approach pattern from where they appear. `None`
 /// means the atom is itself the seed (no surrounding plan to inspect).
-pub(crate) fn build_atom<'a>(
+pub(crate) fn build_atom(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
-    decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
-    rules: &'a [(Rule, Vec<std::time::Duration>)],
-    body: &'a [Atom],
+    decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
+    rules: &[(Rule, Vec<std::time::Duration>)],
+    body: &[Atom],
     plan_atom: usize,
     load_atom: usize,
     loads: &std::collections::BTreeMap<usize, plan::Load<String>>,
     parent_plan: Option<&plan::Plan<usize, String>>,
-    subst: &plan::Subst,
-) -> Box<dyn exec::ExecAtom<String> + 'a> {
+) -> Box<dyn exec::ExecAtom<String>> {
     use crate::rules::atoms;
-    if let Some(logic) = atoms::logic::resolve_with_subst(&body[load_atom], subst) {
+    if let Some(logic) = atoms::logic::resolve(&body[load_atom]) {
         Box::new(logic)
     } else if decls.get(body[load_atom].name.as_str()).map_or(false, |d| d.view) {
         Box::new(atoms::view::View::build(
@@ -66,14 +65,14 @@ pub(crate) fn build_atom<'a>(
 }
 
 /// One plan stage's pre-built non-seed atoms, in plan order.
-pub type StageBoxes<'a> = Vec<Box<dyn exec::ExecAtom<String> + 'a>>;
+pub type StageBoxes = Vec<Box<dyn exec::ExecAtom<String>>>;
 
 /// One seed's pre-built apparatus: the seed atom (whose `.seed()` produces the initial
 /// salad) and the per-stage non-seed atoms (used for `wco_join`).
-type SeedWork<'a> = (Box<dyn exec::ExecAtom<String> + 'a>, Vec<StageBoxes<'a>>);
+type SeedWork = (Box<dyn exec::ExecAtom<String>>, Vec<StageBoxes>);
 
 /// All seeds' apparatus, parallel to `Plans` iteration order.
-type SeedApparatus<'a> = Vec<SeedWork<'a>>;
+type SeedApparatus = Vec<SeedWork>;
 
 /// Plans a rule body and pre-builds the boxed atoms for every (seed, stage).
 ///
@@ -81,19 +80,19 @@ type SeedApparatus<'a> = Vec<SeedWork<'a>>;
 /// invoke this with the same field borrows. Callers split a `&mut State` into its
 /// fields and pass them through. `rules` is the State's rule list, used to look up
 /// views' defining rules during view-atom construction.
-pub fn plan_and_build_with_fields<'a>(
+pub fn plan_and_build_with_fields(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
-    decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
-    rules: &'a [(Rule, Vec<std::time::Duration>)],
-    body: &'a [Atom],
-    head: &'a [Atom],
+    decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
+    rules: &[(Rule, Vec<std::time::Duration>)],
+    body: &[Atom],
+    head: &[Atom],
     stable: bool,
     active_relations: Option<&std::collections::BTreeSet<&str>>,
 ) -> (
     plan::Plans<usize, String>,
     plan::Loads<usize, String>,
-    SeedApparatus<'a>,
+    SeedApparatus,
 ) {
     // Body atoms that should take a turn as the source of novelty this round.
     // In `stable` mode only the first body atom drives; in incremental mode every
@@ -117,14 +116,13 @@ pub fn plan_and_build_with_fields<'a>(
     // Pre-building all seeds (rather than building them inline during execution)
     // means each seed sees the round's input state, not facts an earlier seed
     // committed mid-loop — keeping semi-naive's "this round vs. next round" line clean.
-    let apparatus: SeedApparatus<'a> = plans.iter()
+    let apparatus: SeedApparatus = plans.iter()
         .map(|(plan_atom, plan)| {
             let plan_loads = &loads[plan_atom];
-            let empty_subst = plan::Subst::new();
-            let driver = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None, &empty_subst);
-            let stages: Vec<StageBoxes<'a>> = plan.iter()
+            let driver = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None);
+            let stages: Vec<StageBoxes> = plan.iter()
                 .map(|(atoms, _, _)| atoms.iter()
-                    .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan), &empty_subst))
+                    .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan)))
                     .collect::<Vec<_>>())
                 .collect();
             (driver, stages)
@@ -170,7 +168,7 @@ impl crate::types::State {
 /// Projects `salad` through each head atom and extends the corresponding relation.
 ///
 /// Free function so it can coexist with an outstanding apparatus borrow on `decls`.
-fn emit_head_facts<'a>(
+fn emit_head_facts(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
     head: &[Atom],
@@ -203,11 +201,11 @@ fn emit_head_facts<'a>(
 
 /// Ensures index actions exist for every non-logic, non-view atom referenced by the
 /// loads. This prepares the relations to serve queries in the orders the plan needs.
-pub fn ensure_actions_for_loads<'a>(
+pub fn ensure_actions_for_loads(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
     decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
-    body: &'a [Atom],
+    body: &[Atom],
     loads: &std::collections::BTreeMap<usize, plan::Load<String>>,
 ) {
     for (load_atom, (action, _)) in loads.iter() {
@@ -231,11 +229,11 @@ pub fn ensure_actions_for_loads<'a>(
 /// `wco_join` semijoins against `init_atoms` instead of routing through
 /// `wco_join_inner` and trying to re-introduce already-bound columns. Stages 1+
 /// follow the usual interpretation of `terms` as the new columns to extend with.
-pub fn run_wco_stages<'a>(
+pub fn run_wco_stages(
     comms: &mut crate::comms::Comms,
     salad: &mut exec::Salad<String>,
     plan: &plan::Plan<usize, String>,
-    stages: &[StageBoxes<'a>],
+    stages: &[StageBoxes],
     potato: String,
 ) {
     let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::default();

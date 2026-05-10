@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::comms::Comms;
 use crate::facts::{FactContainer, FactLSM, Forest, Relations, Terms};
 use crate::rules::exec::Salad;
-use crate::rules::plan::{self, PlanAtom, Subst};
+use crate::rules::plan::{self, PlanAtom};
 use crate::rules::{ExecAtom, SeedApparatus, StageBoxes};
 use crate::types::{Action, Atom, RelationDecl, Rule, Term};
 
@@ -38,12 +38,14 @@ impl PlanAtom<String> for ViewPlan {
     }
 }
 
-/// One disjunct of the seed apparatus: defining rule plus its standard apparatus.
-pub struct SeedDisjunct<'a> {
-    pub rule: &'a Rule,
+/// One disjunct of the seed apparatus: cloned head atom plus its standard apparatus.
+pub struct SeedDisjunct {
+    /// The disjunct's head atom (cloned from the defining rule). Used by `View::seed`
+    /// to project results through the head's positional shape.
+    pub head: Atom,
     pub plans: plan::Plans<usize, String>,
     pub loads: plan::Loads<usize, String>,
-    pub apparatus: SeedApparatus<'a>,
+    pub apparatus: SeedApparatus,
 }
 
 /// One disjunct of the join apparatus: the seeded plan for the disjunct's body and
@@ -51,8 +53,7 @@ pub struct SeedDisjunct<'a> {
 ///
 /// At runtime, evaluation is: canonicalize input salad to pattern order → apply
 /// `input_action` → run plan stages → apply `output_action` → use-site-shaped salad.
-pub struct JoinDisjunct<'a> {
-    pub rule: &'a Rule,
+pub struct JoinDisjunct {
     /// Applied to the (canonicalized) input salad before passing into the plan.
     /// Filters by use-site/head-derived constraints not pushable via substitution
     /// (e.g. head literal at use-site var position in pattern); projects to the
@@ -65,28 +66,29 @@ pub struct JoinDisjunct<'a> {
     /// The seeded plan for the disjunct's body, planned with substitution applied.
     pub plan: plan::Plan<usize, String>,
     /// Pre-built atoms per stage, in plan order (one per atom in each stage).
-    pub stages: Vec<StageBoxes<'a>>,
+    pub stages: Vec<StageBoxes>,
 }
 
 /// Pre-built apparatus for `View::join` for one specific approach pattern.
-pub struct JoinApparatus<'a> {
-    /// The pre-bound subset of sum's terms (in use-site space).
+pub struct JoinApparatus {
+    /// The pre-bound subset of view's terms (in use-site space).
     pub pattern: BTreeSet<String>,
-    pub disjuncts: Vec<JoinDisjunct<'a>>,
+    pub disjuncts: Vec<JoinDisjunct>,
 }
 
 /// ExecAtom for a view reference.
-pub struct View<'a> {
-    pub use_site: &'a Atom,
+pub struct View {
+    /// The use-site atom (cloned at build time). Used by `View::seed` to shape output.
+    pub use_site: Atom,
     pub head_terms: Vec<String>,
-    /// Apparatus for `seed` (when sum is itself the seed). Always present.
-    pub seed_disjuncts: Vec<SeedDisjunct<'a>>,
+    /// Apparatus for `seed` (when view is itself the seed). Always present.
+    pub seed_disjuncts: Vec<SeedDisjunct>,
     /// Apparatus for `join` for a single pre-known approach pattern. Present when
     /// the construction site identified a pattern via the parent plan.
-    pub join_apparatus: Option<JoinApparatus<'a>>,
+    pub join_apparatus: Option<JoinApparatus>,
 }
 
-impl<'a> View<'a> {
+impl View {
     /// Constructs a `View` for a view reference at `body[load_atom]`.
     ///
     /// Always builds the seed apparatus from the view's defining rules.
@@ -99,37 +101,40 @@ impl<'a> View<'a> {
     pub fn build(
         facts: &mut Relations,
         comms: &mut Comms,
-        decls: &'a std::collections::BTreeMap<String, RelationDecl>,
-        rules: &'a [(Rule, Vec<Duration>)],
-        body: &'a [Atom],
+        decls: &std::collections::BTreeMap<String, RelationDecl>,
+        rules: &[(Rule, Vec<Duration>)],
+        body: &[Atom],
         plan_atom: usize,
         load_atom: usize,
         parent_plan: Option<&plan::Plan<usize, String>>,
-    ) -> View<'a> {
+    ) -> View {
         let view_name = body[load_atom].name.as_str();
-        let defining: Vec<&'a Rule> = rules.iter()
+        let defining: Vec<&Rule> = rules.iter()
             .map(|(r, _)| r)
             .filter(|r| !r.head.is_empty() && r.head[0].name.as_str() == view_name)
             .collect();
 
-        let mut seed_disjuncts: Vec<SeedDisjunct<'a>> = Vec::with_capacity(defining.len());
+        let mut seed_disjuncts: Vec<SeedDisjunct> = Vec::with_capacity(defining.len());
         for rule in &defining {
             let (plans, loads, apparatus) = crate::rules::plan_and_build_with_fields(
                 facts, comms, decls, rules,
                 &rule.body[..], &rule.head[..],
                 true, None,
             );
-            seed_disjuncts.push(SeedDisjunct { rule, plans, loads, apparatus });
+            seed_disjuncts.push(SeedDisjunct {
+                head: rule.head[0].clone(),
+                plans, loads, apparatus,
+            });
         }
 
-        let use_site = &body[load_atom];
-        let head_terms: Vec<String> = use_site.terms.iter().filter_map(|t| t.as_var().cloned()).collect();
+        let use_site_atom = body[load_atom].clone();
+        let head_terms: Vec<String> = use_site_atom.terms.iter().filter_map(|t| t.as_var().cloned()).collect();
 
         let join_apparatus = parent_plan.and_then(|plan| {
-            build_join_apparatus(facts, comms, decls, rules, plan, body, plan_atom, load_atom, &defining, use_site)
+            build_join_apparatus(facts, comms, decls, rules, plan, body, plan_atom, load_atom, &defining, &use_site_atom)
         });
 
-        View { use_site, head_terms, seed_disjuncts, join_apparatus }
+        View { use_site: use_site_atom, head_terms, seed_disjuncts, join_apparatus }
     }
 }
 
@@ -139,18 +144,18 @@ impl<'a> View<'a> {
 /// Returns `None` if the load atom isn't found in any plan stage. Per-disjunct,
 /// `compose_disjunct` may return `None` (lit-vs-lit contradiction or substitution
 /// conflict) and the disjunct is silently dropped from the apparatus.
-fn build_join_apparatus<'a>(
+fn build_join_apparatus(
     facts: &mut Relations,
     comms: &mut Comms,
-    decls: &'a std::collections::BTreeMap<String, RelationDecl>,
-    rules: &'a [(Rule, Vec<Duration>)],
+    decls: &std::collections::BTreeMap<String, RelationDecl>,
+    rules: &[(Rule, Vec<Duration>)],
     plan: &plan::Plan<usize, String>,
-    body: &'a [Atom],
+    body: &[Atom],
     plan_atom: usize,
     load_atom: usize,
-    defining: &[&'a Rule],
-    use_site: &'a Atom,
-) -> Option<JoinApparatus<'a>> {
+    defining: &[&Rule],
+    use_site: &Atom,
+) -> Option<JoinApparatus> {
 
     // Find the stage in `plan` containing `load_atom`.
     let stage_idx = plan.iter().position(|(stage_atoms, _, _)| stage_atoms.contains(&load_atom))?;
@@ -186,40 +191,42 @@ fn build_join_apparatus<'a>(
         };
 
     // Build per-disjunct join apparatus.
-    let mut disjuncts: Vec<JoinDisjunct<'a>> = Vec::with_capacity(defining.len());
+    let mut disjuncts: Vec<JoinDisjunct> = Vec::with_capacity(defining.len());
     for rule in defining {
         let disjunct_head = &rule.head[0];
 
         // Compose use-site request with this disjunct's head. `None` means the
         // disjunct contributes nothing (lit-vs-lit contradiction or substitution
         // conflict) — we silently skip it.
-        let comp = match compose_disjunct(&pattern, use_site, disjunct_head) {
+        let comp = match compose_disjunct(&pattern, use_site, disjunct_head, &rule.body[..]) {
             Some(c) => c,
             None => continue,
         };
 
-        let (plan, loads) = plan::plan_rule_seeded(
-            &rule.body[..], &comp.seed, &comp.need, &comp.subst, decls,
-        );
+        // The composition produced a rewritten body (substitution applied) which is
+        // owned locally. Plan, loads, and stage boxes don't borrow from it — data
+        // and logic atoms own their data, and `View` (via `View::build`) clones any
+        // atoms it needs. So `comp.body` can drop at the end of this iteration.
+        let body = &comp.body[..];
+
+        let (plan, loads) = plan::plan_rule_seeded(body, &comp.seed, &comp.need, decls);
 
         // Ensure index actions for each load action in the seeded plan.
-        crate::rules::ensure_actions_for_loads(facts, comms, decls, &rule.body[..], &loads);
+        crate::rules::ensure_actions_for_loads(facts, comms, decls, body, &loads);
 
         // Build per-stage atoms. Pass `pattern_info: None` so any nested views
         // in the disjunct's body fall back to materialize for now.
-        let stages: Vec<StageBoxes<'a>> = plan.iter()
+        let stages: Vec<StageBoxes> = plan.iter()
             .map(|(atoms, _, _)| atoms.iter()
                 .map(|inner_load| crate::rules::build_atom(
                     facts, comms, decls, rules,
-                    &rule.body[..], 0, *inner_load, &loads,
+                    body, 0, *inner_load, &loads,
                     None,
-                    &comp.subst,
                 ))
                 .collect::<Vec<_>>())
             .collect();
 
         disjuncts.push(JoinDisjunct {
-            rule,
             input_action: comp.input_action,
             output_action: comp.output_action,
             plan,
@@ -230,17 +237,16 @@ fn build_join_apparatus<'a>(
     Some(JoinApparatus { pattern, disjuncts })
 }
 
-impl<'a> ExecAtom<String> for View<'a> {
+impl ExecAtom<String> for View {
     fn terms(&self) -> &[String] { &self.head_terms[..] }
 
     fn seed(&self, comms: &mut Comms, recent: bool) -> Salad<String> {
         let mut result = Salad::new(FactLSM::default(), self.head_terms.clone());
         for disjunct in &self.seed_disjuncts {
-            let disjunct_head = &disjunct.rule.head[0];
             for ((_plan_atom, plan), (driver, stages)) in disjunct.plans.iter().zip(&disjunct.apparatus) {
                 let mut salad = driver.seed(comms, recent);
                 crate::rules::run_wco_stages(comms, &mut salad, plan, stages, potato().clone());
-                let projected = project_through_head(salad, disjunct_head, self.use_site);
+                let projected = project_through_head(salad, &disjunct.head, &self.use_site);
                 result.facts.extend(projected.facts);
             }
         }
@@ -275,10 +281,10 @@ impl<'a> ExecAtom<String> for View<'a> {
     }
 }
 
-impl<'a> View<'a> {
+impl View {
     /// Seeded-evaluation join: run each disjunct constrained by the input salad,
     /// project results back to use-site space, replace `salad` with the union.
-    fn join_seeded(&self, ja: &JoinApparatus<'a>, comms: &mut Comms, salad: &mut Salad<String>) {
+    fn join_seeded(&self, ja: &JoinApparatus, comms: &mut Comms, salad: &mut Salad<String>) {
         let mut result_facts: FactLSM<Forest<Terms>> = FactLSM::default();
 
         // Stable iteration order over the pattern; all disjuncts use the same pattern.
@@ -309,7 +315,7 @@ impl<'a> View<'a> {
     }
 }
 
-impl<'a> JoinDisjunct<'a> {
+impl JoinDisjunct {
     /// Term names corresponding to the columns `input_action` projects to. Computed
     /// from the plan's stage 0 terms — that's where the seed lands.
     fn seed_terms_for_action(&self) -> Vec<String> {
@@ -321,7 +327,7 @@ impl<'a> JoinDisjunct<'a> {
 
 /// Projects input salad onto `target_terms` by column position. Returns `None` if
 /// the salad is empty.
-fn canonicalize_salad<'a>(
+fn canonicalize_salad(
     salad: &Salad<String>,
     target_terms: &[String],
 ) -> Option<Salad<String>> {
@@ -346,7 +352,7 @@ fn canonicalize_salad<'a>(
 }
 
 /// Applies an Action to a salad, producing a new salad with the given `output_terms`.
-fn apply_action_to_salad<'a>(
+fn apply_action_to_salad(
     salad: &Salad<String>,
     action: &Action<Vec<u8>>,
     output_terms: Vec<String>,
@@ -372,10 +378,10 @@ fn apply_action_to_salad<'a>(
 /// This is the no-substitution counterpart to `compose_disjunct`'s `output_action`,
 /// used by `View::seed` (which materializes the full view without seeded
 /// pushdown — see `seed_disjuncts`).
-fn project_through_head<'a>(
+fn project_through_head(
     mut salad: Salad<String>,
     disjunct_head: &Atom,
-    use_site: &'a Atom,
+    use_site: &Atom,
 ) -> Salad<String> {
     assert_eq!(
         disjunct_head.terms.len(),
@@ -421,9 +427,9 @@ fn project_through_head<'a>(
 /// The runtime-ready result of composing a use-site request with one disjunct's head.
 ///
 /// Each field carries information for a different lifecycle:
-/// - `subst`: planning-time substitution (body var → use-site var or literal). Fed to
-///   `plan_rule_seeded`; consumed there to bias `build_atoms_map` and `base_actions_for`
-///   without rewriting the body's `Atom` structs.
+/// - `body`: the disjunct's body atoms with the composition's substitution applied
+///   in-place. `Action::from_body` and `plan_body` consume it natively — no separate
+///   subst channel needed downstream.
 /// - `seed`: pre-bound terms (use-site vars in pattern, in BTreeSet order). Fed to
 ///   `plan_rule_seeded` as its seed slice.
 /// - `need`: live disjunct vars that the use-site actually consumes (substituted-head
@@ -433,16 +439,30 @@ fn project_through_head<'a>(
 ///   by `plan_body`'s projection-target loop.
 /// - `input_action`: runtime Action applied to the input salad (columns in pattern
 ///   BTreeSet order) before passing to the disjunct. Filters by use-site/head
-///   constraints not pushable via subst; projects to seed columns.
+///   constraints not pushable via substitution; projects to seed columns.
 /// - `output_action`: runtime Action applied to the disjunct's output salad to
 ///   produce a use-site-shaped salad. Its `Ok(col)` projection entries index into
 ///   `need`-order (the disjunct salad's actual column order after projection-pushdown).
 struct DisjunctComposition {
-    subst: Subst,
+    body: Vec<Atom>,
     seed: Vec<String>,
     need: Vec<String>,
     input_action: Action<Vec<u8>>,
     output_action: Action<Vec<u8>>,
+}
+
+/// Walks each atom's terms, replacing any `Term::Var(name)` whose name appears in
+/// `subst` with the corresponding replacement term. Used by `compose_disjunct` to
+/// fold use-site constraints into the disjunct's body before planning.
+fn substitute_atoms(atoms: &[Atom], subst: &BTreeMap<String, Term>) -> Vec<Atom> {
+    atoms.iter().map(|atom| Atom {
+        name: atom.name.clone(),
+        anti: atom.anti,
+        terms: atom.terms.iter().map(|t| match t {
+            Term::Var(name) => subst.get(name).cloned().unwrap_or_else(|| t.clone()),
+            Term::Lit(_) => t.clone(),
+        }).collect(),
+    }).collect()
 }
 
 /// Composes a use-site request with one disjunct's head, producing the recipe for
@@ -461,11 +481,12 @@ fn compose_disjunct(
     pattern: &BTreeSet<String>,
     use_site: &Atom,
     disjunct_head: &Atom,
+    disjunct_body: &[Atom],
 ) -> Option<DisjunctComposition> {
     if use_site.terms.len() != disjunct_head.terms.len() { return None; }
 
     // Pass 1: build the substitution and collect input lit filters.
-    let mut subst: Subst = BTreeMap::new();
+    let mut subst: BTreeMap<String, Term> = BTreeMap::new();
     let mut input_lits: Vec<(String, Vec<u8>)> = Vec::new();
 
     for (us_term, dj_term) in use_site.terms.iter().zip(disjunct_head.terms.iter()) {
@@ -578,6 +599,7 @@ fn compose_disjunct(
         }
     }
 
-    Some(DisjunctComposition { subst, seed, need, input_action, output_action })
+    let body = substitute_atoms(disjunct_body, &subst);
+    Some(DisjunctComposition { body, seed, need, input_action, output_action })
 }
 

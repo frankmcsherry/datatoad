@@ -21,19 +21,12 @@ use crate::comms::Comms;
 ///
 /// The implementation is a type that implements both `PlanAtom` and `ExecAtom`, and can be boxed as either.
 pub fn resolve(atom: &Atom) -> Option<LogicRel<String>> {
-    resolve_with_subst(atom, &plan::Subst::new())
-}
-
-/// Substitution-aware variant of `resolve`. Used by view planning so that head-var
-/// renames (and lit pushdown) flow into the logic atom's `bound`/`terms`. For the
-/// non-view path, an empty `subst` (via `resolve`) gives the original behavior.
-pub fn resolve_with_subst<'a>(atom: &'a Atom, subst: &plan::Subst) -> Option<LogicRel<String>> {
     match atom.name.as_str() {
-        ":noteq" => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::NotEq } ), atom, subst)),
-        ":range" => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::Range } ), atom, subst)),
-        ":plus"  => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::Plus } ),  atom, subst)),
-        ":times" => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::Times } ), atom, subst)),
-        ":print" => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::Print(atom.terms.len()) } ), atom, subst)),
+        ":noteq" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::NotEq } ), atom)),
+        ":range" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Range } ), atom)),
+        ":plus"  => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Plus } ),  atom)),
+        ":times" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Times } ), atom)),
+        ":print" => Some(LogicRel::new(Box::new(BatchedLogic { logic: relations::Print(atom.terms.len()) } ), atom)),
         _ => None,
     }
 }
@@ -93,26 +86,11 @@ pub struct LogicRel<T> {
     pub terms: Vec<T>,
 }
 
-impl<'a> LogicRel<String> {
+impl LogicRel<String> {
     /// Create a new instance of `Self` from batch logic and the atom itself.
-    pub fn new(logic: Box<dyn super::logic::BatchLogic>, atom: &'a Atom) -> Self {
-        Self::new_with_subst(logic, atom, &plan::Subst::new())
-    }
-
-    /// Substitution-aware variant: walks atom terms applying `subst`, so a body var
-    /// renamed via `Term::Var(new_name)` appears under its new name in `bound`/`terms`,
-    /// and a body var pushed down to `Term::Lit(value)` becomes a positional literal.
-    pub fn new_with_subst(
-        logic: Box<dyn super::logic::BatchLogic>,
-        atom: &'a Atom,
-        subst: &plan::Subst,
-    ) -> Self {
+    pub fn new(logic: Box<dyn super::logic::BatchLogic>, atom: &Atom) -> Self {
         let bound: Vec<Result<String, Vec<u8>>> = atom.terms.iter().map(|t| match t {
-            Term::Var(name) => match subst.get(name).cloned() {
-                Some(Term::Var(new_name)) => Ok(new_name),
-                Some(Term::Lit(data)) => Err(data.clone()),
-                None => Ok(name.clone()),
-            },
+            Term::Var(name) => Ok(name.clone()),
             Term::Lit(data) => Err(data.clone()),
         }).collect();
         let terms = bound.iter().flatten().collect::<BTreeSet<_>>().into_iter().cloned().collect::<Vec<_>>();
