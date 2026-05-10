@@ -87,9 +87,7 @@ impl View {
     /// If `parent_plan` is provided (view used as a non-seed in a join), also
     /// pre-plans a join apparatus for the inferred approach pattern. Per-disjunct
     /// composition contradictions (lit-vs-lit mismatch, substitution conflict) drop
-    /// that disjunct from the apparatus; `View::join` falls back to materialize-and-
-    /// delegate when no `parent_plan` was available or the runtime pattern doesn't
-    /// match the apparatus pattern.
+    /// that disjunct from the apparatus.
     pub fn build(
         facts: &mut Relations,
         comms: &mut Comms,
@@ -256,27 +254,18 @@ impl ExecAtom<String> for View {
         // No-op: view atoms never propose values during the count protocol.
     }
 
-    fn join(&self, comms: &mut Comms, salad: &mut Salad<String>, added: &BTreeSet<String>, after: &[String]) {
-        // The call's approach pattern: which sum terms are bound in the input salad,
-        // excluding any that this call is supposed to introduce.
+    fn join(&self, comms: &mut Comms, salad: &mut Salad<String>, added: &BTreeSet<String>, _after: &[String]) {
+        let ja = self.join_apparatus.as_ref()
+            .expect("View::join: missing join_apparatus (only constructed for non-driver use)");
         let bound_in_salad: BTreeSet<String> = self.head_terms.iter()
             .filter(|t| salad.terms.contains(*t) && !added.contains(*t))
             .cloned()
             .collect();
-
-        if let Some(ja) = self.join_apparatus.as_ref() {
-            if ja.pattern == bound_in_salad {
-                self.join_seeded(ja, comms, salad);
-                return;
-            }
-        }
-
-        // Fallback: materialize the full sum and delegate to the data-atom join.
-        let materialized = self.seed(comms, false);
-        let facts: Vec<Forest<Terms>> = materialized.facts.into_iter().collect();
-        let temp: (Vec<Forest<Terms>>, Vec<String>, Option<Forest<Terms>>) =
-            (facts, materialized.terms, None);
-        temp.join(comms, salad, added, after);
+        assert_eq!(
+            ja.pattern, bound_in_salad,
+            "View::join: apparatus pattern does not match runtime bound-in-salad",
+        );
+        self.join_seeded(ja, comms, salad);
     }
 }
 
@@ -297,8 +286,14 @@ impl View {
         };
 
         for disjunct in &ja.disjuncts {
+            // The input salad enters the disjunct with stage 0's term set as its
+            // column names — that's where the seed lands per `Plan`'s stage 0
+            // semantics.
+            let seed_terms: Vec<String> = disjunct.stages.first()
+                .map(|stage| stage.terms.iter().cloned().collect())
+                .unwrap_or_default();
             let mut disjunct_salad = apply_action_to_salad(
-                &canonical, &disjunct.input_action, disjunct.seed_terms_for_action(),
+                &canonical, &disjunct.input_action, seed_terms,
             );
             if disjunct_salad.facts.is_empty() { continue; }
             crate::rules::run_wco_stages(comms, &mut disjunct_salad, &disjunct.stages);
@@ -309,16 +304,6 @@ impl View {
         }
 
         *salad = Salad::new(result_facts, self.head_terms.clone());
-    }
-}
-
-impl JoinDisjunct {
-    /// Term names corresponding to the columns `input_action` projects to. Reads
-    /// stage 0's term set — that's where the seed lands.
-    fn seed_terms_for_action(&self) -> Vec<String> {
-        self.stages.first()
-            .map(|stage| stage.terms.iter().cloned().collect())
-            .unwrap_or_default()
     }
 }
 
