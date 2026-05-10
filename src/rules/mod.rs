@@ -44,9 +44,10 @@ pub(crate) fn build_atom<'a>(
     load_atom: usize,
     loads: &std::collections::BTreeMap<usize, plan::Load<&'a String>>,
     parent_plan: Option<&plan::Plan<usize, &'a String>>,
+    subst: &plan::Subst<'a>,
 ) -> Box<dyn exec::ExecAtom<&'a String> + 'a> {
     use crate::rules::atoms;
-    if let Some(logic) = atoms::logic::resolve(&body[load_atom]) {
+    if let Some(logic) = atoms::logic::resolve_with_subst(&body[load_atom], subst) {
         Box::new(logic)
     } else if decls.get(body[load_atom].name.as_str()).map_or(false, |d| d.virt) {
         Box::new(atoms::sum::Sum::build(
@@ -119,10 +120,11 @@ pub fn plan_and_build_with_fields<'a>(
     let apparatus: SeedApparatus<'a> = plans.iter()
         .map(|(plan_atom, plan)| {
             let plan_loads = &loads[plan_atom];
-            let driver = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None);
+            let empty_subst = plan::Subst::new();
+            let driver = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None, &empty_subst);
             let stages: Vec<StageBoxes<'a>> = plan.iter()
                 .map(|(atoms, _, _)| atoms.iter()
-                    .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan)))
+                    .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan), &empty_subst))
                     .collect::<Vec<_>>())
                 .collect();
             (driver, stages)
