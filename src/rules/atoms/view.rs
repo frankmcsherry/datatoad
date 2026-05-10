@@ -34,7 +34,7 @@ pub struct ViewPlan<'a> {
 impl<'a> PlanAtom<&'a String> for ViewPlan<'a> {
     fn terms(&self) -> BTreeSet<&'a String> { self.head_terms.clone() }
     fn ground(&self, terms: &BTreeSet<&'a String>) -> BTreeSet<&'a String> {
-        self.head_terms.difference(terms).copied().collect()
+        self.head_terms.difference(terms).cloned().collect()
     }
 }
 
@@ -161,7 +161,7 @@ fn build_join_apparatus<'a>(
         body[plan_atom].terms.iter().filter_map(|t| t.as_var()).collect();
     for (i, (_, terms_to_intro, _)) in plan.iter().enumerate() {
         if i >= stage_idx { break; }
-        bound_at_stage.extend(terms_to_intro.iter().copied());
+        bound_at_stage.extend(terms_to_intro.iter().cloned());
     }
 
     let load_terms_set: BTreeSet<&'a String> =
@@ -178,11 +178,11 @@ fn build_join_apparatus<'a>(
     // by the time `join` is called.
     let pattern: BTreeSet<&'a String> =
         if stage_atoms.len() == 1 && stage_atoms.contains(&load_atom) {
-            load_terms_set.difference(&stage_terms_to_intro).copied().collect()
+            load_terms_set.difference(&stage_terms_to_intro).cloned().collect()
         } else {
             let mut all_bound = bound_at_stage.clone();
-            all_bound.extend(stage_terms_to_intro.iter().copied());
-            load_terms_set.intersection(&all_bound).copied().collect()
+            all_bound.extend(stage_terms_to_intro.iter().cloned());
+            load_terms_set.intersection(&all_bound).cloned().collect()
         };
 
     // Build per-disjunct join apparatus.
@@ -256,7 +256,7 @@ impl<'a> ExecAtom<&'a String> for View<'a> {
         // excluding any that this call is supposed to introduce.
         let bound_in_salad: BTreeSet<&'a String> = self.head_terms.iter()
             .filter(|t| salad.terms.contains(*t) && !added.contains(*t))
-            .copied()
+            .cloned()
             .collect();
 
         if let Some(ja) = self.join_apparatus.as_ref() {
@@ -282,7 +282,7 @@ impl<'a> View<'a> {
         let mut result_facts: FactLSM<Forest<Terms>> = FactLSM::default();
 
         // Stable iteration order over the pattern; all disjuncts use the same pattern.
-        let pattern_terms: Vec<&'a String> = ja.pattern.iter().copied().collect();
+        let pattern_terms: Vec<&'a String> = ja.pattern.iter().cloned().collect();
 
         // Canonicalize input salad to pattern-term order. Each disjunct's `input_action`
         // assumes columns are in this order.
@@ -314,7 +314,7 @@ impl<'a> JoinDisjunct<'a> {
     /// from the plan's stage 0 terms — that's where the seed lands.
     fn seed_terms_for_action(&self) -> Vec<&'a String> {
         self.plan.first()
-            .map(|(_, terms, _)| terms.iter().copied().collect())
+            .map(|(_, terms, _)| terms.iter().cloned().collect())
             .unwrap_or_default()
     }
 }
@@ -500,12 +500,12 @@ fn compose_disjunct<'a>(
 
     // Seed: all pattern vars (BTreeSet order). `plan_body` filters out vars unused
     // by the (substituted) body via its `init_terms` step.
-    let seed: Vec<&'a String> = pattern.iter().copied().collect();
+    let seed: Vec<&'a String> = pattern.iter().cloned().collect();
 
     // Build input_action. Assumes the input salad has been canonicalized to
     // pattern-term order (BTreeSet iteration). Filters by collected lits, projects
     // to the seed columns.
-    let pattern_terms: Vec<&'a String> = pattern.iter().copied().collect();
+    let pattern_terms: Vec<&'a String> = pattern.iter().cloned().collect();
     let mut input_action = Action::with_arity(pattern_terms.len());
     for (vu, ld) in &input_lits {
         let col = pattern_terms.iter().position(|t| *t == *vu)

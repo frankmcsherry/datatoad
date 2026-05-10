@@ -191,23 +191,23 @@ fn seed_load<'a>(
 ///
 /// For each body atom, loads the atom's terms in the order the plan binds them.
 /// This order aims to minimize the number of distinct term orders to maintain.
-fn body_load<'a, A: Ord + Copy, T: Ord + Copy>(
+fn body_load<'a, A: Ord + Copy, T: Ord + Clone>(
     plan: &Plan<A, T>,
     body: &BTreeMap<A, Box<dyn PlanAtom<T> + 'a>>,
     base_actions: &BTreeMap<A, Action<Vec<u8>>>,
 ) -> BTreeMap<A, Load<T>> {
 
     // Term introduction order: walk stages, take each stage's new terms.
-    let mut all_terms = BTreeSet::default();
-    let mut in_order = Vec::default();
+    let mut all_terms: BTreeSet<T> = BTreeSet::default();
+    let mut in_order: Vec<T> = Vec::default();
     for (_atoms, terms, _out_order) in plan.iter() {
-        in_order.extend(terms.difference(&all_terms));
-        all_terms.extend(terms.iter().copied());
+        in_order.extend(terms.difference(&all_terms).cloned());
+        all_terms.extend(terms.iter().cloned());
     }
 
     body.iter().map(|(load_atom, boxed)| {
         let atom_terms = boxed.terms();
-        let load_terms: Vec<T> = in_order.iter().filter(|t| atom_terms.contains(t)).copied().collect();
+        let load_terms: Vec<T> = in_order.iter().filter(|t| atom_terms.contains(t)).cloned().collect();
         let mut action = base_actions[load_atom].clone();
         action.projection = in_order.iter()
             .flat_map(|t1| atom_terms.iter().position(|t2| t1 == t2))
@@ -272,7 +272,7 @@ pub fn plan_rule_seeded<'a>(
 /// semijoin without re-permuting the salad. The planner doesn't consult it today, but
 /// the order is meaningful — callers should pass terms in the order their salad's
 /// columns are arranged.
-pub fn plan_body<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug>(
+pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
     seed: &[T],
     body: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>,
     need: &[T],
@@ -288,7 +288,7 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug>(
     // there's nothing for the planner to do with them.
     let init_terms: BTreeSet<T> =
     seed.iter()
-        .copied()
+        .cloned()
         .filter(|t| terms_to_atoms.contains_key(t) || need.contains(t))
         .collect();
     // Body atoms whose terms are all already in `init_terms` should be present in stage 0.
@@ -315,7 +315,7 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug>(
         // Pick the term incident on the most atoms (most-constrained-first).
         next_terms.sort_by_key(|t| terms_to_atoms[t].len());
         // Fallback: any groundable term, allowing cross joins with data-backed atoms.
-        let next_term = next_terms.last().copied().or_else(|| body.values()
+        let next_term = next_terms.last().cloned().or_else(|| body.values()
             .flat_map(|a| a.ground(&terms))
             .filter(|t| !terms.contains(t) && terms_to_atoms.contains_key(t))
             .next());
@@ -323,7 +323,7 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug>(
         if let Some(next_term) = next_term {
             let mut next_atoms: BTreeSet<A> = terms_to_atoms[&next_term].iter()
                 .filter(|a| body[a].terms().contains(&next_term) && terms.iter().any(|t| body[a].terms().contains(t)))
-                .copied()
+                .cloned()
                 .collect();
             next_atoms.extend(body.iter()
                 .filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term))
@@ -331,10 +331,10 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug>(
             if next_atoms.is_empty() {
                 next_atoms = terms_to_atoms[&next_term].iter()
                     .filter(|a| body[a].terms().contains(&next_term))
-                    .copied()
+                    .cloned()
                     .collect();
             }
-            terms.insert(next_term);
+            terms.insert(next_term.clone());
             plan.push((next_atoms, [next_term].into_iter().collect(), Vec::new()));
         }
         else {
@@ -354,8 +354,8 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug>(
     // Set each stage's projection target by demand from later stages plus `need`.
     for index in 1 .. plan.len() {
         let (this, rest) = plan.split_at_mut(index);
-        let present: Vec<T> = this.iter().flat_map(|(_, terms, _)| terms.iter()).copied().collect();
-        let demanded: Vec<T> = present.iter().copied().filter(|t| {
+        let present: Vec<T> = this.iter().flat_map(|(_, terms, _)| terms.iter()).cloned().collect();
+        let demanded: Vec<T> = present.iter().cloned().filter(|t| {
             rest.iter().any(|(atoms, _, _)| atoms.iter().any(|a| {
                 terms_to_atoms.get(t).map_or(false, |set| set.contains(a))
             })) || need.contains(t)
@@ -366,11 +366,11 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug>(
         for atom in rest[0].0.iter() {
             for term in demanded.iter() {
                 if terms_to_atoms.get(term).map_or(false, |set| set.contains(atom)) && !order.contains(term) {
-                    order.push(*term);
+                    order.push(term.clone());
                 }
             }
         }
-        for term in demanded.iter() { if !order.contains(term) { order.push(*term); } }
+        for term in demanded.iter() { if !order.contains(term) { order.push(term.clone()); } }
     }
     if let Some(last) = plan.last_mut() { last.2 = need.to_vec(); }
 

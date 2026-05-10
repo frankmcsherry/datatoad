@@ -8,12 +8,12 @@ use crate::rules::{PlanAtom, ExecAtom};
 use crate::rules::exec::Salad;
 use crate::comms::Comms;
 
-impl<T: Ord + Copy> PlanAtom<T> for BTreeSet<T> {
+impl<T: Ord + Clone> PlanAtom<T> for BTreeSet<T> {
     fn terms(&self) -> BTreeSet<T> { self.clone() }
     fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T> { self.difference(terms).cloned().collect() }
 }
 
-impl<T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<T>, Option<Forest<Terms>>) {
+impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<T>, Option<Forest<Terms>>) {
 
     fn terms(&self) -> &[T] { &self.1 }
 
@@ -34,7 +34,7 @@ impl<T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<T
         let (other_facts, other_terms, _other_recent) = self;
 
         let prefix = other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
-        salad.align_to(comms, other_terms[..prefix].iter().copied());
+        salad.align_to(comms, other_terms[..prefix].iter().cloned());
         // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
         assert!(prefix > 0 || comms.peers() == 1);
         if let Some(mut delta) = salad.facts.flatten() {
@@ -105,14 +105,14 @@ impl<T: Ord + Copy + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<T
     fn join(&self, comms: &mut Comms, salad: &mut Salad<T>, terms: &BTreeSet<T>, after: &[T]) {
         let (my_facts, my_terms, _) = self;
         let prefix = my_terms.iter().take_while(|t| salad.terms.contains(t)).count();
-        salad.align_to(comms, my_terms[..prefix].iter().copied());
+        salad.align_to(comms, my_terms[..prefix].iter().cloned());
         // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
         assert!(prefix > 0 || comms.peers() == 1);
         if !terms.is_empty() {
             // join with atom: permute `salad.terms` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
             let conduit = comms.conduit();
             if let Some(delta) = salad.facts.flatten() {
-                let join_terms = salad.terms.iter().chain(salad.terms[..prefix].iter()).chain(terms.iter()).copied().collect::<Vec<_>>();
+                let join_terms = salad.terms.iter().chain(salad.terms[..prefix].iter()).chain(terms.iter()).cloned().collect::<Vec<_>>();
                 // Our output join order (until we learn how to do FDB shapes) is the first of `others` not equal to ourself.
                 let projection = after.iter().map(|t| join_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
                 salad.facts.extend(delta.join_many(my_facts.iter(), prefix, &projection[..], conduit));

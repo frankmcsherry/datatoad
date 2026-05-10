@@ -108,30 +108,30 @@ impl<'a> LogicRel<&'a String> {
         subst: &plan::Subst<'a>,
     ) -> Self {
         let bound: Vec<Result<&'a String, Vec<u8>>> = atom.terms.iter().map(|t| match t {
-            Term::Var(name) => match subst.get(name).copied() {
+            Term::Var(name) => match subst.get(name).cloned() {
                 Some(Term::Var(new_name)) => Ok(new_name),
                 Some(Term::Lit(data)) => Err(data.clone()),
                 None => Ok(name),
             },
             Term::Lit(data) => Err(data.clone()),
         }).collect();
-        let terms = bound.iter().flatten().collect::<BTreeSet<_>>().into_iter().copied().collect::<Vec<_>>();
+        let terms = bound.iter().flatten().collect::<BTreeSet<_>>().into_iter().cloned().collect::<Vec<_>>();
         Self { logic, bound, terms }
     }
 }
 
-impl <T: Ord + Copy> plan::PlanAtom<T> for LogicRel<T> {
+impl <T: Ord + Clone> plan::PlanAtom<T> for LogicRel<T> {
     fn terms(&self) -> BTreeSet<T> { self.terms.iter().cloned().collect() }
     fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T> {
         let indexes = self.bound.iter().enumerate().filter(|(_index, term)| match term {
             Ok(name) => terms.contains(name),
             Err(_) => true,
         }).map(|(index,_term)| index).collect();
-        self.logic.bound(&indexes).into_iter().map(|index| self.bound[index].as_ref().unwrap()).copied().collect()
+        self.logic.bound(&indexes).into_iter().map(|index| self.bound[index].as_ref().unwrap()).cloned().collect()
     }
 }
 
-impl<T: Ord + Copy> exec::ExecAtom<T> for LogicRel<T> {
+impl<T: Ord + Clone> exec::ExecAtom<T> for LogicRel<T> {
 
     // Lightly odd, in that we have no preference on term order.
     fn terms(&self) -> &[T] { &self.terms }
@@ -141,7 +141,7 @@ impl<T: Ord + Copy> exec::ExecAtom<T> for LogicRel<T> {
         else {
             let mut salad = crate::rules::exec::Salad::new(Default::default(), Vec::default());
             salad.extend([Vec::default().try_into().unwrap()]);
-            self.join(comms, &mut salad, &self.terms.iter().copied().collect(), &self.terms);
+            self.join(comms, &mut salad, &self.terms.iter().cloned().collect(), &self.terms);
             salad
         }
     }
@@ -264,11 +264,11 @@ impl<T: Ord + Copy> exec::ExecAtom<T> for LogicRel<T> {
                     delta.push_layer(Rc::new(Layer { list: colnew }));
                     salad.facts.push(delta);
                 }
-                salad.terms.push(*added.iter().next().unwrap());
+                salad.terms.push(added.iter().next().unwrap().clone());
             }
 
         }
-        else { Extend::extend(&mut salad.terms, added.iter().take(1).copied()); }
+        else { Extend::extend(&mut salad.terms, added.iter().take(1).cloned()); }
     }
 }
 
@@ -282,7 +282,7 @@ impl<L: Logic> BatchLogic for BatchedLogic<L> {
         // The following is .. neither clear nor performant. It should be at least one of those two things.
         let length = args.iter().flatten().next().map(|a| a.1.iter().sum()).unwrap_or(1);
         let mut counts = Vec::with_capacity(length);
-        let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().copied().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
+        let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().cloned().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
         let mut values: Vec<Option<<Terms as columnar::Borrow>::Ref<'_>>> = Vec::default();
         for _ in 0 .. length {
             values.clear();
@@ -296,7 +296,7 @@ impl<L: Logic> BatchLogic for BatchedLogic<L> {
 
         // The following is .. neither clear nor performant. It should be at least one of those two things.
         let length = args.iter().flatten().next().map(|a| a.1.iter().sum()).unwrap_or(1);
-        let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().copied().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
+        let mut indexs = args.iter().map(|opt| opt.as_ref().map(|(_, counts)| counts.iter().cloned().enumerate().flat_map(|(index, count)| std::iter::repeat(index).take(count)))).collect::<Vec<_>>();
         let mut values: Vec<Option<<Terms as columnar::Borrow>::Ref<'_>>> = Vec::default();
         let mut terms = Terms::default();
         let mut result: Options<Lists<Terms>> = Default::default();
