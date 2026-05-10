@@ -196,7 +196,7 @@ fn emit_head_facts(
         a.terms.iter().zip(salad.terms.iter()).all(|(h,d)| h.as_var() == Some(d))
     });
 
-    let thresh = 200_000_000 / comms.peers();
+    let thresh = comms.thresh();
     for (_, atom) in head.iter().enumerate().filter(|(pos,_)| Some(*pos) != exact_match) {
         let mut action = Action::with_arity(salad.arity());
         action.projection = atom.terms.iter().map(|t| match t {
@@ -268,7 +268,12 @@ pub fn extend_facts_with_fields(
     mut data: crate::facts::FactLSM<Forest<Terms>>,
 ) {
     comms.exchange(&mut data);
+    // Always materialize the relation entry, even when this worker's shard is
+    // empty. Otherwise the BTreeMap key set diverges across workers and the
+    // index-based `active` set (via `active_indices`) means different relations
+    // on different workers — breaking the round-top broadcast synchronization.
+    let entry = facts.entry(atom);
     if let Some(columns) = data.flatten() {
-        facts.entry(atom).extend([columns]);
+        entry.extend([columns]);
     }
 }

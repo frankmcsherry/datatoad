@@ -47,7 +47,7 @@ impl Relations {
         &mut self.relations.entry(atom.name.clone()).or_default().0
     }
     pub fn advance(&mut self, comms: &mut crate::comms::Comms) {
-        let thresh = 200_000_000 / comms.peers();
+        let thresh = comms.thresh();
         let mut conduits = Vec::new();
         for (facts, transforms) in self.relations.values_mut() {
             facts.advance();
@@ -91,7 +91,7 @@ impl Relations {
 
     /// Ensures that we have an entry for this name and the associated action.
     pub fn ensure_action(&mut self, comms: &mut crate::comms::Comms, name: &str, action: &Action<Vec<u8>>){
-        let thresh = 200_000_000 / comms.peers();
+        let thresh = comms.thresh();
         let (base, transforms) = self.relations.entry(name.to_string()).or_default();
         if !action.is_identity() && !transforms.contains_key(action) {
             let mut fact_set = FactSet::default();

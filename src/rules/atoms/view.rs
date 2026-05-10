@@ -244,7 +244,7 @@ impl ExecAtom<String> for View {
         for disjunct in &self.seed_disjuncts {
             let mut salad = disjunct.seed.seed(comms, recent);
             crate::rules::run_wco_stages(comms, &mut salad, &disjunct.stages);
-            let projected = project_through_head(salad, &disjunct.head, &self.use_site);
+            let projected = project_through_head(salad, &disjunct.head, &self.use_site, comms.thresh());
             result.facts.extend(projected.facts);
         }
         result
@@ -280,7 +280,7 @@ impl View {
 
         // Canonicalize input salad to pattern-term order. Each disjunct's `input_action`
         // assumes columns are in this order.
-        let canonical = match canonicalize_salad(salad, &pattern_terms) {
+        let canonical = match canonicalize_salad(salad, &pattern_terms, comms.thresh()) {
             Some(s) => s,
             None => { *salad = Salad::new(FactLSM::default(), self.head_terms.clone()); return; }
         };
@@ -293,12 +293,15 @@ impl View {
                 .map(|stage| stage.terms.iter().cloned().collect())
                 .unwrap_or_default();
             let mut disjunct_salad = apply_action_to_salad(
-                &canonical, &disjunct.input_action, seed_terms,
+                &canonical, &disjunct.input_action, seed_terms, comms.thresh(),
             );
-            if disjunct_salad.facts.is_empty() { continue; }
+            // No early continue on empty salad: `run_wco_stages` allocates
+            // conduits, and skipping it on only the empty-shard worker would
+            // desync the per-worker channel count (same bug class as the
+            // empty-shard relation-creation fix in rules/mod.rs).
             crate::rules::run_wco_stages(comms, &mut disjunct_salad, &disjunct.stages);
             let projected = apply_action_to_salad(
-                &disjunct_salad, &disjunct.output_action, self.head_terms.clone(),
+                &disjunct_salad, &disjunct.output_action, self.head_terms.clone(), comms.thresh(),
             );
             result_facts.extend(projected.facts);
         }
@@ -312,6 +315,7 @@ impl View {
 fn canonicalize_salad(
     salad: &Salad<String>,
     target_terms: &[String],
+    thresh: usize,
 ) -> Option<Salad<String>> {
     let projection: Vec<Result<usize, Vec<u8>>> = target_terms.iter().map(|t| {
         let col = salad.terms.iter().position(|s| *s == *t)
@@ -321,7 +325,6 @@ fn canonicalize_salad(
     let mut action = Action::with_arity(salad.arity());
     action.projection = projection;
 
-    let thresh = 200_000_000;
     let mut facts: FactLSM<Forest<Terms>> = FactLSM::default();
     let mut any = false;
     for forest in salad.facts.contents() {
@@ -338,8 +341,8 @@ fn apply_action_to_salad(
     salad: &Salad<String>,
     action: &Action<Vec<u8>>,
     output_terms: Vec<String>,
+    thresh: usize,
 ) -> Salad<String> {
-    let thresh = 200_000_000;
     let mut facts: FactLSM<Forest<Terms>> = FactLSM::default();
     for forest in salad.facts.contents() {
         for f in forest.act_on(action, thresh) { facts.extend([f]); }
@@ -364,6 +367,7 @@ fn project_through_head(
     mut salad: Salad<String>,
     disjunct_head: &Atom,
     use_site: &Atom,
+    thresh: usize,
 ) -> Salad<String> {
     assert_eq!(
         disjunct_head.terms.len(),
@@ -398,7 +402,6 @@ fn project_through_head(
         }
     }
 
-    let thresh = 200_000_000;
     let mut result_facts: FactLSM<Forest<Terms>> = FactLSM::default();
     if let Some(flat) = salad.facts.flatten() {
         result_facts.extend(flat.act_on(&action, thresh));
