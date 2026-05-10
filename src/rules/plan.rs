@@ -1,4 +1,58 @@
-//! Traits and logic associated with planning rules.
+//! Rule planning: turn a rule body into a sequenced execution plan.
+//!
+//! # What this produces
+//!
+//! A [`Plan`] is a sequence of stages. Each stage names a set of atoms to apply, a set
+//! of new variable terms that stage *introduces*, and a projection target — the column
+//! order to leave the salad in before moving on. The terms across stages partition the
+//! body's variables: each variable is introduced exactly once. The final stage's target
+//! matches the rule head's variable order.
+//!
+//! Alongside each plan we compute [`Loads`]: per-atom `(Action, Vec<Term>)` instructions
+//! describing how to materialize that atom's facts in a column order compatible with
+//! the plan's stage progression.
+//!
+//! # Two entry points
+//!
+//! - [`plan_rule`] — semi-naive case. Given a body and a list of candidate *seed*
+//!   atoms (one per delta), produces one plan per seed. The seed atom's terms are
+//!   pre-bound when the stages start; the body-without-seed is sequenced.
+//! - [`plan_rule_seeded`] — view-atom case. The caller (e.g. a `View`) already holds
+//!   bindings in a salad; it passes those terms as the seed and the full body is
+//!   sequenced.
+//!
+//! Both wrappers call the same primitive — [`plan_body`] — then derive [`Loads`] via
+//! [`body_load`].
+//!
+//! # The strategy: [`plan_body`]
+//!
+//! Term-at-a-time, most-constrained-first. Start with `init_terms` (seed terms that
+//! some body atom mentions or that the head needs) and `init_atoms` (body atoms whose
+//! terms are already covered by the seed). Then repeatedly pick a not-yet-bound term
+//! reachable by some atom, introduce it as a new stage with the atoms that ground it.
+//! Adjacent single-atom stages with the same atom set get fused. Projection targets are
+//! computed by demand from later stages plus the head.
+//!
+//! # Stage 0
+//!
+//! Stage 0 is shaped differently from the rest. Its `terms` field documents the
+//! seed-relevant pre-bound bindings (the columns the executor expects to find in the
+//! salad on entry). Its `atoms` field holds `init_atoms` — body atoms whose terms are
+//! all covered by the seed and which can semijoin without introducing anything new.
+//! Stages 1+ follow the usual "this stage introduces these columns" semantics.
+//!
+//! The executor (`run_wco_stages`) handles the asymmetry: for stage 0 it semijoins
+//! against `init_atoms` over an empty introduce-set; for stages 1+ it passes `terms`
+//! through to `wco_join` as the new columns to bind. Keeping stage 0's `terms` as
+//! the starting bindings means the Plan is self-describing — `body_load` and any
+//! future consumer can read the expected starting state straight off it.
+//!
+//! # Atom kinds
+//!
+//! [`build_atoms_map`] dispatches each body atom to the appropriate [`PlanAtom`]
+//! implementation: data relations, antijoins (`anti::Anti`), logic atoms
+//! (`logic::resolve`), or views (`view::ViewPlan`). The planner only sees the
+//! `terms()` / `ground()` interface — it doesn't care about the kind.
 
 
 /// An atom over terms `T` that supports planning.
@@ -23,312 +77,406 @@ pub trait PlanAtom<T: Ord> {
 }
 
 use std::collections::{BTreeSet, BTreeMap};
-use crate::types::{Atom, Action};
+use crate::types::{Atom, Action, Term};
 
-/// A plan is a sequence of sets of atoms and terms, and an output term order.
+/// Substitution map: body var name → its replacement under composition.
 ///
-/// Each plan stage uses the atoms to express their thoughts about the terms,
-/// each either joining or semijoining, depending on which terms are present.
-/// The term sets are disjoint, as each term can be *introduced* at most once,
-/// but the atom sets may repeat atoms as their many terms are introduced.
+/// Each entry rewrites a body var to either another var (`Term::Var` — rename, often
+/// to a use-site var name to unify head and use-site spaces) or a literal
+/// (`Term::Lit` — constant pushdown, baked into atom load actions as `lit_filter`).
+/// Values are `&'a Term` borrowed from the use-site atom; refs have `'a` lifetime so
+/// `PlanAtom` term sets and load actions can use the inner `&'a String`/`&'a Vec<u8>`
+/// directly without allocation.
 ///
-/// The output term order discards columns that are no longer needed, and in
-/// the last plan stage ensures that the order matches that of the rule head.
+/// Used by the view planner to fold use-site constraints into the body's atom views
+/// without allocating new `Atom` structs. `build_atoms_map` and `base_actions_for`
+/// consult this when computing per-atom term sets and load actions.
+pub type Subst<'a> = BTreeMap<&'a String, &'a Term>;
+
+/// A plan is a sequence of stages, each a tuple of (atoms, terms, output order).
+///
+/// Each stage indicates terms that are added, and the atoms that participate in the
+/// introduction of those terms. Each atom name restricts the solution space by their
+/// projection onto all terms added through this stage. Each term is added only once.
+///
+/// The output term order indicates the terms that survive the stage, and a preference
+/// for their order that may be beneficial for the next stage. Terms not present in the
+/// output order should be pruned.
+///
+/// The first stage is special, in that its terms are specified exogenously by a "seed"
+/// relation that starts the sequence of joins. The atoms of the first stage intersect
+/// these terms, but they may not fully span it, and it should not be distressing that
+/// the plan cannot independently substantiate those terms.
 pub type Plan<A, T> = Vec<(BTreeSet<A>, BTreeSet<T>, Vec<T>)>;
 pub type Plans<A, T> = BTreeMap<A, Plan<A, T>>;
 pub type Load<T> = (Action<Vec<u8>>, Vec<T>);
 pub type Loads<A, T> = BTreeMap<A, BTreeMap<A, Load<T>>>;
 
-/// Plan the rule, generating a per-`delta_atoms` update plan.
+/// Plans a rule, producing a plan and load instructions per seed atom.
 ///
-/// Each entry in `delta_atoms` names a body atom that should take a turn as the source of
-/// novelty (the semi-naive delta). The returned plans map contains an entry for each
-/// requested delta atom that the strategy can plan (logic atoms that can't ground all
-/// their terms are silently dropped, regardless of the request).
-pub fn plan_rule<'a, S: Strategy<usize, &'a String>>(head: &'a [Atom], body: &'a [Atom], delta_atoms: &[usize]) -> Result<(Plans<usize, &'a String>, Loads<usize, &'a String>), String> {
+/// Each index in `seed_atoms` names a body atom that needs a plan to respond to new facts.
+/// For each seed, the atom's terms feed [`plan_body`] with all other atoms, with an output
+/// term order targeting the terms of `head`.
+///
+/// Seeds that cannot ground their own terms (e.g. logic atoms) are silently skipped.
+pub fn plan_rule<'a>(
+    head: &'a [Atom],
+    body: &'a [Atom],
+    seed_atoms: &[usize],
+    decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
+) -> (Plans<usize, &'a String>, Loads<usize, &'a String>) {
 
-    // We'll pick a target term order for the first head; other heads may require transforms.
-    // If we have multiple heads and one has no literals or repetitions, that would be best.
-    let head_terms = head_order(head);
+    let empty_subst: Subst<'a> = BTreeMap::new();
+    let head_terms = head_order(head, &empty_subst);
+    let base_actions = base_actions_for(body, &empty_subst);
 
-    // Map from atom identifier to boxed `PlanAtom`, containing term and grounding information.
-    let atoms = body.iter().enumerate().map(|(index, atom)| {
-        let terms = atom.terms.iter().filter_map(|term| term.as_var()).collect::<BTreeSet<_>>();
-        let boxed_atom: Box<dyn PlanAtom<&'a String>+'a> =
-        if let Some(logic) = crate::rules::atoms::logic::resolve(atom) { Box::new(logic) }
-        else if !atom.anti { Box::new(terms) }
-        else { Box::new(crate::rules::atoms::anti::Anti(terms)) };
-        (index, boxed_atom)
-    }).collect::<BTreeMap<_,_>>();
+    let mut plans: Plans<usize, &'a String> = BTreeMap::default();
+    let mut loads: Loads<usize, &'a String> = BTreeMap::default();
 
-    // We'll want to pre-plan the term orders for each atom update rule, so that we can
-    // pre-ensure that the necessary input shapes exist, with each atom in term order.
-    let mut plans = S::plan_rule(&atoms, delta_atoms, &head_terms);
-
-    // Actions for each atom that would produce the output in `terms` order.
-    // Their output columns should now be ordered as `atoms_to_terms[atom]`.
-    // We use these as reference points, and don't intend to load with them.
-    let base_actions = body.iter().enumerate().map(|(index, atom)| {
-        let mut action = Action::from_body(atom);
-        action.projection.sort_by_key(|p| atom.terms[*p.as_ref().unwrap()].as_var().unwrap());
-        (index, action)
-    }).collect::<BTreeMap<_,_>>();
-
-    let atoms_to_terms = atoms.iter().map(|(index, boxed)| (*index, boxed.terms())).collect::<BTreeMap<_,_>>();
-    let mut load_actions = load_actions(&plans, &atoms_to_terms, &base_actions);
-
-    // Insert loading actions for plan atoms themselves.
-    for (plan_atom, _atom) in body.iter().enumerate() {
-        if plans.contains_key(&plan_atom) {
-            // We would like to order the terms by the order they'll first be used.
-            // This is either a semijoin, if other atoms participate in the first plan step,
-            // or otherwise aligned to the order of the atoms in the second plan step.
-            // In the absence of other atoms in the first plan step or other plan steps,
-            // the default order makes sense (and we apply an action to the result).
-            let plan_terms = atoms[&plan_atom].terms();
-            let mut order = Vec::new();
-            if plans[&plan_atom][0].0.len() > 1 {
-                // The first atom that is not `plan_atom` drives the order we want.
-                // More thinking is possible here, e.g. if a different atom order would
-                // be better, or if multiple atoms align on order.
-                for atom in plans[&plan_atom][0].0.iter().filter(|a| **a != plan_atom) {
-                    let atom_terms = atoms[atom].terms();
-                    for term in plan_terms.iter() {
-                        if atom_terms.contains(term) && !order.contains(term) { order.push(*term); }
-                    }
-                }
+    // One atoms map; each iteration takes a seed_idx out as the seed and puts it back
+    // at the end. Same round-robin shape as semi-naive: the body's atoms are stable;
+    // which one supplies the novelty rotates.
+    let mut atoms = build_atoms_map(body, &empty_subst, decls);
+    for &seed_idx in seed_atoms {
+        if let Some(seed_atom) = atoms.remove(&seed_idx) {
+            if seed_atom.terms() == seed_atom.ground(&Default::default()) {
+                let seed_terms = seed_atom.terms();
+                // Body-positional, possibly with repeats — preserves the user-written
+                // column order so the planner can prefer stage-0 atoms that align with
+                // the seed's column prefix (avoiding a re-permute on first semijoin).
+                let seed: Vec<&'a String> = body[seed_idx].terms.iter().filter_map(|t| t.as_var()).collect();
+                let plan = plan_body(&seed, &atoms, &head_terms);
+                let mut load = body_load(&plan, &atoms, &base_actions);
+                load.insert(seed_idx, seed_load(&plan, &atoms, &seed_terms, &base_actions[&seed_idx]));
+                plans.insert(seed_idx, plan);
+                loads.insert(seed_idx, load);
             }
-            else if plans[&plan_atom].len() > 1 {
-                for atom in plans[&plan_atom][1].0.iter() {
-                    let atom_terms = atoms[atom].terms();
-                    for term in plan_terms.iter() {
-                        if atom_terms.contains(term) && !order.contains(term) { order.push(*term); }
-                    }
-                }
-            }
-            for term in plan_terms.iter() { if !order.contains(term) { order.push(*term); } }
-
-            let mut action = base_actions[&plan_atom].clone();
-            action.projection =
-            order.iter()
-                 .flat_map(|t1| plan_terms.iter().position(|t2| t1 == t2))
-                 .map(|p| base_actions[&plan_atom].projection[p].clone())
-                 .collect();
-
-            load_actions.get_mut(&plan_atom).map(|l| l.insert(plan_atom, (action, order)));
+            atoms.insert(seed_idx, seed_atom);
         }
     }
 
-    // Tidy stage 0 for the executor: drop the driver from its own stage 0 atoms (it is
-    // already loaded as the salad), and clear stage 0's terms (they are present in the
-    // salad from the driver load, not introduced by stage 0's atom-side operations).
-    // Both transformations are post-hoc — the planner's projection logic above relies
-    // on stage 0's terms holding `init_terms`, so we wait until that work is done.
-    for (plan_atom, plan) in plans.iter_mut() {
-        if let Some((atoms, terms, _)) = plan.first_mut() {
-            atoms.remove(plan_atom);
-            terms.clear();
-        }
-    }
-
-    Ok((plans, load_actions))
+    (plans, loads)
 }
 
-/// From per-atom plans, per-atom loading action required to for the right term order.
+/// Determines the seed's own load action from an existing plan.
 ///
-/// The loading instructions ensure that each occurrence of an atom in a plan has an
-/// action that will load with all prior bound terms followed by newly bound terms.
-/// In the simplest, this could just order the terms in order they are bound.
-pub fn load_actions<A: Ord + Copy, T: Ord + Copy>(
-    plans: &BTreeMap<A, Plan<A, T>>,
-    atoms_to_terms: &BTreeMap<A, BTreeSet<T>>,
+/// This is informed by `plan`, which reveals atoms in the first stages that we
+/// may try to align the terms of `seed` to match.
+/// It is unclear if this is worth the cost of a new form for the seed.
+fn seed_load<'a>(
+    plan: &Plan<usize, &'a String>,
+    body: &BTreeMap<usize, Box<dyn PlanAtom<&'a String> + 'a>>,
+    seed_terms: &BTreeSet<&'a String>,
+    base_action: &Action<Vec<u8>>,
+) -> Load<&'a String> {
+    let mut order = Vec::new();
+    if let Some((stage_atoms, _, _)) = plan.iter().find(|(a, _, _)| !a.is_empty()) {
+        for atom in stage_atoms.iter() {
+            for term in body[atom].terms().intersection(seed_terms) {
+                if !order.contains(term) { order.push(*term); }
+            }
+        }
+    }
+    for term in seed_terms.iter() { if !order.contains(term) { order.push(*term); } }
+
+    let mut action = base_action.clone();
+    action.projection = order.iter()
+        .flat_map(|t1| seed_terms.iter().position(|t2| t1 == t2))
+        .map(|p| base_action.projection[p].clone())
+        .collect();
+    (action, order)
+}
+
+/// Load actions for each atom in `body`.
+///
+/// For each body atom, loads the atom's terms in the order the plan binds them.
+/// This order aims to minimize the number of distinct term orders to maintain.
+fn body_load<'a, A: Ord + Copy, T: Ord + Copy>(
+    plan: &Plan<A, T>,
+    body: &BTreeMap<A, Box<dyn PlanAtom<T> + 'a>>,
     base_actions: &BTreeMap<A, Action<Vec<u8>>>,
-) -> Loads<A, T> {
+) -> BTreeMap<A, Load<T>> {
 
-    // This could be quite general, and use an arbitrary action for each atom in each stage.
-    // For example, it needn't even be the same action across uses of the same atom.
-    let mut result: Loads<A, T> = BTreeMap::default();
-    for (plan_atom, plan) in plans.iter() {
-        let mut all_terms = BTreeSet::default();
-        let mut in_order = Vec::default();
-        for (_atoms, terms, _out_order) in plan.iter() {
-            let new_terms = terms.difference(&all_terms);
-            in_order.extend(new_terms);
-            all_terms.extend(terms.iter().copied());
-        }
-        let mut loads = BTreeMap::default();
-        for load_atom in atoms_to_terms.keys().filter(|a| *a != plan_atom) {
-
-            let load_terms = in_order.iter().filter(|t| atoms_to_terms[load_atom].contains(t)).copied().collect::<Vec<_>>();
-
-            let mut action = base_actions[load_atom].clone();
-            action.projection =
-            in_order.iter()
-                    .flat_map(|t1| atoms_to_terms[load_atom].iter().position(|t2| t1 == t2))
-                    .map(|p| base_actions[load_atom].projection[p].clone())
-                    .collect();
-
-            loads.insert(*load_atom, (action, load_terms));
-        }
-        result.insert(*plan_atom, loads);
+    // Term introduction order: walk stages, take each stage's new terms.
+    let mut all_terms = BTreeSet::default();
+    let mut in_order = Vec::default();
+    for (_atoms, terms, _out_order) in plan.iter() {
+        in_order.extend(terms.difference(&all_terms));
+        all_terms.extend(terms.iter().copied());
     }
 
-    result
+    body.iter().map(|(load_atom, boxed)| {
+        let atom_terms = boxed.terms();
+        let load_terms: Vec<T> = in_order.iter().filter(|t| atom_terms.contains(t)).copied().collect();
+        let mut action = base_actions[load_atom].clone();
+        action.projection = in_order.iter()
+            .flat_map(|t1| atom_terms.iter().position(|t2| t1 == t2))
+            .map(|p| base_actions[load_atom].projection[p].clone())
+            .collect();
+        (*load_atom, (action, load_terms))
+    }).collect()
 }
 
 /// Produces a term order for head atoms.
 ///
-/// The order is of distinct terms in order of presentation.
-/// Repeated terms and literals should be added in post.
-fn head_order<'a>(head: &'a [Atom]) -> Vec<&'a String> {
+/// The order is of distinct terms in order of presentation, with `subst` applied
+/// (Var→Var renames are reflected; Var→Lit substitutions drop out, as do raw lits).
+/// Pass empty `Subst` for the non-view path.
+fn head_order<'a>(head: &'a [Atom], subst: &Subst<'a>) -> Vec<&'a String> {
     let mut seen: BTreeSet<&'a String> = BTreeSet::default();
-    head.iter().flat_map(|a| a.terms.iter()).filter_map(|t| t.as_var()).filter(|t| seen.insert(t)).collect()
+    head.iter()
+        .flat_map(|a| a.terms.iter())
+        .filter_map(|t| match t {
+            Term::Var(name) => match subst.get(name) {
+                Some(Term::Var(new_name)) => Some(new_name),
+                Some(Term::Lit(_)) => None,
+                None => Some(name),
+            },
+            Term::Lit(_) => None,
+        })
+        .filter(|t| seen.insert(t))
+        .collect()
 }
 
-/// A type that can produce an update plan for a rule.
-pub trait Strategy<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> {
-    /// Plan a join to respond to changes in `atom`.
-    ///
-    /// The keys of `terms_to_atoms` are the necessary terms, which may be less than the terms announced from `atoms_to_terms`.
-    /// Each atom's `ground(terms)` method which indicates which terms the atom can produce, and it may not be the case that an
-    /// atom can ground any of their terms as a function of other ground terms.
-    fn plan_atom(atom: A, atoms_to_terms: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>, terms_to_atoms: &BTreeMap<T, BTreeSet<A>>) -> Plan<A, T>;
+/// Plans a single-head rule body around a caller-provided seed of pre-bound terms.
+///
+/// No body atom is treated as the seed source — `seed` is just terms. Used when the
+/// caller (e.g. a sum atom disjunct) already holds the seed bindings in an input
+/// salad and wants stages that introduce the rest of the body's variables. The single
+/// head atom matches the disjunct shape — multi-head rules don't arise on this path.
+pub fn plan_rule_seeded<'a>(
+    body: &'a [Atom],
+    seed: &[&'a String],
+    need: &[&'a String],
+    subst: &Subst<'a>,
+    decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
+) -> (Plan<usize, &'a String>, BTreeMap<usize, Load<&'a String>>) {
+    let atoms = build_atoms_map(body, subst, decls);
+    let base_actions = base_actions_for(body, subst);
+    let plan = plan_body(seed, &atoms, need);
+    let loads = body_load(&plan, &atoms, &base_actions);
+    (plan, loads)
+}
 
-    /// Plans updates for the requested `delta_atoms`.
-    ///
-    /// Each `delta_atom` is a body atom that should take a turn as the source of novelty.
-    /// Atoms that the strategy can't ground (e.g. logic atoms) are silently dropped from
-    /// the result.
-    fn plan_rule(boxed_atoms: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>, delta_atoms: &[A], head_terms: &[T]) -> BTreeMap<A, Plan<A, T>> {
+/// Plan a body around a seed of pre-bound terms by repeatedly introducing one
+/// most-constrained term (and any atoms it newly enables) until every body term is bound.
+///
+/// The seed is *not* one of the body atoms — it represents bindings provided by the
+/// caller (the seed atom's terms in the `plan_rule` case, or a salad's terms in the
+/// `plan_rule_seeded` case). `body` is everything the planner sequences into stages.
+/// `need` is the set of terms the result must carry through to its last stage
+/// (typically the rule head's variable terms).
+///
+/// `seed` is a slice (not a set) because the caller's column order carries information
+/// the planner should use: stage-0 atoms whose terms align with a prefix of `seed` can
+/// semijoin without re-permuting the salad. The planner doesn't consult it today, but
+/// the order is meaningful — callers should pass terms in the order their salad's
+/// columns are arranged.
+pub fn plan_body<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug>(
+    seed: &[T],
+    body: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>,
+    need: &[T],
+) -> Plan<A, T> {
 
-        let mut terms_to_atoms: BTreeMap<T, BTreeSet<A>> = Default::default();
-        for (atom, boxed) in boxed_atoms.iter() { for term in boxed.terms() { terms_to_atoms.entry(term).or_default().insert(*atom); } }
+    let mut terms_to_atoms: BTreeMap<T, BTreeSet<A>> = Default::default();
+    for (atom, boxed) in body.iter() {
+        for term in boxed.terms() { terms_to_atoms.entry(term).or_default().insert(*atom); }
+    }
 
-        // Look for terms that can potentially be pruned.
-        let mut term_count: BTreeMap<T, usize> = Default::default();
-        for term in head_terms.iter() { *term_count.entry(*term).or_default() += 1; }
-        for (term, atoms) in terms_to_atoms.iter() { *term_count.entry(*term).or_default() += atoms.len(); }
-        for (_term, count) in term_count.iter() {
-            if count < &2 && boxed_atoms.len() > 1 {
-                // TODO: This is incorrect when an entire atom is pruned, e.g. as in `continue(_)`.
-                // terms_to_atoms.remove(_term);
+    // Stage 0 carries seed terms that some body atom mentions or that the caller
+    // needs in the output. Seed terms with no constraint and no demand are pruned —
+    // there's nothing for the planner to do with them.
+    let init_terms: BTreeSet<T> =
+    seed.iter()
+        .copied()
+        .filter(|t| terms_to_atoms.contains_key(t) || need.contains(t))
+        .collect();
+    // Body atoms whose terms are all already in `init_terms` should be present in stage 0.
+    let init_atoms: BTreeSet<A> =
+    body.iter()
+        .filter(|(_, boxed)| boxed.terms().iter().all(|t| init_terms.contains(t)))
+        .map(|(a, _)| *a)
+        .collect();
+
+    let mut terms: BTreeSet<T> = init_terms.clone();
+    let mut plan: Plan<A, T> = vec![(init_atoms, init_terms, Vec::new())];
+    // Loop while there are body terms not yet bound. (We can't compare cardinalities:
+    // `terms` may include seed terms that aren't in `terms_to_atoms`, so a count
+    // match doesn't mean coverage.)
+    while terms_to_atoms.keys().any(|t| !terms.contains(t)) {
+
+        // Terms that can be grounded by some atom from the bound `terms`, not yet bound.
+        let mut next_terms = terms.iter()
+            .flat_map(|term| terms_to_atoms.get(term).into_iter().flatten())
+            .flat_map(|atom| body[atom].ground(&terms))
+            .filter(|term| !terms.contains(term) && terms_to_atoms.contains_key(term))
+            .collect::<Vec<_>>();
+
+        // Pick the term incident on the most atoms (most-constrained-first).
+        next_terms.sort_by_key(|t| terms_to_atoms[t].len());
+        // Fallback: any groundable term, allowing cross joins with data-backed atoms.
+        let next_term = next_terms.last().copied().or_else(|| body.values()
+            .flat_map(|a| a.ground(&terms))
+            .filter(|t| !terms.contains(t) && terms_to_atoms.contains_key(t))
+            .next());
+
+        if let Some(next_term) = next_term {
+            let mut next_atoms: BTreeSet<A> = terms_to_atoms[&next_term].iter()
+                .filter(|a| body[a].terms().contains(&next_term) && terms.iter().any(|t| body[a].terms().contains(t)))
+                .copied()
+                .collect();
+            next_atoms.extend(body.iter()
+                .filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term))
+                .map(|(a, _)| *a));
+            if next_atoms.is_empty() {
+                next_atoms = terms_to_atoms[&next_term].iter()
+                    .filter(|a| body[a].terms().contains(&next_term))
+                    .copied()
+                    .collect();
             }
+            terms.insert(next_term);
+            plan.push((next_atoms, [next_term].into_iter().collect(), Vec::new()));
         }
+        else {
+            panic!("Failed to find term to extend {:?} to {:?}", terms, terms_to_atoms.keys());
+        }
+    }
 
-        let mut rule_plan = BTreeMap::default();
-        for atom in delta_atoms.iter().copied() {
-            if boxed_atoms.get(&atom).is_some_and(|b| b.terms() == b.ground(&Default::default())) {
-                let mut atom_plan = Self::plan_atom(atom, boxed_atoms, &terms_to_atoms);
+    // Fuse adjacent stages with the same single-atom set: the same atom introducing
+    // multiple consecutive variables is one stage, not several.
+    for index in (1 .. plan.len()).rev() {
+        if plan[index].0 == plan[index-1].0 && plan[index].0.len() == 1 {
+            let stage = plan.remove(index);
+            plan[index-1].1.extend(stage.1);
+        }
+    }
 
-                // Fuse plan stages with identical single atoms.
-                for index in (1 .. atom_plan.len()).rev() {
-                    if atom_plan[index].0 == atom_plan[index-1].0 && atom_plan[index].0.len() == 1 {
-                        let stage = atom_plan.remove(index);
-                        atom_plan[index-1].1.extend(stage.1);
-                    }
+    // Set each stage's projection target by demand from later stages plus `need`.
+    for index in 1 .. plan.len() {
+        let (this, rest) = plan.split_at_mut(index);
+        let present: Vec<T> = this.iter().flat_map(|(_, terms, _)| terms.iter()).copied().collect();
+        let demanded: Vec<T> = present.iter().copied().filter(|t| {
+            rest.iter().any(|(atoms, _, _)| atoms.iter().any(|a| {
+                terms_to_atoms.get(t).map_or(false, |set| set.contains(a))
+            })) || need.contains(t)
+        }).collect();
+
+        let order = &mut this[index-1].2;
+        order.clear();
+        for atom in rest[0].0.iter() {
+            for term in demanded.iter() {
+                if terms_to_atoms.get(term).map_or(false, |set| set.contains(atom)) && !order.contains(term) {
+                    order.push(*term);
                 }
-
-                // Plan outgoing projections, based on demand and ending with `head_terms`.
-                for index in 1 .. atom_plan.len() {
-                    let (this, rest) = atom_plan.split_at_mut(index);
-                    let present = this.iter().flat_map(|(_, terms, _)| terms.iter()).copied().collect::<Vec<_>>();
-                    let demanded = present.iter().copied().filter(|t| rest.iter().any(|(atoms,_,_)| atoms.iter().any(|a| terms_to_atoms[t].contains(a)) || head_terms.contains(t))).collect::<Vec<_>>();
-
-                    // Set the target order by the terms in common with atoms of the next stage, in atom order, then uninvolved terms.
-                    let order = &mut this[index-1].2;
-                    order.clear();
-                    for atom in rest[0].0.iter() {
-                        for term in demanded.iter() {
-                            if terms_to_atoms[term].contains(atom) && !order.contains(term) { order.push(*term); }
-                        }
-                    }
-                    for term in demanded.iter() { if !order.contains(term) { order.push(*term); } }
-
-                }
-                atom_plan.last_mut().unwrap().2 = head_terms.to_vec();
-
-                rule_plan.insert(atom, atom_plan);
             }
         }
-        rule_plan
+        for term in demanded.iter() { if !order.contains(term) { order.push(*term); } }
     }
+    if let Some(last) = plan.last_mut() { last.2 = need.to_vec(); }
+
+    // Stage 0's `terms` documents the seed-relevant starting bindings; stages 1+ list
+    // the columns each stage *introduces*. `run_wco_stages` knows to treat stage 0
+    // specially (semijoin against `init_atoms`, don't try to re-introduce columns).
+    plan
 }
 
-/// Plans updates for an atom by repeatedly introducing individual terms and all supported atoms.
-pub struct ByTerm;
-impl<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> Strategy<A, T> for ByTerm {
-    fn plan_atom(atom: A, atoms_to_terms: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>, terms_to_atoms: &BTreeMap<T, BTreeSet<A>>) -> Plan<A, T> {
-
-        // TODO: Reason about which terms are needed to produce (e.g. avoid singly mentioned variables).
-        assert!(atoms_to_terms[&atom].terms() == atoms_to_terms[&atom].ground(&Default::default()));
-
-        let init_terms: BTreeSet<T> = atoms_to_terms[&atom].terms().into_iter().filter(|t| terms_to_atoms.contains_key(t)).collect();
-        let init_atoms: BTreeSet<A> = init_terms.iter().flat_map(|t| terms_to_atoms[t].iter()).filter(|a| atoms_to_terms[a].terms().iter().all(|t| init_terms.contains(t))).copied().collect();
-
-        // One approach: grow terms through adjacent atoms.
-        let mut terms: BTreeSet<T> = init_terms.clone();
-        let mut plan: Plan<A, T> = vec![(init_atoms, init_terms, Vec::new())];
-        while terms.len() < terms_to_atoms.len() {
-
-            // Terms that can be ground through an atom from `terms`, but not yet in `terms`.
-            let mut next_terms =
-            terms.iter()
-                 .flat_map(|term| terms_to_atoms[term].iter())
-                 .flat_map(|atom| atoms_to_terms[atom].ground(&terms))
-                 .filter(|term| !terms.contains(term) && terms_to_atoms.contains_key(term))
-                 .collect::<Vec<_>>();
-
-            // Choose the term incident on the most atoms.
-            next_terms.sort_by_key(|t| terms_to_atoms[t].len());
-            // If we can't find a term, we'll need to pick any groundable term (e.g. a cross join with a data-backed relation).
-            if let Some(next_term) = next_terms.last().copied().or_else(|| atoms_to_terms.values().flat_map(|a| a.ground(&terms)).filter(|t| !terms.contains(t) && terms_to_atoms.contains_key(t)).next()) {
-                let mut next_atoms: BTreeSet<A> = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].terms().contains(&next_term) && terms.iter().any(|t| atoms_to_terms[a].terms().contains(t))).copied().collect();
-                // Also include atoms that can ground `next_term` independently (e.g. cross-join with a data relation).
-                next_atoms.extend(atoms_to_terms.iter().filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term)).map(|(a, _)| *a));
-                if next_atoms.is_empty() { next_atoms = terms_to_atoms[&next_term].iter().filter(|a| atoms_to_terms[a].terms().contains(&next_term)).copied().collect(); }
-                terms.insert(next_term);
-                plan.push((next_atoms, [next_term].into_iter().collect(), Vec::new()));
-            }
-            else {
-                panic!("Failed to find term to extend {:?} to {:?}", terms, terms_to_atoms.keys());
-            }
+/// Wraps each body atom in the appropriate `PlanAtom` implementation, keyed by body index.
+///
+/// Dispatches on atom kind: logic atoms (`logic::resolve`), views
+/// (`view::ViewPlan`), antijoins (`anti::Anti`), or plain data relations (a bare
+/// `BTreeSet` of variable terms).
+///
+/// `subst` lets the caller fold composition-derived constraints into the per-atom view
+/// without rewriting the atom: a body var mapped to `Term::Var(new_name)` is
+/// renamed; a body var mapped to `Term::Lit(_)` drops out of the var set (it's
+/// a known constant — the lit_filter is added by `base_actions_for`). Pass an empty
+/// `Subst` for the non-view planning path. Logic atoms participate in subst via
+/// `logic::resolve_with_subst`, so renamed/pushed vars also flow into their `bound`
+/// and `terms`.
+fn build_atoms_map<'a>(
+    body: &'a [Atom],
+    subst: &Subst<'a>,
+    decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
+) -> BTreeMap<usize, Box<dyn PlanAtom<&'a String> + 'a>> {
+    body.iter().enumerate().map(|(index, atom)| {
+        let terms: BTreeSet<&'a String> = atom.terms.iter().filter_map(|t| match t {
+            Term::Var(name) => match subst.get(name) {
+                Some(Term::Var(new_name)) => Some(new_name),
+                Some(Term::Lit(_)) => None,
+                None => Some(name),
+            },
+            Term::Lit(_) => None,
+        }).collect();
+        let boxed_atom: Box<dyn PlanAtom<&'a String>+'a> =
+        if let Some(logic) = crate::rules::atoms::logic::resolve_with_subst(atom, subst) { Box::new(logic) }
+        else if decls.get(atom.name.as_str()).map_or(false, |d| d.view) {
+            Box::new(crate::rules::atoms::view::ViewPlan { head_terms: terms })
         }
-        plan
-    }
+        else if !atom.anti { Box::new(terms) }
+        else { Box::new(crate::rules::atoms::anti::Anti(terms)) };
+        (index, boxed_atom)
+    }).collect()
 }
 
-/// Plans updates for an atom by repeatedly adding individual atoms and all of their terms.
-pub struct ByAtom;
-impl<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug> Strategy<A, T> for ByAtom {
-    fn plan_atom(atom: A, atoms_to_terms: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>, terms_to_atoms: &BTreeMap<T, BTreeSet<A>>) -> Plan<A, T> {
+/// Per-atom action that materializes facts in the atom's variable-name-sorted order.
+/// Reference point for deriving plan-specific load actions.
+///
+/// `subst` is applied while building each atom's action: a body var mapped to
+/// `Term::Lit(value)` becomes a positional literal (lit_filter); a body var
+/// mapped to `Term::Var(new_name)` is renamed (affecting var_filter detection
+/// for repeats and the projection's sort order). Pass empty `Subst` for the
+/// non-view path.
+fn base_actions_for<'a>(body: &[Atom], subst: &Subst<'a>) -> BTreeMap<usize, Action<Vec<u8>>> {
+    body.iter().enumerate().map(|(index, atom)| {
+        let mut action = action_from_body_with_subst(atom, subst);
+        // Sort projection by the substituted var name (the var name as the planner sees it).
+        action.projection.sort_by_key(|p| {
+            let pos = *p.as_ref().unwrap();
+            // After substitution, projection only references positions whose effective term is a Var.
+            match &atom.terms[pos] {
+                Term::Var(name) => match subst.get(name) {
+                    Some(Term::Var(new_name)) => new_name,
+                    Some(Term::Lit(_)) => unreachable!("Lit positions don't appear in projection"),
+                    None => name,
+                },
+                Term::Lit(_) => unreachable!("Lit positions don't appear in projection"),
+            }
+        });
+        (index, action)
+    }).collect()
+}
 
-        assert!(atoms_to_terms[&atom].terms() == atoms_to_terms[&atom].ground(&Default::default()));
-
-        // We start with `atom`, but also semijoin subsumed atoms.
-        let init_atoms: BTreeSet<A> = [atom].into_iter().collect();
-        let init_terms: BTreeSet<T> = atoms_to_terms[&atom].terms();
-
-        // One approach: grow terms through adjacent atoms.
-        let mut atoms: BTreeSet<A> = init_atoms.clone();
-        let mut terms = init_terms.clone();
-        let mut plan: Plan<A, T> = vec![(init_atoms, init_terms, Vec::new())];
-        while atoms.len() < atoms_to_terms.len() {
-
-            // Atoms are available if they can be fully enumerated from the bound terms.
-            let mut next_atoms =
-            atoms.iter()
-                 .flat_map(|atom| atoms_to_terms[atom].terms())
-                 .flat_map(|term| terms_to_atoms[&term].iter())
-                 .filter(|atom| !atoms.contains(atom) && atoms_to_terms[atom].terms().difference(&atoms_to_terms[atom].ground(&terms)).all(|t| terms.contains(t)));
-
-            // Choose the first available atom. This can be dramatically improved.
-            let next_atom = next_atoms.next().unwrap_or_else(|| atoms_to_terms.keys().find(|a| !atoms.contains(a)).unwrap());
-            let next_terms: BTreeSet<_> = atoms_to_terms[next_atom].terms().iter().filter(|t| terms_to_atoms[t].iter().all(|a| !atoms.contains(a))).copied().collect();
-            terms.extend(next_terms.iter().copied());
-
-            atoms.insert(*next_atom);
-            plan.push(([*next_atom].into_iter().collect(), next_terms, Vec::new()));
+/// Builds an `Action` from an atom, applying `subst` as it walks each term.
+///
+/// Mirrors `Action::from_body` but routes each var through `subst`: a Var → Lit
+/// substitution becomes a positional `lit_filter`; a Var → Var substitution renames
+/// (so repeats with the renamed name produce `var_filter` entries).
+fn action_from_body_with_subst<'a>(atom: &Atom, subst: &Subst<'a>) -> Action<Vec<u8>> {
+    let mut output = Action::default();
+    let mut terms_seen: BTreeMap<&str, usize> = BTreeMap::default();
+    for (index, term) in atom.terms.iter().enumerate() {
+        // Resolve to the effective post-substitution view: either a var name or lit bytes.
+        let (eff_var, eff_lit): (Option<&str>, Option<&[u8]>) = match term {
+            Term::Var(name) => match subst.get(name) {
+                Some(Term::Var(new_name)) => (Some(new_name.as_str()), None),
+                Some(Term::Lit(value)) => (None, Some(value.as_slice())),
+                None => (Some(name.as_str()), None),
+            },
+            Term::Lit(value) => (None, Some(value.as_slice())),
+        };
+        if let Some(var_name) = eff_var {
+            if !terms_seen.contains_key(var_name) {
+                let new_idx = terms_seen.len();
+                terms_seen.insert(var_name, new_idx);
+                output.var_filter.push(Vec::default());
+                output.projection.push(Ok(index));
+            }
+            output.var_filter[terms_seen[var_name]].push(index);
+        } else if let Some(value) = eff_lit {
+            output.lit_filter.push((index, value.to_vec()));
         }
-        plan
     }
+    output.var_filter.retain(|list| list.len() > 1);
+    output.input_arity = atom.terms.len();
+    output
 }

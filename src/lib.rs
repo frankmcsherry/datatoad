@@ -73,11 +73,33 @@ pub mod types {
         pub fn as_var(&self) -> Option<&String> { if let Term::Var(name) = self { Some(name) } else { None }}
     }
 
+    /// Per-relation declaration metadata.
+    ///
+    /// Populated either explicitly via `.decl` or implicitly when a relation is first
+    /// referenced by a rule. Once an arity is recorded for a name, subsequent rules
+    /// (and any later `.decl`) must agree on it.
+    #[derive(Clone, Debug, Default)]
+    pub struct RelationDecl {
+        /// Number of columns.
+        pub arity: usize,
+        /// Whether this name was declared via `.decl` (vs. inferred from a rule reference).
+        pub explicit: bool,
+        /// Whether the relation is a view (computed on demand, not materialized).
+        ///
+        /// Only meaningful when `explicit` is true; implicit declarations are never views.
+        pub view: bool,
+    }
+
     #[derive(Default)]
     pub struct State {
         pub rules: Vec<(Rule, Vec<std::time::Duration>)>,
         pub facts: facts::Relations,
         pub comms: super::comms::Comms,
+        /// Per-relation declaration metadata, keyed by name.
+        ///
+        /// Entries are inserted either by `.decl` (explicit) or by first use in a rule
+        /// (implicit). Arity is checked for consistency on every subsequent reference.
+        pub decls: std::collections::BTreeMap<String, RelationDecl>,
     }
 
     impl State {
@@ -90,6 +112,12 @@ pub mod types {
                     .filter_map(|&i| names.get(i).map(|s| s.as_str()))
                     .collect();
                 for index in 0 .. self.rules.len() {
+                    // Skip rules whose head names a view; these are defining rules,
+                    // evaluated on demand via the View atom rather than fired.
+                    let head_is_view = self.rules[index].0.head.iter().any(|atom|
+                        self.decls.get(&atom.name).map_or(false, |d| d.view)
+                    );
+                    if head_is_view { continue; }
                     let timer = std::time::Instant::now();
                     self.implement(&self.rules[index].0.clone(), false, Some(&active_names));
                     self.rules[index].1.push(timer.elapsed());
@@ -121,6 +149,51 @@ pub mod types {
         }
 
         pub fn push(&mut self, rule: Rule) {
+            // Walk every atom and accumulate any errors before mutating `decls`. This
+            // way a rule with multiple problems reports all of them at once, and a
+            // rejected rule never leaves a half-committed implicit declaration behind.
+            let mut errors: Vec<String> = Vec::new();
+            let mut to_insert: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            let mut reported: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for atom in rule.head.iter().chain(rule.body.iter()) {
+                let name = atom.name.as_str();
+                let arity = atom.terms.len();
+                match self.decls.get(name) {
+                    Some(decl) => {
+                        if decl.arity != arity && !reported.contains(name) {
+                            errors.push(format!(
+                                "rule references `{}` with arity {}, but it was previously declared with arity {}.",
+                                name, arity, decl.arity
+                            ));
+                            reported.insert(name.to_string());
+                        }
+                        // Note: view references are now allowed in both head (defining
+                        // rule, stored but not auto-fired) and body (resolved via the View
+                        // atom during planning).
+                    }
+                    None => {
+                        match to_insert.get(name) {
+                            Some(&prev_arity) if prev_arity != arity && !reported.contains(name) => {
+                                errors.push(format!(
+                                    "rule uses `{}` with both arity {} and arity {}.",
+                                    name, prev_arity, arity
+                                ));
+                                reported.insert(name.to_string());
+                            }
+                            Some(_) => { /* same arity, already pending */ }
+                            None => { to_insert.insert(name.to_string(), arity); }
+                        }
+                    }
+                }
+            }
+            if !errors.is_empty() {
+                for err in errors { println!("{}", err); }
+                println!("rule discarded.");
+                return;
+            }
+            for (name, arity) in to_insert {
+                self.decls.insert(name, RelationDecl { arity, explicit: false, view: false });
+            }
             if rule.body.is_empty() {
                 for atom in rule.head.iter() {
                     use columnar::Push;
@@ -142,9 +215,19 @@ pub mod types {
                 }
             }
             else {
-                let timer = std::time::Instant::now();
-                self.implement(&rule, true, None);
-                self.rules.push((rule, vec![timer.elapsed()]));
+                // If any head atom names a view, this is a defining rule:
+                // store it (so it can be looked up during view-atom construction) but skip
+                // the immediate `implement` call (we don't materialize views).
+                let head_is_view = rule.head.iter().any(|atom|
+                    self.decls.get(&atom.name).map_or(false, |d| d.view)
+                );
+                if head_is_view {
+                    self.rules.push((rule, vec![std::time::Duration::ZERO]));
+                } else {
+                    let timer = std::time::Instant::now();
+                    self.implement(&rule, true, None);
+                    self.rules.push((rule, vec![timer.elapsed()]));
+                }
             }
         }
     }
