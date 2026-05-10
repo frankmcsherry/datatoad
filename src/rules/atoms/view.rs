@@ -13,7 +13,7 @@ use crate::comms::Comms;
 use crate::facts::{FactContainer, FactLSM, Forest, Relations, Terms};
 use crate::rules::exec::Salad;
 use crate::rules::plan::{self, PlanAtom};
-use crate::rules::{ExecAtom, StageBoxes};
+use crate::rules::{ExecAtom, SeedExec, StageExec};
 use crate::types::{Action, Atom, RelationDecl, Rule, Term};
 
 /// A `&'static String` placeholder used as the count-metadata column name in `wco_join`.
@@ -44,12 +44,10 @@ pub struct SeedDisjunct {
     /// The disjunct's head atom (cloned from the defining rule). Used by `View::seed`
     /// to project results through the head's positional shape.
     pub head: Atom,
-    /// The plan for this disjunct's body (seed = body[0] in stable mode).
-    pub plan: plan::Plan<usize, String>,
     /// The pre-built seed atom whose `.seed()` produces the initial salad.
     pub seed: Box<dyn ExecAtom<String>>,
-    /// Pre-built non-seed atoms per stage, in plan order.
-    pub stages: Vec<StageBoxes>,
+    /// Pre-built per-stage executables (terms, output order, atoms), in plan order.
+    pub stages: Vec<StageExec>,
 }
 
 /// One disjunct of the apparatus used by `View::join` (the seeded-evaluation path):
@@ -68,10 +66,8 @@ pub struct JoinDisjunct {
     /// Projects disjunct columns to use-site var positions and injects literals
     /// at positions where the (substituted) disjunct head emits constants.
     pub output_action: Action<Vec<u8>>,
-    /// The seeded plan for the disjunct's body, planned with substitution applied.
-    pub plan: plan::Plan<usize, String>,
-    /// Pre-built atoms per stage, in plan order (one per atom in each stage).
-    pub stages: Vec<StageBoxes>,
+    /// Pre-built per-stage executables (terms, output order, atoms), in plan order.
+    pub stages: Vec<StageExec>,
 }
 
 /// Pre-built apparatus for `View::join` for one specific approach pattern.
@@ -123,7 +119,7 @@ impl View {
 
         let mut seed_disjuncts: Vec<SeedDisjunct> = Vec::with_capacity(defining.len());
         for rule in &defining {
-            let (plans, _loads, apparatus) = crate::rules::plan_and_build_with_fields(
+            let seed_execs = crate::rules::plan_and_build_with_fields(
                 facts, comms, decls, rules,
                 &rule.body[..], &rule.head[..],
                 true, None,
@@ -131,11 +127,13 @@ impl View {
             // Stable mode (delta_atoms = [0]) yields at most one entry; if empty
             // (the body's first atom can't act as a seed, e.g. a logic atom), the
             // disjunct contributes nothing and we skip it.
-            let plan = match plans.into_values().next() { Some(p) => p, None => continue };
-            let (seed, stages) = match apparatus.into_iter().next() { Some(a) => a, None => continue };
+            let SeedExec { seed, stages } = match seed_execs.into_iter().next() {
+                Some(s) => s,
+                None => continue,
+            };
             seed_disjuncts.push(SeedDisjunct {
                 head: rule.head[0].clone(),
-                plan, seed, stages,
+                seed, stages,
             });
         }
 
@@ -226,22 +224,24 @@ fn build_join_apparatus(
         // Ensure index actions for each load action in the seeded plan.
         crate::rules::ensure_actions_for_loads(facts, comms, decls, body, &loads);
 
-        // Build per-stage atoms. Pass `pattern_info: None` so any nested views
+        // Build per-stage executables. Pass `parent_plan: None` so any nested views
         // in the disjunct's body fall back to materialize for now.
-        let stages: Vec<StageBoxes> = plan.iter()
-            .map(|(atoms, _, _)| atoms.iter()
-                .map(|inner_load| crate::rules::build_atom(
-                    facts, comms, decls, rules,
-                    body, 0, *inner_load, &loads,
-                    None,
-                ))
-                .collect::<Vec<_>>())
+        let stages: Vec<StageExec> = plan.iter()
+            .map(|(atom_set, terms, output_order)| {
+                let atoms = atom_set.iter()
+                    .map(|inner_load| crate::rules::build_atom(
+                        facts, comms, decls, rules,
+                        body, 0, *inner_load, &loads,
+                        None,
+                    ))
+                    .collect();
+                StageExec { terms: terms.clone(), output_order: output_order.clone(), atoms }
+            })
             .collect();
 
         disjuncts.push(JoinDisjunct {
             input_action: comp.input_action,
             output_action: comp.output_action,
-            plan,
             stages,
         });
     }
@@ -256,7 +256,7 @@ impl ExecAtom<String> for View {
         let mut result = Salad::new(FactLSM::default(), self.head_terms.clone());
         for disjunct in &self.seed_disjuncts {
             let mut salad = disjunct.seed.seed(comms, recent);
-            crate::rules::run_wco_stages(comms, &mut salad, &disjunct.plan, &disjunct.stages, potato().clone());
+            crate::rules::run_wco_stages(comms, &mut salad, &disjunct.stages, potato().clone());
             let projected = project_through_head(salad, &disjunct.head, &self.use_site);
             result.facts.extend(projected.facts);
         }
@@ -313,7 +313,7 @@ impl View {
             );
             if disjunct_salad.facts.is_empty() { continue; }
             crate::rules::run_wco_stages(
-                comms, &mut disjunct_salad, &disjunct.plan, &disjunct.stages, potato().clone(),
+                comms, &mut disjunct_salad, &disjunct.stages, potato().clone(),
             );
             let projected = apply_action_to_salad(
                 &disjunct_salad, &disjunct.output_action, self.head_terms.clone(),
@@ -326,11 +326,11 @@ impl View {
 }
 
 impl JoinDisjunct {
-    /// Term names corresponding to the columns `input_action` projects to. Computed
-    /// from the plan's stage 0 terms — that's where the seed lands.
+    /// Term names corresponding to the columns `input_action` projects to. Reads
+    /// stage 0's term set — that's where the seed lands.
     fn seed_terms_for_action(&self) -> Vec<String> {
-        self.plan.first()
-            .map(|(_, terms, _)| terms.iter().cloned().collect())
+        self.stages.first()
+            .map(|stage| stage.terms.iter().cloned().collect())
             .unwrap_or_default()
     }
 }

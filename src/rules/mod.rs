@@ -64,8 +64,27 @@ pub(crate) fn build_atom(
     }
 }
 
-/// One plan stage's pre-built non-seed atoms, in plan order.
-pub type StageBoxes = Vec<Box<dyn exec::ExecAtom<String>>>;
+/// One plan stage's runtime form: which terms to introduce, the post-stage column
+/// order, and the pre-built atoms to apply. Built from a `Plan` stage's
+/// `(atom_set, terms, output_order)` triple — the atom indices are consumed at
+/// build time and the resulting `atoms` are the executable form.
+pub struct StageExec {
+    /// Columns this stage introduces (per `Plan`'s stage `terms` set). Stage 0
+    /// carries the seed-relevant pre-bindings; `run_wco_stages` overrides to
+    /// empty there.
+    pub terms: std::collections::BTreeSet<String>,
+    /// Salad column order to leave behind after this stage.
+    pub output_order: Vec<String>,
+    /// Pre-built atoms participating in this stage, in plan order.
+    pub atoms: Vec<Box<dyn exec::ExecAtom<String>>>,
+}
+
+/// Pre-built apparatus for one seed of a rule: the seed atom (whose `.seed()`
+/// produces the initial salad) followed by the per-stage executables.
+pub struct SeedExec {
+    pub seed: Box<dyn exec::ExecAtom<String>>,
+    pub stages: Vec<StageExec>,
+}
 
 /// Plans a rule body and pre-builds the boxed atoms for every (seed, stage).
 ///
@@ -73,6 +92,11 @@ pub type StageBoxes = Vec<Box<dyn exec::ExecAtom<String>>>;
 /// invoke this with the same field borrows. Callers split a `&mut State` into its
 /// fields and pass them through. `rules` is the State's rule list, used to look up
 /// views' defining rules during view-atom construction.
+///
+/// Returns one `SeedExec` per planned seed atom. The intermediate `Plans`/`Loads`
+/// from `plan::plan_rule` are consumed internally — their structural information
+/// (per-stage terms and output orders) is baked into each `StageExec`, and the
+/// load actions are used during atom construction and then dropped.
 pub fn plan_and_build_with_fields(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
@@ -82,11 +106,7 @@ pub fn plan_and_build_with_fields(
     head: &[Atom],
     stable: bool,
     active_relations: Option<&std::collections::BTreeSet<&str>>,
-) -> (
-    plan::Plans<usize, String>,
-    plan::Loads<usize, String>,
-    Vec<(Box<dyn exec::ExecAtom<String>>, Vec<StageBoxes>)>,
-) {
+) -> Vec<SeedExec> {
     // Body atoms that should take a turn as the source of novelty this round.
     // In `stable` mode only the first body atom drives; in incremental mode every
     // atom takes a turn, optionally restricted to those whose relation has recent
@@ -105,23 +125,29 @@ pub fn plan_and_build_with_fields(
     for (plan_atom, _plan) in plans.iter() {
         ensure_actions_for_loads(facts, comms, decls, body, &loads[plan_atom]);
     }
-    // Pre-build the seed atom and all non-seed stage atoms per planned seed.
-    // Pre-building all seeds (rather than building them inline during execution)
-    // means each seed sees the round's input state, not facts an earlier seed
-    // committed mid-loop — keeping semi-naive's "this round vs. next round" line clean.
-    let apparatus = plans.iter()
+    // Pre-build the seed atom and per-stage executables for each planned seed.
+    // Pre-building (rather than building inline during execution) means each seed
+    // sees the round's input state, not facts an earlier seed committed mid-loop —
+    // keeping semi-naive's "this round vs. next round" line clean.
+    plans.iter()
         .map(|(plan_atom, plan)| {
             let plan_loads = &loads[plan_atom];
             let seed = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None);
-            let stages: Vec<StageBoxes> = plan.iter()
-                .map(|(atoms, _, _)| atoms.iter()
-                    .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan)))
-                    .collect::<Vec<_>>())
+            let stages: Vec<StageExec> = plan.iter()
+                .map(|(atom_set, terms, output_order)| {
+                    let atoms = atom_set.iter()
+                        .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan)))
+                        .collect();
+                    StageExec {
+                        terms: terms.clone(),
+                        output_order: output_order.clone(),
+                        atoms,
+                    }
+                })
                 .collect();
-            (seed, stages)
+            SeedExec { seed, stages }
         })
-        .collect();
-    (plans, loads, apparatus)
+        .collect()
 }
 
 impl crate::types::State {
@@ -143,16 +169,16 @@ impl crate::types::State {
         let decls = &self.decls;
         let rules = &self.rules[..];
 
-        let (plans, _loads, apparatus) = plan_and_build_with_fields(facts, comms, decls, rules, body, head, stable, active_relations);
+        let seed_execs = plan_and_build_with_fields(facts, comms, decls, rules, body, head, stable, active_relations);
 
         let potato = ".potato".to_string();
 
         // Per seed: seed → wco_join stages → emit head facts.
         // Seed atoms are pre-built, so each seed sees the round's input state
         // rather than facts that earlier seeds may have committed.
-        for ((_plan_atom, plan), (seed, stages_boxed)) in plans.iter().zip(apparatus) {
+        for SeedExec { seed, stages } in seed_execs {
             let mut salad = seed.seed(comms, !stable);
-            run_wco_stages(comms, &mut salad, plan, &stages_boxed, potato.clone());
+            run_wco_stages(comms, &mut salad, &stages, potato.clone());
             emit_head_facts(facts, comms, head, salad);
         }
     }
@@ -211,11 +237,12 @@ pub fn ensure_actions_for_loads(
     }
 }
 
-/// Runs the wco_join stages of a plan against a salad, mutating the salad in place.
+/// Runs the wco_join stages against a salad, mutating the salad in place.
 ///
-/// The single shared loop pattern used by `State::implement`, `Sum::seed`, and
-/// `Sum::join_seeded`. Each stage's `(terms, atoms, order)` triple feeds one
-/// `wco_join` call; `potato` is the column-name placeholder for count metadata.
+/// The single shared loop pattern used by `State::implement`, `View::seed`, and
+/// `View::join_seeded`. Each `StageExec` (with its terms, output order, and atoms)
+/// feeds one `wco_join` call; `potato` is the column-name placeholder for count
+/// metadata.
 ///
 /// Stage 0 is special: its `terms` document the seed's pre-bound bindings (already
 /// present in `salad`), not new columns to introduce. We pass an empty `terms` set so
@@ -225,14 +252,13 @@ pub fn ensure_actions_for_loads(
 pub fn run_wco_stages(
     comms: &mut crate::comms::Comms,
     salad: &mut exec::Salad<String>,
-    plan: &plan::Plan<usize, String>,
-    stages: &[StageBoxes],
+    stages: &[StageExec],
     potato: String,
 ) {
     let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::default();
-    for (i, ((_, terms, order), atoms)) in plan.iter().zip(stages.iter()).enumerate() {
-        let stage_terms = if i == 0 { &empty } else { terms };
-        exec::wco_join(comms, salad, stage_terms, atoms, potato.clone(), &order[..]);
+    for (i, stage) in stages.iter().enumerate() {
+        let stage_terms = if i == 0 { &empty } else { &stage.terms };
+        exec::wco_join(comms, salad, stage_terms, &stage.atoms, potato.clone(), &stage.output_order[..]);
     }
 }
 
