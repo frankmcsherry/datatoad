@@ -67,13 +67,6 @@ pub(crate) fn build_atom(
 /// One plan stage's pre-built non-seed atoms, in plan order.
 pub type StageBoxes = Vec<Box<dyn exec::ExecAtom<String>>>;
 
-/// One seed's pre-built apparatus: the seed atom (whose `.seed()` produces the initial
-/// salad) and the per-stage non-seed atoms (used for `wco_join`).
-type SeedWork = (Box<dyn exec::ExecAtom<String>>, Vec<StageBoxes>);
-
-/// All seeds' apparatus, parallel to `Plans` iteration order.
-type SeedApparatus = Vec<SeedWork>;
-
 /// Plans a rule body and pre-builds the boxed atoms for every (seed, stage).
 ///
 /// Lives as a free function (not a method) because view references recursively
@@ -92,7 +85,7 @@ pub fn plan_and_build_with_fields(
 ) -> (
     plan::Plans<usize, String>,
     plan::Loads<usize, String>,
-    SeedApparatus,
+    Vec<(Box<dyn exec::ExecAtom<String>>, Vec<StageBoxes>)>,
 ) {
     // Body atoms that should take a turn as the source of novelty this round.
     // In `stable` mode only the first body atom drives; in incremental mode every
@@ -116,16 +109,16 @@ pub fn plan_and_build_with_fields(
     // Pre-building all seeds (rather than building them inline during execution)
     // means each seed sees the round's input state, not facts an earlier seed
     // committed mid-loop — keeping semi-naive's "this round vs. next round" line clean.
-    let apparatus: SeedApparatus = plans.iter()
+    let apparatus = plans.iter()
         .map(|(plan_atom, plan)| {
             let plan_loads = &loads[plan_atom];
-            let driver = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None);
+            let seed = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None);
             let stages: Vec<StageBoxes> = plan.iter()
                 .map(|(atoms, _, _)| atoms.iter()
                     .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan)))
                     .collect::<Vec<_>>())
                 .collect();
-            (driver, stages)
+            (seed, stages)
         })
         .collect();
     (plans, loads, apparatus)
@@ -157,8 +150,8 @@ impl crate::types::State {
         // Per seed: seed → wco_join stages → emit head facts.
         // Seed atoms are pre-built, so each seed sees the round's input state
         // rather than facts that earlier seeds may have committed.
-        for ((_plan_atom, plan), (driver, stages_boxed)) in plans.iter().zip(apparatus) {
-            let mut salad = driver.seed(comms, !stable);
+        for ((_plan_atom, plan), (seed, stages_boxed)) in plans.iter().zip(apparatus) {
+            let mut salad = seed.seed(comms, !stable);
             run_wco_stages(comms, &mut salad, plan, &stages_boxed, potato.clone());
             emit_head_facts(facts, comms, head, salad);
         }

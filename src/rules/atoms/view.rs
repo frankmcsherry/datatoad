@@ -13,7 +13,7 @@ use crate::comms::Comms;
 use crate::facts::{FactContainer, FactLSM, Forest, Relations, Terms};
 use crate::rules::exec::Salad;
 use crate::rules::plan::{self, PlanAtom};
-use crate::rules::{ExecAtom, SeedApparatus, StageBoxes};
+use crate::rules::{ExecAtom, StageBoxes};
 use crate::types::{Action, Atom, RelationDecl, Rule, Term};
 
 /// A `&'static String` placeholder used as the count-metadata column name in `wco_join`.
@@ -38,18 +38,23 @@ impl PlanAtom<String> for ViewPlan {
     }
 }
 
-/// One disjunct of the seed apparatus: cloned head atom plus its standard apparatus.
+/// One disjunct of the apparatus used by `View::seed` (the full-materialization path).
+/// Cloned head atom plus its planned execution.
 pub struct SeedDisjunct {
     /// The disjunct's head atom (cloned from the defining rule). Used by `View::seed`
     /// to project results through the head's positional shape.
     pub head: Atom,
-    pub plans: plan::Plans<usize, String>,
-    pub loads: plan::Loads<usize, String>,
-    pub apparatus: SeedApparatus,
+    /// The plan for this disjunct's body (seed = body[0] in stable mode).
+    pub plan: plan::Plan<usize, String>,
+    /// The pre-built seed atom whose `.seed()` produces the initial salad.
+    pub seed: Box<dyn ExecAtom<String>>,
+    /// Pre-built non-seed atoms per stage, in plan order.
+    pub stages: Vec<StageBoxes>,
 }
 
-/// One disjunct of the join apparatus: the seeded plan for the disjunct's body and
-/// the runtime Actions that translate between use-site and disjunct schemas.
+/// One disjunct of the apparatus used by `View::join` (the seeded-evaluation path):
+/// the seeded plan for the disjunct's body and the runtime Actions that translate
+/// between use-site and disjunct schemas.
 ///
 /// At runtime, evaluation is: canonicalize input salad to pattern order → apply
 /// `input_action` → run plan stages → apply `output_action` → use-site-shaped salad.
@@ -81,10 +86,12 @@ pub struct View {
     /// The use-site atom (cloned at build time). Used by `View::seed` to shape output.
     pub use_site: Atom,
     pub head_terms: Vec<String>,
-    /// Apparatus for `seed` (when view is itself the seed). Always present.
+    /// Per-disjunct apparatus consumed by `View::seed` (full materialization, used
+    /// when the view is itself the seed in a surrounding rule). Always present.
     pub seed_disjuncts: Vec<SeedDisjunct>,
-    /// Apparatus for `join` for a single pre-known approach pattern. Present when
-    /// the construction site identified a pattern via the parent plan.
+    /// Apparatus consumed by `View::join` (seeded evaluation, for one pre-known
+    /// approach pattern). Present when the construction site identified a pattern
+    /// via the parent plan.
     pub join_apparatus: Option<JoinApparatus>,
 }
 
@@ -116,14 +123,19 @@ impl View {
 
         let mut seed_disjuncts: Vec<SeedDisjunct> = Vec::with_capacity(defining.len());
         for rule in &defining {
-            let (plans, loads, apparatus) = crate::rules::plan_and_build_with_fields(
+            let (plans, _loads, apparatus) = crate::rules::plan_and_build_with_fields(
                 facts, comms, decls, rules,
                 &rule.body[..], &rule.head[..],
                 true, None,
             );
+            // Stable mode (delta_atoms = [0]) yields at most one entry; if empty
+            // (the body's first atom can't act as a seed, e.g. a logic atom), the
+            // disjunct contributes nothing and we skip it.
+            let plan = match plans.into_values().next() { Some(p) => p, None => continue };
+            let (seed, stages) = match apparatus.into_iter().next() { Some(a) => a, None => continue };
             seed_disjuncts.push(SeedDisjunct {
                 head: rule.head[0].clone(),
-                plans, loads, apparatus,
+                plan, seed, stages,
             });
         }
 
@@ -243,12 +255,10 @@ impl ExecAtom<String> for View {
     fn seed(&self, comms: &mut Comms, recent: bool) -> Salad<String> {
         let mut result = Salad::new(FactLSM::default(), self.head_terms.clone());
         for disjunct in &self.seed_disjuncts {
-            for ((_plan_atom, plan), (driver, stages)) in disjunct.plans.iter().zip(&disjunct.apparatus) {
-                let mut salad = driver.seed(comms, recent);
-                crate::rules::run_wco_stages(comms, &mut salad, plan, stages, potato().clone());
-                let projected = project_through_head(salad, &disjunct.head, &self.use_site);
-                result.facts.extend(projected.facts);
-            }
+            let mut salad = disjunct.seed.seed(comms, recent);
+            crate::rules::run_wco_stages(comms, &mut salad, &disjunct.plan, &disjunct.stages, potato().clone());
+            let projected = project_through_head(salad, &disjunct.head, &self.use_site);
+            result.facts.extend(projected.facts);
         }
         result
     }
