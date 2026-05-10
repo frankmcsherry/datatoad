@@ -84,14 +84,14 @@ use crate::types::{Atom, Action, Term};
 /// Each entry rewrites a body var to either another var (`Term::Var` — rename, often
 /// to a use-site var name to unify head and use-site spaces) or a literal
 /// (`Term::Lit` — constant pushdown, baked into atom load actions as `lit_filter`).
-/// Values are `&'a Term` borrowed from the use-site atom; refs have `'a` lifetime so
-/// `PlanAtom` term sets and load actions can use the inner `&'a String`/`&'a Vec<u8>`
+/// Values are `Term` borrowed from the use-site atom; refs have `'a` lifetime so
+/// `PlanAtom` term sets and load actions can use the inner `String`/`Vec<u8>`
 /// directly without allocation.
 ///
 /// Used by the view planner to fold use-site constraints into the body's atom views
 /// without allocating new `Atom` structs. `build_atoms_map` and `base_actions_for`
 /// consult this when computing per-atom term sets and load actions.
-pub type Subst<'a> = BTreeMap<&'a String, &'a Term>;
+pub type Subst = BTreeMap<String, Term>;
 
 /// A plan is a sequence of stages, each a tuple of (atoms, terms, output order).
 ///
@@ -124,14 +124,14 @@ pub fn plan_rule<'a>(
     body: &'a [Atom],
     seed_atoms: &[usize],
     decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
-) -> (Plans<usize, &'a String>, Loads<usize, &'a String>) {
+) -> (Plans<usize, String>, Loads<usize, String>) {
 
-    let empty_subst: Subst<'a> = BTreeMap::new();
+    let empty_subst: Subst = BTreeMap::new();
     let head_terms = head_order(head, &empty_subst);
     let base_actions = base_actions_for(body, &empty_subst);
 
-    let mut plans: Plans<usize, &'a String> = BTreeMap::default();
-    let mut loads: Loads<usize, &'a String> = BTreeMap::default();
+    let mut plans: Plans<usize, String> = BTreeMap::default();
+    let mut loads: Loads<usize, String> = BTreeMap::default();
 
     // One atoms map; each iteration takes a seed_idx out as the seed and puts it back
     // at the end. Same round-robin shape as semi-naive: the body's atoms are stable;
@@ -144,7 +144,7 @@ pub fn plan_rule<'a>(
                 // Body-positional, possibly with repeats — preserves the user-written
                 // column order so the planner can prefer stage-0 atoms that align with
                 // the seed's column prefix (avoiding a re-permute on first semijoin).
-                let seed: Vec<&'a String> = body[seed_idx].terms.iter().filter_map(|t| t.as_var()).collect();
+                let seed: Vec<String> = body[seed_idx].terms.iter().filter_map(|t| t.as_var().cloned()).collect();
                 let plan = plan_body(&seed, &atoms, &head_terms);
                 let mut load = body_load(&plan, &atoms, &base_actions);
                 load.insert(seed_idx, seed_load(&plan, &atoms, &seed_terms, &base_actions[&seed_idx]));
@@ -164,20 +164,21 @@ pub fn plan_rule<'a>(
 /// may try to align the terms of `seed` to match.
 /// It is unclear if this is worth the cost of a new form for the seed.
 fn seed_load<'a>(
-    plan: &Plan<usize, &'a String>,
-    body: &BTreeMap<usize, Box<dyn PlanAtom<&'a String> + 'a>>,
-    seed_terms: &BTreeSet<&'a String>,
+    plan: &Plan<usize, String>,
+    body: &BTreeMap<usize, Box<dyn PlanAtom<String> + 'a>>,
+    seed_terms: &BTreeSet<String>,
     base_action: &Action<Vec<u8>>,
-) -> Load<&'a String> {
+) -> Load<String> {
     let mut order = Vec::new();
     if let Some((stage_atoms, _, _)) = plan.iter().find(|(a, _, _)| !a.is_empty()) {
         for atom in stage_atoms.iter() {
-            for term in body[atom].terms().intersection(seed_terms) {
-                if !order.contains(term) { order.push(*term); }
+            let atom_terms = body[atom].terms();
+            for term in atom_terms.intersection(seed_terms) {
+                if !order.contains(term) { order.push(term.clone()); }
             }
         }
     }
-    for term in seed_terms.iter() { if !order.contains(term) { order.push(*term); } }
+    for term in seed_terms.iter() { if !order.contains(term) { order.push(term.clone()); } }
 
     let mut action = base_action.clone();
     action.projection = order.iter()
@@ -222,19 +223,19 @@ fn body_load<'a, A: Ord + Copy, T: Ord + Clone>(
 /// The order is of distinct terms in order of presentation, with `subst` applied
 /// (Var→Var renames are reflected; Var→Lit substitutions drop out, as do raw lits).
 /// Pass empty `Subst` for the non-view path.
-fn head_order<'a>(head: &'a [Atom], subst: &Subst<'a>) -> Vec<&'a String> {
-    let mut seen: BTreeSet<&'a String> = BTreeSet::default();
+fn head_order<'a>(head: &'a [Atom], subst: &Subst) -> Vec<String> {
+    let mut seen: BTreeSet<String> = BTreeSet::default();
     head.iter()
         .flat_map(|a| a.terms.iter())
         .filter_map(|t| match t {
             Term::Var(name) => match subst.get(name) {
-                Some(Term::Var(new_name)) => Some(new_name),
+                Some(Term::Var(new_name)) => Some(new_name.clone()),
                 Some(Term::Lit(_)) => None,
-                None => Some(name),
+                None => Some(name.clone()),
             },
             Term::Lit(_) => None,
         })
-        .filter(|t| seen.insert(t))
+        .filter(|t| seen.insert(t.clone()))
         .collect()
 }
 
@@ -246,11 +247,11 @@ fn head_order<'a>(head: &'a [Atom], subst: &Subst<'a>) -> Vec<&'a String> {
 /// head atom matches the disjunct shape — multi-head rules don't arise on this path.
 pub fn plan_rule_seeded<'a>(
     body: &'a [Atom],
-    seed: &[&'a String],
-    need: &[&'a String],
-    subst: &Subst<'a>,
+    seed: &[String],
+    need: &[String],
+    subst: &Subst,
     decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
-) -> (Plan<usize, &'a String>, BTreeMap<usize, Load<&'a String>>) {
+) -> (Plan<usize, String>, BTreeMap<usize, Load<String>>) {
     let atoms = build_atoms_map(body, subst, decls);
     let base_actions = base_actions_for(body, subst);
     let plan = plan_body(seed, &atoms, need);
@@ -395,19 +396,19 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
 /// and `terms`.
 fn build_atoms_map<'a>(
     body: &'a [Atom],
-    subst: &Subst<'a>,
+    subst: &Subst,
     decls: &'a std::collections::BTreeMap<String, crate::types::RelationDecl>,
-) -> BTreeMap<usize, Box<dyn PlanAtom<&'a String> + 'a>> {
+) -> BTreeMap<usize, Box<dyn PlanAtom<String> + 'a>> {
     body.iter().enumerate().map(|(index, atom)| {
-        let terms: BTreeSet<&'a String> = atom.terms.iter().filter_map(|t| match t {
+        let terms: BTreeSet<String> = atom.terms.iter().filter_map(|t| match t {
             Term::Var(name) => match subst.get(name) {
-                Some(Term::Var(new_name)) => Some(new_name),
+                Some(Term::Var(new_name)) => Some(new_name.clone()),
                 Some(Term::Lit(_)) => None,
-                None => Some(name),
+                None => Some(name.clone()),
             },
             Term::Lit(_) => None,
         }).collect();
-        let boxed_atom: Box<dyn PlanAtom<&'a String>+'a> =
+        let boxed_atom: Box<dyn PlanAtom<String>+'a> =
         if let Some(logic) = crate::rules::atoms::logic::resolve_with_subst(atom, subst) { Box::new(logic) }
         else if decls.get(atom.name.as_str()).map_or(false, |d| d.view) {
             Box::new(crate::rules::atoms::view::ViewPlan { head_terms: terms })
@@ -426,7 +427,7 @@ fn build_atoms_map<'a>(
 /// mapped to `Term::Var(new_name)` is renamed (affecting var_filter detection
 /// for repeats and the projection's sort order). Pass empty `Subst` for the
 /// non-view path.
-fn base_actions_for<'a>(body: &[Atom], subst: &Subst<'a>) -> BTreeMap<usize, Action<Vec<u8>>> {
+fn base_actions_for<'a>(body: &[Atom], subst: &Subst) -> BTreeMap<usize, Action<Vec<u8>>> {
     body.iter().enumerate().map(|(index, atom)| {
         let mut action = action_from_body_with_subst(atom, subst);
         // Sort projection by the substituted var name (the var name as the planner sees it).
@@ -451,7 +452,7 @@ fn base_actions_for<'a>(body: &[Atom], subst: &Subst<'a>) -> BTreeMap<usize, Act
 /// Mirrors `Action::from_body` but routes each var through `subst`: a Var → Lit
 /// substitution becomes a positional `lit_filter`; a Var → Var substitution renames
 /// (so repeats with the renamed name produce `var_filter` entries).
-fn action_from_body_with_subst<'a>(atom: &Atom, subst: &Subst<'a>) -> Action<Vec<u8>> {
+fn action_from_body_with_subst<'a>(atom: &Atom, subst: &Subst) -> Action<Vec<u8>> {
     let mut output = Action::default();
     let mut terms_seen: BTreeMap<&str, usize> = BTreeMap::default();
     for (index, term) in atom.terms.iter().enumerate() {

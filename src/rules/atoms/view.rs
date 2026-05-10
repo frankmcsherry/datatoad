@@ -18,8 +18,8 @@ use crate::types::{Action, Atom, RelationDecl, Rule, Term};
 
 /// A `&'static String` placeholder used as the count-metadata column name in `wco_join`.
 ///
-/// Lives 'static so it can coerce to any `&'a String`. `wco_join` runs on salads
-/// whose term type is `&'a String` for an `'a` we don't own; a local `String`
+/// Lives 'static so it can coerce to any `String`. `wco_join` runs on salads
+/// whose term type is `String` for an `'a` we don't own; a local `String`
 /// declared inside `View::seed`/`View::join_seeded` wouldn't live long enough.
 fn potato() -> &'static String {
     static POTATO: OnceLock<String> = OnceLock::new();
@@ -27,13 +27,13 @@ fn potato() -> &'static String {
 }
 
 /// PlanAtom proxy for view references — no apparatus, just term info.
-pub struct ViewPlan<'a> {
-    pub head_terms: BTreeSet<&'a String>,
+pub struct ViewPlan {
+    pub head_terms: BTreeSet<String>,
 }
 
-impl<'a> PlanAtom<&'a String> for ViewPlan<'a> {
-    fn terms(&self) -> BTreeSet<&'a String> { self.head_terms.clone() }
-    fn ground(&self, terms: &BTreeSet<&'a String>) -> BTreeSet<&'a String> {
+impl PlanAtom<String> for ViewPlan {
+    fn terms(&self) -> BTreeSet<String> { self.head_terms.clone() }
+    fn ground(&self, terms: &BTreeSet<String>) -> BTreeSet<String> {
         self.head_terms.difference(terms).cloned().collect()
     }
 }
@@ -41,8 +41,8 @@ impl<'a> PlanAtom<&'a String> for ViewPlan<'a> {
 /// One disjunct of the seed apparatus: defining rule plus its standard apparatus.
 pub struct SeedDisjunct<'a> {
     pub rule: &'a Rule,
-    pub plans: plan::Plans<usize, &'a String>,
-    pub loads: plan::Loads<usize, &'a String>,
+    pub plans: plan::Plans<usize, String>,
+    pub loads: plan::Loads<usize, String>,
     pub apparatus: SeedApparatus<'a>,
 }
 
@@ -63,7 +63,7 @@ pub struct JoinDisjunct<'a> {
     /// at positions where the (substituted) disjunct head emits constants.
     pub output_action: Action<Vec<u8>>,
     /// The seeded plan for the disjunct's body, planned with substitution applied.
-    pub plan: plan::Plan<usize, &'a String>,
+    pub plan: plan::Plan<usize, String>,
     /// Pre-built atoms per stage, in plan order (one per atom in each stage).
     pub stages: Vec<StageBoxes<'a>>,
 }
@@ -71,14 +71,14 @@ pub struct JoinDisjunct<'a> {
 /// Pre-built apparatus for `View::join` for one specific approach pattern.
 pub struct JoinApparatus<'a> {
     /// The pre-bound subset of sum's terms (in use-site space).
-    pub pattern: BTreeSet<&'a String>,
+    pub pattern: BTreeSet<String>,
     pub disjuncts: Vec<JoinDisjunct<'a>>,
 }
 
 /// ExecAtom for a view reference.
 pub struct View<'a> {
     pub use_site: &'a Atom,
-    pub head_terms: Vec<&'a String>,
+    pub head_terms: Vec<String>,
     /// Apparatus for `seed` (when sum is itself the seed). Always present.
     pub seed_disjuncts: Vec<SeedDisjunct<'a>>,
     /// Apparatus for `join` for a single pre-known approach pattern. Present when
@@ -104,7 +104,7 @@ impl<'a> View<'a> {
         body: &'a [Atom],
         plan_atom: usize,
         load_atom: usize,
-        parent_plan: Option<&plan::Plan<usize, &'a String>>,
+        parent_plan: Option<&plan::Plan<usize, String>>,
     ) -> View<'a> {
         let view_name = body[load_atom].name.as_str();
         let defining: Vec<&'a Rule> = rules.iter()
@@ -123,7 +123,7 @@ impl<'a> View<'a> {
         }
 
         let use_site = &body[load_atom];
-        let head_terms: Vec<&'a String> = use_site.terms.iter().filter_map(|t| t.as_var()).collect();
+        let head_terms: Vec<String> = use_site.terms.iter().filter_map(|t| t.as_var().cloned()).collect();
 
         let join_apparatus = parent_plan.and_then(|plan| {
             build_join_apparatus(facts, comms, decls, rules, plan, body, plan_atom, load_atom, &defining, use_site)
@@ -144,7 +144,7 @@ fn build_join_apparatus<'a>(
     comms: &mut Comms,
     decls: &'a std::collections::BTreeMap<String, RelationDecl>,
     rules: &'a [(Rule, Vec<Duration>)],
-    plan: &plan::Plan<usize, &'a String>,
+    plan: &plan::Plan<usize, String>,
     body: &'a [Atom],
     plan_atom: usize,
     load_atom: usize,
@@ -157,26 +157,26 @@ fn build_join_apparatus<'a>(
 
     // Variables bound at the start of stage `stage_idx`: the seed's own terms plus
     // every prior stage's `terms_to_introduce`.
-    let mut bound_at_stage: BTreeSet<&'a String> =
-        body[plan_atom].terms.iter().filter_map(|t| t.as_var()).collect();
+    let mut bound_at_stage: BTreeSet<String> =
+        body[plan_atom].terms.iter().filter_map(|t| t.as_var().cloned()).collect();
     for (i, (_, terms_to_intro, _)) in plan.iter().enumerate() {
         if i >= stage_idx { break; }
         bound_at_stage.extend(terms_to_intro.iter().cloned());
     }
 
-    let load_terms_set: BTreeSet<&'a String> =
-        body[load_atom].terms.iter().filter_map(|t| t.as_var()).collect();
+    let load_terms_set: BTreeSet<String> =
+        body[load_atom].terms.iter().filter_map(|t| t.as_var().cloned()).collect();
 
     let (stage_atoms, stage_terms_field, _) = &plan[stage_idx];
     // Stage 0's `terms` field carries seed bindings (pre-bound), not introductions —
     // see `Plan` doc. For stages 1+, `terms` are the columns that stage introduces.
-    let stage_terms_to_intro: BTreeSet<&'a String> =
+    let stage_terms_to_intro: BTreeSet<String> =
         if stage_idx == 0 { BTreeSet::default() } else { stage_terms_field.clone() };
     // If sum is the sole atom in this stage, it acts as the proposer (count protocol
     // short-circuits to atom.join with terms). Pattern is sum's terms minus what this
     // stage introduces. Otherwise sum is a validator and all of sum's terms are bound
     // by the time `join` is called.
-    let pattern: BTreeSet<&'a String> =
+    let pattern: BTreeSet<String> =
         if stage_atoms.len() == 1 && stage_atoms.contains(&load_atom) {
             load_terms_set.difference(&stage_terms_to_intro).cloned().collect()
         } else {
@@ -230,16 +230,16 @@ fn build_join_apparatus<'a>(
     Some(JoinApparatus { pattern, disjuncts })
 }
 
-impl<'a> ExecAtom<&'a String> for View<'a> {
-    fn terms(&self) -> &[&'a String] { &self.head_terms[..] }
+impl<'a> ExecAtom<String> for View<'a> {
+    fn terms(&self) -> &[String] { &self.head_terms[..] }
 
-    fn seed(&self, comms: &mut Comms, recent: bool) -> Salad<&'a String> {
+    fn seed(&self, comms: &mut Comms, recent: bool) -> Salad<String> {
         let mut result = Salad::new(FactLSM::default(), self.head_terms.clone());
         for disjunct in &self.seed_disjuncts {
             let disjunct_head = &disjunct.rule.head[0];
             for ((_plan_atom, plan), (driver, stages)) in disjunct.plans.iter().zip(&disjunct.apparatus) {
                 let mut salad = driver.seed(comms, recent);
-                crate::rules::run_wco_stages(comms, &mut salad, plan, stages, potato());
+                crate::rules::run_wco_stages(comms, &mut salad, plan, stages, potato().clone());
                 let projected = project_through_head(salad, disjunct_head, self.use_site);
                 result.facts.extend(projected.facts);
             }
@@ -247,14 +247,14 @@ impl<'a> ExecAtom<&'a String> for View<'a> {
         result
     }
 
-    fn count(&self, _comms: &mut Comms, _salad: &mut Salad<&'a String>, _added: &BTreeSet<&'a String>, _index: u8) {
+    fn count(&self, _comms: &mut Comms, _salad: &mut Salad<String>, _added: &BTreeSet<String>, _index: u8) {
         // No-op: view atoms never propose values during the count protocol.
     }
 
-    fn join(&self, comms: &mut Comms, salad: &mut Salad<&'a String>, added: &BTreeSet<&'a String>, after: &[&'a String]) {
+    fn join(&self, comms: &mut Comms, salad: &mut Salad<String>, added: &BTreeSet<String>, after: &[String]) {
         // The call's approach pattern: which sum terms are bound in the input salad,
         // excluding any that this call is supposed to introduce.
-        let bound_in_salad: BTreeSet<&'a String> = self.head_terms.iter()
+        let bound_in_salad: BTreeSet<String> = self.head_terms.iter()
             .filter(|t| salad.terms.contains(*t) && !added.contains(*t))
             .cloned()
             .collect();
@@ -269,7 +269,7 @@ impl<'a> ExecAtom<&'a String> for View<'a> {
         // Fallback: materialize the full sum and delegate to the data-atom join.
         let materialized = self.seed(comms, false);
         let facts: Vec<Forest<Terms>> = materialized.facts.into_iter().collect();
-        let temp: (Vec<Forest<Terms>>, Vec<&'a String>, Option<Forest<Terms>>) =
+        let temp: (Vec<Forest<Terms>>, Vec<String>, Option<Forest<Terms>>) =
             (facts, materialized.terms, None);
         temp.join(comms, salad, added, after);
     }
@@ -278,11 +278,11 @@ impl<'a> ExecAtom<&'a String> for View<'a> {
 impl<'a> View<'a> {
     /// Seeded-evaluation join: run each disjunct constrained by the input salad,
     /// project results back to use-site space, replace `salad` with the union.
-    fn join_seeded(&self, ja: &JoinApparatus<'a>, comms: &mut Comms, salad: &mut Salad<&'a String>) {
+    fn join_seeded(&self, ja: &JoinApparatus<'a>, comms: &mut Comms, salad: &mut Salad<String>) {
         let mut result_facts: FactLSM<Forest<Terms>> = FactLSM::default();
 
         // Stable iteration order over the pattern; all disjuncts use the same pattern.
-        let pattern_terms: Vec<&'a String> = ja.pattern.iter().cloned().collect();
+        let pattern_terms: Vec<String> = ja.pattern.iter().cloned().collect();
 
         // Canonicalize input salad to pattern-term order. Each disjunct's `input_action`
         // assumes columns are in this order.
@@ -297,7 +297,7 @@ impl<'a> View<'a> {
             );
             if disjunct_salad.facts.is_empty() { continue; }
             crate::rules::run_wco_stages(
-                comms, &mut disjunct_salad, &disjunct.plan, &disjunct.stages, potato(),
+                comms, &mut disjunct_salad, &disjunct.plan, &disjunct.stages, potato().clone(),
             );
             let projected = apply_action_to_salad(
                 &disjunct_salad, &disjunct.output_action, self.head_terms.clone(),
@@ -312,7 +312,7 @@ impl<'a> View<'a> {
 impl<'a> JoinDisjunct<'a> {
     /// Term names corresponding to the columns `input_action` projects to. Computed
     /// from the plan's stage 0 terms — that's where the seed lands.
-    fn seed_terms_for_action(&self) -> Vec<&'a String> {
+    fn seed_terms_for_action(&self) -> Vec<String> {
         self.plan.first()
             .map(|(_, terms, _)| terms.iter().cloned().collect())
             .unwrap_or_default()
@@ -322,9 +322,9 @@ impl<'a> JoinDisjunct<'a> {
 /// Projects input salad onto `target_terms` by column position. Returns `None` if
 /// the salad is empty.
 fn canonicalize_salad<'a>(
-    salad: &Salad<&'a String>,
-    target_terms: &[&'a String],
-) -> Option<Salad<&'a String>> {
+    salad: &Salad<String>,
+    target_terms: &[String],
+) -> Option<Salad<String>> {
     let projection: Vec<Result<usize, Vec<u8>>> = target_terms.iter().map(|t| {
         let col = salad.terms.iter().position(|s| *s == *t)
             .expect("target term not in salad");
@@ -347,10 +347,10 @@ fn canonicalize_salad<'a>(
 
 /// Applies an Action to a salad, producing a new salad with the given `output_terms`.
 fn apply_action_to_salad<'a>(
-    salad: &Salad<&'a String>,
+    salad: &Salad<String>,
     action: &Action<Vec<u8>>,
-    output_terms: Vec<&'a String>,
-) -> Salad<&'a String> {
+    output_terms: Vec<String>,
+) -> Salad<String> {
     let thresh = 200_000_000;
     let mut facts: FactLSM<Forest<Terms>> = FactLSM::default();
     for forest in salad.facts.contents() {
@@ -373,17 +373,17 @@ fn apply_action_to_salad<'a>(
 /// used by `View::seed` (which materializes the full view without seeded
 /// pushdown — see `seed_disjuncts`).
 fn project_through_head<'a>(
-    mut salad: Salad<&'a String>,
+    mut salad: Salad<String>,
     disjunct_head: &Atom,
     use_site: &'a Atom,
-) -> Salad<&'a String> {
+) -> Salad<String> {
     assert_eq!(
         disjunct_head.terms.len(),
         use_site.terms.len(),
         "Disjunct head and use-site atom must have the same arity"
     );
 
-    let head_terms: Vec<&'a String> = use_site.terms.iter().filter_map(|t| t.as_var()).collect();
+    let head_terms: Vec<String> = use_site.terms.iter().filter_map(|t| t.as_var().cloned()).collect();
     let mut action = Action::with_arity(salad.arity());
     for (us_term, dj_term) in use_site.terms.iter().zip(disjunct_head.terms.iter()) {
         match (us_term, dj_term) {
@@ -437,10 +437,10 @@ fn project_through_head<'a>(
 /// - `output_action`: runtime Action applied to the disjunct's output salad to
 ///   produce a use-site-shaped salad. Its `Ok(col)` projection entries index into
 ///   `need`-order (the disjunct salad's actual column order after projection-pushdown).
-struct DisjunctComposition<'a> {
-    subst: Subst<'a>,
-    seed: Vec<&'a String>,
-    need: Vec<&'a String>,
+struct DisjunctComposition {
+    subst: Subst,
+    seed: Vec<String>,
+    need: Vec<String>,
     input_action: Action<Vec<u8>>,
     output_action: Action<Vec<u8>>,
 }
@@ -457,16 +457,16 @@ struct DisjunctComposition<'a> {
 ///
 /// Returns `None` for arity mismatch, lit-vs-lit contradictions, or substitution
 /// conflicts.
-fn compose_disjunct<'a>(
-    pattern: &BTreeSet<&'a String>,
-    use_site: &'a Atom,
-    disjunct_head: &'a Atom,
-) -> Option<DisjunctComposition<'a>> {
+fn compose_disjunct(
+    pattern: &BTreeSet<String>,
+    use_site: &Atom,
+    disjunct_head: &Atom,
+) -> Option<DisjunctComposition> {
     if use_site.terms.len() != disjunct_head.terms.len() { return None; }
 
     // Pass 1: build the substitution and collect input lit filters.
-    let mut subst: Subst<'a> = BTreeMap::new();
-    let mut input_lits: Vec<(&'a String, &'a Vec<u8>)> = Vec::new();
+    let mut subst: Subst = BTreeMap::new();
+    let mut input_lits: Vec<(String, Vec<u8>)> = Vec::new();
 
     for (us_term, dj_term) in use_site.terms.iter().zip(disjunct_head.terms.iter()) {
         match (us_term, dj_term) {
@@ -475,12 +475,12 @@ fn compose_disjunct<'a>(
                 match subst.get(vd) {
                     Some(Term::Var(prev)) if prev != vu => return None,
                     Some(Term::Lit(_)) => return None,
-                    _ => { subst.insert(vd, us_term); }
+                    _ => { subst.insert(vd.clone(), us_term.clone()); }
                 }
             }
             (Term::Var(vu), Term::Lit(ld)) => {
                 if pattern.contains(vu) {
-                    input_lits.push((vu, ld));
+                    input_lits.push((vu.clone(), ld.clone()));
                 }
                 // Else: vu is not pre-bound; gets bound to ld at output via output_action.
             }
@@ -489,7 +489,7 @@ fn compose_disjunct<'a>(
                 match subst.get(vd) {
                     Some(Term::Lit(prev)) if prev != lu => return None,
                     Some(Term::Var(_)) => return None,
-                    _ => { subst.insert(vd, us_term); }
+                    _ => { subst.insert(vd.clone(), us_term.clone()); }
                 }
             }
             (Term::Lit(lu), Term::Lit(ld)) => {
@@ -500,12 +500,12 @@ fn compose_disjunct<'a>(
 
     // Seed: all pattern vars (BTreeSet order). `plan_body` filters out vars unused
     // by the (substituted) body via its `init_terms` step.
-    let seed: Vec<&'a String> = pattern.iter().cloned().collect();
+    let seed: Vec<String> = pattern.iter().cloned().collect();
 
     // Build input_action. Assumes the input salad has been canonicalized to
     // pattern-term order (BTreeSet iteration). Filters by collected lits, projects
     // to the seed columns.
-    let pattern_terms: Vec<&'a String> = pattern.iter().cloned().collect();
+    let pattern_terms: Vec<String> = pattern.iter().cloned().collect();
     let mut input_action = Action::with_arity(pattern_terms.len());
     for (vu, ld) in &input_lits {
         let col = pattern_terms.iter().position(|t| *t == *vu)
@@ -520,32 +520,32 @@ fn compose_disjunct<'a>(
     // Determine which substituted-head vars are *live* — referenced by some use-site
     // var position. Vars in the substituted head but not live are dead from the
     // use-site's perspective; `plan_body` will drop them in its last-stage projection.
-    let mut live: BTreeSet<&'a String> = BTreeSet::default();
+    let mut live: BTreeSet<String> = BTreeSet::default();
     for (i, us_term) in use_site.terms.iter().enumerate() {
         if let Term::Var(_) = us_term {
             if let Term::Var(vd) = &disjunct_head.terms[i] {
-                let effective: Option<&'a String> = match subst.get(vd) {
-                    Some(Term::Var(new_name)) => Some(new_name),
+                let effective: Option<String> = match subst.get(vd) {
+                    Some(Term::Var(new_name)) => Some(new_name.clone()),
                     Some(Term::Lit(_)) => None,
-                    None => Some(vd),
+                    None => Some(vd.clone()),
                 };
                 if let Some(n) = effective { live.insert(n); }
             }
         }
     }
     // `need`: substituted head's distinct vars in presentation order, filtered to live.
-    let need: Vec<&'a String> = {
-        let mut seen: BTreeSet<&'a String> = BTreeSet::default();
-        let mut out: Vec<&'a String> = Vec::new();
+    let need: Vec<String> = {
+        let mut seen: BTreeSet<String> = BTreeSet::default();
+        let mut out: Vec<String> = Vec::new();
         for t in disjunct_head.terms.iter() {
             if let Term::Var(name) = t {
-                let effective: Option<&'a String> = match subst.get(name) {
-                    Some(Term::Var(new_name)) => Some(new_name),
+                let effective: Option<String> = match subst.get(name) {
+                    Some(Term::Var(new_name)) => Some(new_name.clone()),
                     Some(Term::Lit(_)) => None,
-                    None => Some(name),
+                    None => Some(name.clone()),
                 };
                 if let Some(n) = effective {
-                    if live.contains(n) && seen.insert(n) { out.push(n); }
+                    if live.contains(&n) && seen.insert(n.clone()) { out.push(n); }
                 }
             }
         }
@@ -561,13 +561,13 @@ fn compose_disjunct<'a>(
             let emit: Result<usize, Vec<u8>> = match &disjunct_head.terms[i] {
                 Term::Var(vd) => match subst.get(vd) {
                     Some(Term::Var(new_name)) => {
-                        let col = need.iter().position(|t| *t as &String == new_name as &String)
+                        let col = need.iter().position(|t| t == new_name)
                             .expect("substituted var not in need");
                         Ok(col)
                     }
                     Some(Term::Lit(value)) => Err(value.clone()),
                     None => {
-                        let col = need.iter().position(|t| *t as &String == vd as &String)
+                        let col = need.iter().position(|t| t == vd)
                             .expect("disjunct head var not in need");
                         Ok(col)
                     }

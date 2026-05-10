@@ -20,14 +20,14 @@ use crate::comms::Comms;
 /// Looks for the atom's name in a known list, and returns an implementation if found.
 ///
 /// The implementation is a type that implements both `PlanAtom` and `ExecAtom`, and can be boxed as either.
-pub fn resolve(atom: &Atom) -> Option<LogicRel<&String>> {
+pub fn resolve(atom: &Atom) -> Option<LogicRel<String>> {
     resolve_with_subst(atom, &plan::Subst::new())
 }
 
 /// Substitution-aware variant of `resolve`. Used by view planning so that head-var
 /// renames (and lit pushdown) flow into the logic atom's `bound`/`terms`. For the
 /// non-view path, an empty `subst` (via `resolve`) gives the original behavior.
-pub fn resolve_with_subst<'a>(atom: &'a Atom, subst: &plan::Subst<'a>) -> Option<LogicRel<&'a String>> {
+pub fn resolve_with_subst<'a>(atom: &'a Atom, subst: &plan::Subst) -> Option<LogicRel<String>> {
     match atom.name.as_str() {
         ":noteq" => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::NotEq } ), atom, subst)),
         ":range" => Some(LogicRel::new_with_subst(Box::new(BatchedLogic { logic: relations::Range } ), atom, subst)),
@@ -93,7 +93,7 @@ pub struct LogicRel<T> {
     pub terms: Vec<T>,
 }
 
-impl<'a> LogicRel<&'a String> {
+impl<'a> LogicRel<String> {
     /// Create a new instance of `Self` from batch logic and the atom itself.
     pub fn new(logic: Box<dyn super::logic::BatchLogic>, atom: &'a Atom) -> Self {
         Self::new_with_subst(logic, atom, &plan::Subst::new())
@@ -105,13 +105,13 @@ impl<'a> LogicRel<&'a String> {
     pub fn new_with_subst(
         logic: Box<dyn super::logic::BatchLogic>,
         atom: &'a Atom,
-        subst: &plan::Subst<'a>,
+        subst: &plan::Subst,
     ) -> Self {
-        let bound: Vec<Result<&'a String, Vec<u8>>> = atom.terms.iter().map(|t| match t {
+        let bound: Vec<Result<String, Vec<u8>>> = atom.terms.iter().map(|t| match t {
             Term::Var(name) => match subst.get(name).cloned() {
                 Some(Term::Var(new_name)) => Ok(new_name),
                 Some(Term::Lit(data)) => Err(data.clone()),
-                None => Ok(name),
+                None => Ok(name.clone()),
             },
             Term::Lit(data) => Err(data.clone()),
         }).collect();

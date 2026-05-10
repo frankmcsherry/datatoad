@@ -42,10 +42,10 @@ pub(crate) fn build_atom<'a>(
     body: &'a [Atom],
     plan_atom: usize,
     load_atom: usize,
-    loads: &std::collections::BTreeMap<usize, plan::Load<&'a String>>,
-    parent_plan: Option<&plan::Plan<usize, &'a String>>,
-    subst: &plan::Subst<'a>,
-) -> Box<dyn exec::ExecAtom<&'a String> + 'a> {
+    loads: &std::collections::BTreeMap<usize, plan::Load<String>>,
+    parent_plan: Option<&plan::Plan<usize, String>>,
+    subst: &plan::Subst,
+) -> Box<dyn exec::ExecAtom<String> + 'a> {
     use crate::rules::atoms;
     if let Some(logic) = atoms::logic::resolve_with_subst(&body[load_atom], subst) {
         Box::new(logic)
@@ -59,18 +59,18 @@ pub(crate) fn build_atom<'a>(
         let to_chain = if load_atom >= plan_atom { other.recent.as_ref() } else { None };
         let other_facts: Vec<Forest<Terms>> = other.stable.contents().chain(to_chain).cloned().collect();
         let other_recent: Option<Forest<Terms>> = if plan_atom == load_atom { other.recent.clone() } else { None };
-        let owned_terms: Vec<&'a String> = load_terms.clone();
+        let owned_terms: Vec<String> = load_terms.clone();
         if body[load_atom].anti { Box::new(atoms::anti::Anti((other_facts, owned_terms))) }
         else                    { Box::new((other_facts, owned_terms, other_recent)) }
     }
 }
 
 /// One plan stage's pre-built non-seed atoms, in plan order.
-pub type StageBoxes<'a> = Vec<Box<dyn exec::ExecAtom<&'a String> + 'a>>;
+pub type StageBoxes<'a> = Vec<Box<dyn exec::ExecAtom<String> + 'a>>;
 
 /// One seed's pre-built apparatus: the seed atom (whose `.seed()` produces the initial
 /// salad) and the per-stage non-seed atoms (used for `wco_join`).
-type SeedWork<'a> = (Box<dyn exec::ExecAtom<&'a String> + 'a>, Vec<StageBoxes<'a>>);
+type SeedWork<'a> = (Box<dyn exec::ExecAtom<String> + 'a>, Vec<StageBoxes<'a>>);
 
 /// All seeds' apparatus, parallel to `Plans` iteration order.
 type SeedApparatus<'a> = Vec<SeedWork<'a>>;
@@ -91,8 +91,8 @@ pub fn plan_and_build_with_fields<'a>(
     stable: bool,
     active_relations: Option<&std::collections::BTreeSet<&str>>,
 ) -> (
-    plan::Plans<usize, &'a String>,
-    plan::Loads<usize, &'a String>,
+    plan::Plans<usize, String>,
+    plan::Loads<usize, String>,
     SeedApparatus<'a>,
 ) {
     // Body atoms that should take a turn as the source of novelty this round.
@@ -161,7 +161,7 @@ impl crate::types::State {
         // rather than facts that earlier seeds may have committed.
         for ((_plan_atom, plan), (driver, stages_boxed)) in plans.iter().zip(apparatus) {
             let mut salad = driver.seed(comms, !stable);
-            run_wco_stages(comms, &mut salad, plan, &stages_boxed, &potato);
+            run_wco_stages(comms, &mut salad, plan, &stages_boxed, potato.clone());
             emit_head_facts(facts, comms, head, salad);
         }
     }
@@ -174,7 +174,7 @@ fn emit_head_facts<'a>(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
     head: &[Atom],
-    mut salad: crate::rules::exec::Salad<&'a String>,
+    mut salad: crate::rules::exec::Salad<String>,
 ) {
     let exact_match = head.iter().position(|a| {
         a.terms.len() == salad.arity() &&
@@ -185,7 +185,7 @@ fn emit_head_facts<'a>(
     for (_, atom) in head.iter().enumerate().filter(|(pos,_)| Some(*pos) != exact_match) {
         let mut action = Action::with_arity(salad.arity());
         action.projection = atom.terms.iter().map(|t| match t {
-            Term::Var(name) => Ok(salad.terms.iter().position(|t2| t2 == &name).expect(format!("Failed to find {:?} in {:?}", name, salad.terms).as_str())),
+            Term::Var(name) => Ok(salad.terms.iter().position(|t2| t2 == name).expect(format!("Failed to find {:?} in {:?}", name, salad.terms).as_str())),
             Term::Lit(data) => Err(data.clone()),
         }).collect();
         if let Some(delta) = salad.facts.flatten() {
@@ -208,7 +208,7 @@ pub fn ensure_actions_for_loads<'a>(
     comms: &mut crate::comms::Comms,
     decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
     body: &'a [Atom],
-    loads: &std::collections::BTreeMap<usize, plan::Load<&'a String>>,
+    loads: &std::collections::BTreeMap<usize, plan::Load<String>>,
 ) {
     for (load_atom, (action, _)) in loads.iter() {
         let name = body[*load_atom].name.as_str();
@@ -233,14 +233,15 @@ pub fn ensure_actions_for_loads<'a>(
 /// follow the usual interpretation of `terms` as the new columns to extend with.
 pub fn run_wco_stages<'a>(
     comms: &mut crate::comms::Comms,
-    salad: &mut exec::Salad<&'a String>,
-    plan: &plan::Plan<usize, &'a String>,
+    salad: &mut exec::Salad<String>,
+    plan: &plan::Plan<usize, String>,
     stages: &[StageBoxes<'a>],
-    potato: &'a String,
+    potato: String,
 ) {
+    let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::default();
     for (i, ((_, terms, order), atoms)) in plan.iter().zip(stages.iter()).enumerate() {
-        let stage_terms = if i == 0 { &Default::default() } else { terms };
-        exec::wco_join(comms, salad, stage_terms, atoms, potato, &order[..]);
+        let stage_terms = if i == 0 { &empty } else { terms };
+        exec::wco_join(comms, salad, stage_terms, atoms, potato.clone(), &order[..]);
     }
 }
 
