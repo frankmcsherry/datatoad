@@ -1,6 +1,7 @@
-//! Sum atom: an `ExecAtom`/`PlanAtom` for virtual relation references.
+//! View atom: an `ExecAtom`/`PlanAtom` for view references (computed-on-demand
+//! relations declared via `.decl name(_, _) view`).
 //!
-//! `SumPlan` is the lightweight `PlanAtom` used during planning. `Sum` is the
+//! `ViewPlan` is the lightweight `PlanAtom` used during planning. `View` is the
 //! `ExecAtom` constructed for execution; its `seed_disjuncts` and `join_apparatus`
 //! fields are documented on the struct.
 
@@ -19,18 +20,18 @@ use crate::types::{Action, Atom, RelationDecl, Rule, Term};
 ///
 /// Lives 'static so it can coerce to any `&'a String`. `wco_join` runs on salads
 /// whose term type is `&'a String` for an `'a` we don't own; a local `String`
-/// declared inside `Sum::seed`/`Sum::join_seeded` wouldn't live long enough.
+/// declared inside `View::seed`/`View::join_seeded` wouldn't live long enough.
 fn potato() -> &'static String {
     static POTATO: OnceLock<String> = OnceLock::new();
     POTATO.get_or_init(|| ".potato".to_string())
 }
 
-/// PlanAtom proxy for virtual relation references — no apparatus, just term info.
-pub struct SumPlan<'a> {
+/// PlanAtom proxy for view references — no apparatus, just term info.
+pub struct ViewPlan<'a> {
     pub head_terms: BTreeSet<&'a String>,
 }
 
-impl<'a> PlanAtom<&'a String> for SumPlan<'a> {
+impl<'a> PlanAtom<&'a String> for ViewPlan<'a> {
     fn terms(&self) -> BTreeSet<&'a String> { self.head_terms.clone() }
     fn ground(&self, terms: &BTreeSet<&'a String>) -> BTreeSet<&'a String> {
         self.head_terms.difference(terms).copied().collect()
@@ -67,15 +68,15 @@ pub struct JoinDisjunct<'a> {
     pub stages: Vec<StageBoxes<'a>>,
 }
 
-/// Pre-built apparatus for `Sum::join` for one specific approach pattern.
+/// Pre-built apparatus for `View::join` for one specific approach pattern.
 pub struct JoinApparatus<'a> {
     /// The pre-bound subset of sum's terms (in use-site space).
     pub pattern: BTreeSet<&'a String>,
     pub disjuncts: Vec<JoinDisjunct<'a>>,
 }
 
-/// ExecAtom for a virtual relation reference.
-pub struct Sum<'a> {
+/// ExecAtom for a view reference.
+pub struct View<'a> {
     pub use_site: &'a Atom,
     pub head_terms: Vec<&'a String>,
     /// Apparatus for `seed` (when sum is itself the seed). Always present.
@@ -85,14 +86,14 @@ pub struct Sum<'a> {
     pub join_apparatus: Option<JoinApparatus<'a>>,
 }
 
-impl<'a> Sum<'a> {
-    /// Constructs a `Sum` for a virtual reference at `body[load_atom]`.
+impl<'a> View<'a> {
+    /// Constructs a `View` for a view reference at `body[load_atom]`.
     ///
-    /// Always builds the seed apparatus from the virtual relation's defining rules.
-    /// If `parent_plan` is provided (sum used as a non-seed in a join), also
+    /// Always builds the seed apparatus from the view's defining rules.
+    /// If `parent_plan` is provided (view used as a non-seed in a join), also
     /// pre-plans a join apparatus for the inferred approach pattern. Per-disjunct
     /// composition contradictions (lit-vs-lit mismatch, substitution conflict) drop
-    /// that disjunct from the apparatus; `Sum::join` falls back to materialize-and-
+    /// that disjunct from the apparatus; `View::join` falls back to materialize-and-
     /// delegate when no `parent_plan` was available or the runtime pattern doesn't
     /// match the apparatus pattern.
     pub fn build(
@@ -104,11 +105,11 @@ impl<'a> Sum<'a> {
         plan_atom: usize,
         load_atom: usize,
         parent_plan: Option<&plan::Plan<usize, &'a String>>,
-    ) -> Sum<'a> {
-        let virt_name = body[load_atom].name.as_str();
+    ) -> View<'a> {
+        let view_name = body[load_atom].name.as_str();
         let defining: Vec<&'a Rule> = rules.iter()
             .map(|(r, _)| r)
-            .filter(|r| !r.head.is_empty() && r.head[0].name.as_str() == virt_name)
+            .filter(|r| !r.head.is_empty() && r.head[0].name.as_str() == view_name)
             .collect();
 
         let mut seed_disjuncts: Vec<SeedDisjunct<'a>> = Vec::with_capacity(defining.len());
@@ -128,11 +129,11 @@ impl<'a> Sum<'a> {
             build_join_apparatus(facts, comms, decls, rules, plan, body, plan_atom, load_atom, &defining, use_site)
         });
 
-        Sum { use_site, head_terms, seed_disjuncts, join_apparatus }
+        View { use_site, head_terms, seed_disjuncts, join_apparatus }
     }
 }
 
-/// Computes the approach pattern for a virtual atom in a given (seed, stage) context
+/// Computes the approach pattern for a view atom in a given (seed, stage) context
 /// and pre-builds a `JoinApparatus` for it.
 ///
 /// Returns `None` if the load atom isn't found in any plan stage. Per-disjunct,
@@ -204,7 +205,7 @@ fn build_join_apparatus<'a>(
         // Ensure index actions for each load action in the seeded plan.
         crate::rules::ensure_actions_for_loads(facts, comms, decls, &rule.body[..], &loads);
 
-        // Build per-stage atoms. Pass `pattern_info: None` so any nested virtuals
+        // Build per-stage atoms. Pass `pattern_info: None` so any nested views
         // in the disjunct's body fall back to materialize for now.
         let stages: Vec<StageBoxes<'a>> = plan.iter()
             .map(|(atoms, _, _)| atoms.iter()
@@ -229,7 +230,7 @@ fn build_join_apparatus<'a>(
     Some(JoinApparatus { pattern, disjuncts })
 }
 
-impl<'a> ExecAtom<&'a String> for Sum<'a> {
+impl<'a> ExecAtom<&'a String> for View<'a> {
     fn terms(&self) -> &[&'a String] { &self.head_terms[..] }
 
     fn seed(&self, comms: &mut Comms, recent: bool) -> Salad<&'a String> {
@@ -247,7 +248,7 @@ impl<'a> ExecAtom<&'a String> for Sum<'a> {
     }
 
     fn count(&self, _comms: &mut Comms, _salad: &mut Salad<&'a String>, _added: &BTreeSet<&'a String>, _index: u8) {
-        // No-op: sum atoms never propose values during the count protocol.
+        // No-op: view atoms never propose values during the count protocol.
     }
 
     fn join(&self, comms: &mut Comms, salad: &mut Salad<&'a String>, added: &BTreeSet<&'a String>, after: &[&'a String]) {
@@ -274,7 +275,7 @@ impl<'a> ExecAtom<&'a String> for Sum<'a> {
     }
 }
 
-impl<'a> Sum<'a> {
+impl<'a> View<'a> {
     /// Seeded-evaluation join: run each disjunct constrained by the input salad,
     /// project results back to use-site space, replace `salad` with the union.
     fn join_seeded(&self, ja: &JoinApparatus<'a>, comms: &mut Comms, salad: &mut Salad<&'a String>) {
@@ -369,7 +370,7 @@ fn apply_action_to_salad<'a>(
 ///   (return empty salad with use-site var schema).
 ///
 /// This is the no-substitution counterpart to `compose_disjunct`'s `output_action`,
-/// used by `Sum::seed` (which materializes the full virtual relation without seeded
+/// used by `View::seed` (which materializes the full view without seeded
 /// pushdown — see `seed_disjuncts`).
 fn project_through_head<'a>(
     mut salad: Salad<&'a String>,

@@ -17,7 +17,7 @@
 //! - [`plan_rule`] — semi-naive case. Given a body and a list of candidate *seed*
 //!   atoms (one per delta), produces one plan per seed. The seed atom's terms are
 //!   pre-bound when the stages start; the body-without-seed is sequenced.
-//! - [`plan_rule_seeded`] — virtual-atom case. The caller (e.g. a `Sum`) already holds
+//! - [`plan_rule_seeded`] — view-atom case. The caller (e.g. a `View`) already holds
 //!   bindings in a salad; it passes those terms as the seed and the full body is
 //!   sequenced.
 //!
@@ -51,7 +51,7 @@
 //!
 //! [`build_atoms_map`] dispatches each body atom to the appropriate [`PlanAtom`]
 //! implementation: data relations, antijoins (`anti::Anti`), logic atoms
-//! (`logic::resolve`), or virtual relations (`sum::SumPlan`). The planner only sees the
+//! (`logic::resolve`), or views (`view::ViewPlan`). The planner only sees the
 //! `terms()` / `ground()` interface — it doesn't care about the kind.
 
 
@@ -221,7 +221,7 @@ fn body_load<'a, A: Ord + Copy, T: Ord + Copy>(
 ///
 /// The order is of distinct terms in order of presentation, with `subst` applied
 /// (Var→Var renames are reflected; Var→Lit substitutions drop out, as do raw lits).
-/// Pass empty `Subst` for the non-virtual path.
+/// Pass empty `Subst` for the non-view path.
 fn head_order<'a>(head: &'a [Atom], subst: &Subst<'a>) -> Vec<&'a String> {
     let mut seen: BTreeSet<&'a String> = BTreeSet::default();
     head.iter()
@@ -382,15 +382,15 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Copy+std::fmt::Debug>(
 
 /// Wraps each body atom in the appropriate `PlanAtom` implementation, keyed by body index.
 ///
-/// Dispatches on atom kind: logic atoms (`logic::resolve`), virtual relations
-/// (`sum::SumPlan`), antijoins (`anti::Anti`), or plain data relations (a bare
+/// Dispatches on atom kind: logic atoms (`logic::resolve`), views
+/// (`view::ViewPlan`), antijoins (`anti::Anti`), or plain data relations (a bare
 /// `BTreeSet` of variable terms).
 ///
 /// `subst` lets the caller fold composition-derived constraints into the per-atom view
 /// without rewriting the atom: a body var mapped to `Term::Var(new_name)` is
 /// renamed; a body var mapped to `Term::Lit(_)` drops out of the var set (it's
 /// a known constant — the lit_filter is added by `base_actions_for`). Pass an empty
-/// `Subst` for the non-virtual planning path. Logic atoms participate in subst via
+/// `Subst` for the non-view planning path. Logic atoms participate in subst via
 /// `logic::resolve_with_subst`, so renamed/pushed vars also flow into their `bound`
 /// and `terms`.
 fn build_atoms_map<'a>(
@@ -409,8 +409,8 @@ fn build_atoms_map<'a>(
         }).collect();
         let boxed_atom: Box<dyn PlanAtom<&'a String>+'a> =
         if let Some(logic) = crate::rules::atoms::logic::resolve_with_subst(atom, subst) { Box::new(logic) }
-        else if decls.get(atom.name.as_str()).map_or(false, |d| d.virt) {
-            Box::new(crate::rules::atoms::sum::SumPlan { head_terms: terms })
+        else if decls.get(atom.name.as_str()).map_or(false, |d| d.view) {
+            Box::new(crate::rules::atoms::view::ViewPlan { head_terms: terms })
         }
         else if !atom.anti { Box::new(terms) }
         else { Box::new(crate::rules::atoms::anti::Anti(terms)) };
@@ -425,7 +425,7 @@ fn build_atoms_map<'a>(
 /// `Term::Lit(value)` becomes a positional literal (lit_filter); a body var
 /// mapped to `Term::Var(new_name)` is renamed (affecting var_filter detection
 /// for repeats and the projection's sort order). Pass empty `Subst` for the
-/// non-virtual path.
+/// non-view path.
 fn base_actions_for<'a>(body: &[Atom], subst: &Subst<'a>) -> BTreeMap<usize, Action<Vec<u8>>> {
     body.iter().enumerate().map(|(index, atom)| {
         let mut action = action_from_body_with_subst(atom, subst);

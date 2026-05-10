@@ -178,16 +178,16 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                 }
                 ".decl" => {
                     // `.decl name(_, _, ...) [flags]` declares a relation's arity and any
-                    // attribute flags (currently just `virtual`). If the name has already
+                    // attribute flags (currently just `view`). If the name has already
                     // been seen (explicitly or implicitly) the arity must match, and any
                     // explicit prior declaration cannot be reissued with conflicting flags.
                     let rest: String = words.collect::<Vec<_>>().join(" ");
                     match parse_decl(rest.as_str()) {
                         Some((name, arity, flags)) => {
-                            let virt = flags.iter().any(|f| f == "virtual");
+                            let view = flags.iter().any(|f| f == "view");
                             for flag in flags.iter() {
-                                if flag != "virtual" {
-                                    println!(".decl: unknown flag `{}` (known flags: virtual)", flag);
+                                if flag != "view" {
+                                    println!(".decl: unknown flag `{}` (known flags: view)", flag);
                                     return;
                                 }
                             }
@@ -198,7 +198,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                         name, prior.arity, arity
                                     );
                                 }
-                                Some(prior) if prior.explicit && (prior.virt != virt) => {
+                                Some(prior) if prior.explicit && (prior.view != view) => {
                                     println!(
                                         ".decl: name `{}` already declared; cannot reissue with conflicting flags.",
                                         name
@@ -207,7 +207,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                 _ => {
                                     state.decls.insert(
                                         name,
-                                        types::RelationDecl { arity, explicit: true, virt },
+                                        types::RelationDecl { arity, explicit: true, view },
                                     );
                                 }
                             }

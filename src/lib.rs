@@ -84,10 +84,10 @@ pub mod types {
         pub arity: usize,
         /// Whether this name was declared via `.decl` (vs. inferred from a rule reference).
         pub explicit: bool,
-        /// Whether the relation is virtual (computed on demand, not materialized).
+        /// Whether the relation is a view (computed on demand, not materialized).
         ///
-        /// Only meaningful when `explicit` is true; implicit declarations are never virtual.
-        pub virt: bool,
+        /// Only meaningful when `explicit` is true; implicit declarations are never views.
+        pub view: bool,
     }
 
     #[derive(Default)]
@@ -112,12 +112,12 @@ pub mod types {
                     .filter_map(|&i| names.get(i).map(|s| s.as_str()))
                     .collect();
                 for index in 0 .. self.rules.len() {
-                    // Skip rules whose head names a virtual relation; these are
-                    // defining rules, evaluated on demand via SumAtom rather than fired.
-                    let head_is_virtual = self.rules[index].0.head.iter().any(|atom|
-                        self.decls.get(&atom.name).map_or(false, |d| d.virt)
+                    // Skip rules whose head names a view; these are defining rules,
+                    // evaluated on demand via the View atom rather than fired.
+                    let head_is_view = self.rules[index].0.head.iter().any(|atom|
+                        self.decls.get(&atom.name).map_or(false, |d| d.view)
                     );
-                    if head_is_virtual { continue; }
+                    if head_is_view { continue; }
                     let timer = std::time::Instant::now();
                     self.implement(&self.rules[index].0.clone(), false, Some(&active_names));
                     self.rules[index].1.push(timer.elapsed());
@@ -167,9 +167,9 @@ pub mod types {
                             ));
                             reported.insert(name.to_string());
                         }
-                        // Note: virtual references are now allowed in both head (defining
-                        // rule, stored but not auto-fired) and body (resolved via SumAtom
-                        // during planning).
+                        // Note: view references are now allowed in both head (defining
+                        // rule, stored but not auto-fired) and body (resolved via the View
+                        // atom during planning).
                     }
                     None => {
                         match to_insert.get(name) {
@@ -192,7 +192,7 @@ pub mod types {
                 return;
             }
             for (name, arity) in to_insert {
-                self.decls.insert(name, RelationDecl { arity, explicit: false, virt: false });
+                self.decls.insert(name, RelationDecl { arity, explicit: false, view: false });
             }
             if rule.body.is_empty() {
                 for atom in rule.head.iter() {
@@ -215,13 +215,13 @@ pub mod types {
                 }
             }
             else {
-                // If any head atom names a virtual relation, this is a defining rule:
-                // store it (so it can be looked up during sum-atom construction) but skip
-                // the immediate `implement` call (we don't materialize virtual relations).
-                let head_is_virtual = rule.head.iter().any(|atom|
-                    self.decls.get(&atom.name).map_or(false, |d| d.virt)
+                // If any head atom names a view, this is a defining rule:
+                // store it (so it can be looked up during view-atom construction) but skip
+                // the immediate `implement` call (we don't materialize views).
+                let head_is_view = rule.head.iter().any(|atom|
+                    self.decls.get(&atom.name).map_or(false, |d| d.view)
                 );
-                if head_is_virtual {
+                if head_is_view {
                     self.rules.push((rule, vec![std::time::Duration::ZERO]));
                 } else {
                     let timer = std::time::Instant::now();

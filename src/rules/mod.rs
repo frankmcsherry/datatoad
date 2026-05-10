@@ -26,13 +26,13 @@ pub use exec::ExecAtom;
 
 /// Constructs a boxed `ExecAtom` for an atom in a rule body.
 ///
-/// Dispatches between logic, virtual (sum), antijoin, and data variants based on the
+/// Dispatches between logic, view, antijoin, and data variants based on the
 /// atom's name and the declarations. For data atoms, threads the appropriate
-/// stable/recent split per the semi-naive convention. For virtual atoms, delegates
-/// to `Sum::build`.
+/// stable/recent split per the semi-naive convention. For view atoms, delegates
+/// to `View::build`.
 ///
 /// `parent_plan` is the surrounding rule's plan for this seed, threaded through so
-/// virtual atoms can compute their approach pattern from where they appear. `None`
+/// view atoms can compute their approach pattern from where they appear. `None`
 /// means the atom is itself the seed (no surrounding plan to inspect).
 pub(crate) fn build_atom<'a>(
     facts: &mut Relations,
@@ -49,8 +49,8 @@ pub(crate) fn build_atom<'a>(
     use crate::rules::atoms;
     if let Some(logic) = atoms::logic::resolve_with_subst(&body[load_atom], subst) {
         Box::new(logic)
-    } else if decls.get(body[load_atom].name.as_str()).map_or(false, |d| d.virt) {
-        Box::new(atoms::sum::Sum::build(
+    } else if decls.get(body[load_atom].name.as_str()).map_or(false, |d| d.view) {
+        Box::new(atoms::view::View::build(
             facts, comms, decls, rules, body, plan_atom, load_atom, parent_plan,
         ))
     } else {
@@ -77,10 +77,10 @@ type SeedApparatus<'a> = Vec<SeedWork<'a>>;
 
 /// Plans a rule body and pre-builds the boxed atoms for every (seed, stage).
 ///
-/// Lives as a free function (not a method) because virtual references recursively
+/// Lives as a free function (not a method) because view references recursively
 /// invoke this with the same field borrows. Callers split a `&mut State` into its
 /// fields and pass them through. `rules` is the State's rule list, used to look up
-/// virtual relations' defining rules during sum-atom construction.
+/// views' defining rules during view-atom construction.
 pub fn plan_and_build_with_fields<'a>(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
@@ -201,7 +201,7 @@ fn emit_head_facts<'a>(
     }
 }
 
-/// Ensures index actions exist for every non-logic, non-virtual atom referenced by the
+/// Ensures index actions exist for every non-logic, non-view atom referenced by the
 /// loads. This prepares the relations to serve queries in the orders the plan needs.
 pub fn ensure_actions_for_loads<'a>(
     facts: &mut Relations,
@@ -213,8 +213,8 @@ pub fn ensure_actions_for_loads<'a>(
     for (load_atom, (action, _)) in loads.iter() {
         let name = body[*load_atom].name.as_str();
         let is_logic = crate::rules::atoms::logic::resolve(&body[*load_atom]).is_some();
-        let is_virtual = decls.get(name).map_or(false, |d| d.virt);
-        if !is_logic && !is_virtual {
+        let is_view = decls.get(name).map_or(false, |d| d.view);
+        if !is_logic && !is_view {
             facts.ensure_action(comms, name, action);
         }
     }
