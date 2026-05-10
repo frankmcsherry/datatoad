@@ -171,14 +171,12 @@ impl crate::types::State {
 
         let seed_execs = plan_and_build_with_fields(facts, comms, decls, rules, body, head, stable, active_relations);
 
-        let potato = ".potato".to_string();
-
         // Per seed: seed → wco_join stages → emit head facts.
         // Seed atoms are pre-built, so each seed sees the round's input state
         // rather than facts that earlier seeds may have committed.
         for SeedExec { seed, stages } in seed_execs {
             let mut salad = seed.seed(comms, !stable);
-            run_wco_stages(comms, &mut salad, &stages, potato.clone());
+            run_wco_stages(comms, &mut salad, &stages);
             emit_head_facts(facts, comms, head, salad);
         }
     }
@@ -253,9 +251,9 @@ pub fn run_wco_stages(
     comms: &mut crate::comms::Comms,
     salad: &mut exec::Salad<String>,
     stages: &[StageExec],
-    potato: String,
 ) {
     let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::default();
+    let potato = ".potato".to_string();
     for (i, stage) in stages.iter().enumerate() {
         let stage_terms = if i == 0 { &empty } else { &stage.terms };
         exec::wco_join(comms, salad, stage_terms, &stage.atoms, potato.clone(), &stage.output_order[..]);

@@ -6,7 +6,6 @@
 //! fields are documented on the struct.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::comms::Comms;
@@ -15,16 +14,6 @@ use crate::rules::exec::Salad;
 use crate::rules::plan::{self, PlanAtom};
 use crate::rules::{ExecAtom, SeedExec, StageExec};
 use crate::types::{Action, Atom, RelationDecl, Rule, Term};
-
-/// A `&'static String` placeholder used as the count-metadata column name in `wco_join`.
-///
-/// Lives 'static so it can coerce to any `String`. `wco_join` runs on salads
-/// whose term type is `String` for an `'a` we don't own; a local `String`
-/// declared inside `View::seed`/`View::join_seeded` wouldn't live long enough.
-fn potato() -> &'static String {
-    static POTATO: OnceLock<String> = OnceLock::new();
-    POTATO.get_or_init(|| ".potato".to_string())
-}
 
 /// PlanAtom proxy for view references — no apparatus, just term info.
 pub struct ViewPlan {
@@ -256,7 +245,7 @@ impl ExecAtom<String> for View {
         let mut result = Salad::new(FactLSM::default(), self.head_terms.clone());
         for disjunct in &self.seed_disjuncts {
             let mut salad = disjunct.seed.seed(comms, recent);
-            crate::rules::run_wco_stages(comms, &mut salad, &disjunct.stages, potato().clone());
+            crate::rules::run_wco_stages(comms, &mut salad, &disjunct.stages);
             let projected = project_through_head(salad, &disjunct.head, &self.use_site);
             result.facts.extend(projected.facts);
         }
@@ -312,9 +301,7 @@ impl View {
                 &canonical, &disjunct.input_action, disjunct.seed_terms_for_action(),
             );
             if disjunct_salad.facts.is_empty() { continue; }
-            crate::rules::run_wco_stages(
-                comms, &mut disjunct_salad, &disjunct.stages, potato().clone(),
-            );
+            crate::rules::run_wco_stages(comms, &mut disjunct_salad, &disjunct.stages);
             let projected = apply_action_to_salad(
                 &disjunct_salad, &disjunct.output_action, self.head_terms.clone(),
             );
