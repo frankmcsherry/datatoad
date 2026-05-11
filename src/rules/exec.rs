@@ -251,11 +251,13 @@ fn wco_join_inner<T: Ord + Clone + std::fmt::Debug>(
     //  3.  For each (shard, atom) pair, join to propose values then semijoin with other atoms.
     for (shard_index, (mut shard, other)) in shards.into_iter().zip(atoms.iter()).enumerate() {
 
+        // TODO: As we move through various atoms we could prune columns that are no longer needed.
+
         // Look forward to the terms of the next atom we'll semijoin with.
         let next_terms = atoms[if shard_index == 0 { 1 } else { 0 }].terms();
         let mut after: Vec<T> = Vec::default();
-        after.extend(next_terms.iter().filter(|t| salad.terms.contains(t) || terms.contains(t)).cloned());
-        after.extend(salad.terms.iter().filter(|t| !next_terms.contains(t)).cloned());
+        after.extend(next_terms.iter().filter(|t| shard.terms.contains(t) || terms.contains(t)).cloned());
+        after.extend(shard.terms.iter().filter(|t| !next_terms.contains(t)).cloned());
         other.join(comms, &mut shard, terms, &after);
 
         // semijoin with other atoms.
