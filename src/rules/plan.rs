@@ -373,7 +373,7 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
 /// Dispatches on atom kind: logic atoms (`logic::resolve`), views
 /// (`view::ViewPlan`), antijoins (`anti::Anti`), or plain data relations (a bare
 /// `BTreeSet` of variable terms).
-fn build_atoms_map(
+pub fn build_atoms_map(
     body: &[Atom],
     decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
 ) -> BTreeMap<usize, Box<dyn PlanAtom<String>>> {

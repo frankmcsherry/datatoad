@@ -111,11 +111,21 @@ pub fn plan_and_build_with_fields(
     active_relations: Option<&std::collections::BTreeSet<&str>>,
 ) -> Vec<SeedExec> {
     // Body atoms that should take a turn as the source of novelty this round.
-    // In `stable` mode only the first body atom drives; in incremental mode every
-    // atom takes a turn, optionally restricted to those whose relation has recent
-    // facts on some worker.
+    // In `stable` mode only the first *seedable* body atom drives — anti/logic
+    // atoms can't ground their own terms and so can't act as seeds. Picking
+    // body[0] blindly would drop the rule's stable evaluation entirely when
+    // it leads with `!Rel(...)` or `:noteq(...)`. In incremental mode every
+    // atom takes a turn, optionally restricted to those whose relation has
+    // recent facts on some worker.
     let delta_atoms: Vec<usize> = if stable {
-        vec![0]
+        let atoms_map = plan::build_atoms_map(body, decls);
+        (0..body.len())
+            .find(|i| {
+                let a = &atoms_map[i];
+                a.terms() == a.ground(&Default::default())
+            })
+            .into_iter()
+            .collect()
     } else if let Some(active) = active_relations {
         (0..body.len()).filter(|i| active.contains(body[*i].name.as_str())).collect()
     } else {

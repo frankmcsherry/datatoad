@@ -107,10 +107,14 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
         let (my_facts, my_terms, _) = self;
         let prefix = my_terms.iter().take_while(|t| salad.terms.contains(t)).count();
         salad.align_to(comms, my_terms[..prefix].iter().cloned());
-        if prefix == 0 && comms.peers() > 1 && terms.is_empty() {
+        if prefix == 0 && terms.is_empty() {
             // Zero-prefix semijoin: retain salad iff atom is globally non-empty.
+            // `retain_inner` with empty prefix slices underflows (`other_arity - 1`
+            // when `other_arity == 0`), so we must short-circuit even in
+            // single-worker runs. Multi-worker case uses an all-reduce.
             let any_local: u64 = (!my_facts.is_empty()) as u64;
-            if comms.all_reduce_sum(any_local) == 0 { salad.facts = Default::default(); }
+            let any_global = if comms.peers() > 1 { comms.all_reduce_sum(any_local) } else { any_local };
+            if any_global == 0 { salad.facts = Default::default(); }
             return;
         }
         // Remaining zero-prefix multi-worker case is the cross-product join
