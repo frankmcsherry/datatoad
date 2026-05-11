@@ -92,7 +92,7 @@ impl View {
         facts: &mut Relations,
         comms: &mut Comms,
         decls: &std::collections::BTreeMap<String, RelationDecl>,
-        rules: &[(Rule, Vec<Duration>)],
+        rules: &[(Rule, Vec<Vec<(usize, Duration)>>)],
         body: &[Atom],
         plan_atom: usize,
         load_atom: usize,
@@ -114,7 +114,7 @@ impl View {
             // Stable mode (delta_atoms = [0]) yields at most one entry; if empty
             // (the body's first atom can't act as a seed, e.g. a logic atom), the
             // disjunct contributes nothing and we skip it.
-            let SeedExec { seed, stages } = match seed_execs.into_iter().next() {
+            let SeedExec { seed, stages, .. } = match seed_execs.into_iter().next() {
                 Some(s) => s,
                 None => continue,
             };
@@ -145,7 +145,7 @@ fn build_join_apparatus(
     facts: &mut Relations,
     comms: &mut Comms,
     decls: &std::collections::BTreeMap<String, RelationDecl>,
-    rules: &[(Rule, Vec<Duration>)],
+    rules: &[(Rule, Vec<Vec<(usize, Duration)>>)],
     plan: &plan::Plan<usize, String>,
     body: &[Atom],
     plan_atom: usize,

@@ -201,8 +201,28 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     }
                 }
                 ".prof" => {
-                    for (rule, durs) in state.rules.iter() {
-                        println!("{:>10}ms {}", durs.iter().sum::<std::time::Duration>().as_millis(), rule);
+                    // For each rule, total = sum across all calls and seeds.
+                    // Per-seed = sum across calls grouped by body-atom index (the
+                    // seed_idx carried alongside each duration).
+                    use std::collections::BTreeMap;
+                    for (rule, calls) in state.rules.iter() {
+                        let total: std::time::Duration =
+                            calls.iter().flat_map(|c| c.iter()).map(|(_, d)| *d).sum();
+                        println!("{:>10}ms {}", total.as_millis(), rule);
+                        let mut per_seed: BTreeMap<usize, std::time::Duration> = BTreeMap::new();
+                        for call in calls.iter() {
+                            for (idx, d) in call.iter() {
+                                *per_seed.entry(*idx).or_default() += *d;
+                            }
+                        }
+                        if per_seed.len() > 1 {
+                            for (idx, d) in per_seed.iter() {
+                                let atom_descr = rule.body.get(*idx)
+                                    .map(|a| format!("{}", a))
+                                    .unwrap_or_else(|| format!("#{}", idx));
+                                println!("{:>10}ms   seed #{} {}", d.as_millis(), idx, atom_descr);
+                            }
+                        }
                     }
                 }
                 ".quit" => { std::process::exit(0); }

@@ -92,7 +92,11 @@ pub mod types {
 
     #[derive(Default)]
     pub struct State {
-        pub rules: Vec<(Rule, Vec<std::time::Duration>)>,
+        /// For each rule, a per-`implement`-call vector of `(seed_idx, duration)`
+        /// pairs. The seed index identifies which body atom drove that
+        /// invocation, allowing per-seed aggregation across calls even when
+        /// `active_relations` makes the seed set vary round-to-round.
+        pub rules: Vec<(Rule, Vec<Vec<(usize, std::time::Duration)>>)>,
         pub facts: facts::Relations,
         pub comms: super::comms::Comms,
         /// Per-relation declaration metadata, keyed by name.
@@ -118,9 +122,8 @@ pub mod types {
                         self.decls.get(&atom.name).map_or(false, |d| d.view)
                     );
                     if head_is_view { continue; }
-                    let timer = std::time::Instant::now();
-                    self.implement(&self.rules[index].0.clone(), false, Some(&active_names));
-                    self.rules[index].1.push(timer.elapsed());
+                    let per_seed = self.implement(&self.rules[index].0.clone(), false, Some(&active_names));
+                    if !per_seed.is_empty() { self.rules[index].1.push(per_seed); }
                 }
                 self.advance();
             }
@@ -225,11 +228,10 @@ pub mod types {
                     self.decls.get(&atom.name).map_or(false, |d| d.view)
                 );
                 if head_is_view {
-                    self.rules.push((rule, vec![std::time::Duration::ZERO]));
+                    self.rules.push((rule, vec![]));
                 } else {
-                    let timer = std::time::Instant::now();
-                    self.implement(&rule, true, None);
-                    self.rules.push((rule, vec![timer.elapsed()]));
+                    let per_seed = self.implement(&rule, true, None);
+                    self.rules.push((rule, vec![per_seed]));
                 }
             }
         }
