@@ -178,6 +178,15 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                 }
                 ".quit" => { std::process::exit(0); }
                 ".save" => { println!("unimplemented: {:?}", word); }
+                ".sync" => {
+                    // Cluster-wide barrier: broadcast an empty FactLSM so every
+                    // peer waits to receive from every other peer. No-op in
+                    // single-process mode (peers() == 1). Useful at the top of
+                    // a script before the first `.time` measurement, to absorb
+                    // ssh/startup skew across processes.
+                    let mut empty = datatoad::facts::FactLSM::default();
+                    state.comms.broadcast(&mut empty);
+                }
                 ".time" => {
                     println!("time:\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());
                     *timer = std::time::Instant::now();
