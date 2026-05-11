@@ -171,6 +171,35 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     else { println!(".load command requires arguments: <name> <patt> <file>"); }
                 }
                 ".note" => { }
+                ".plan" => {
+                    // Parse the remainder of the line as a Datalog rule and print
+                    // the planner's stage-by-stage breakdown for each seed atom.
+                    // Does not execute the rule or mutate state.
+                    let rest = text.trim_start().strip_prefix(".plan").unwrap_or("").trim_start();
+                    match parse::datalog(rest) {
+                        Some(rules) if rules.len() == 1 => {
+                            let rule = &rules[0];
+                            let head = &rule.head[..];
+                            let body = &rule.body[..];
+                            let seed_atoms: Vec<usize> = (0..body.len()).collect();
+                            let (plans, _loads) = datatoad::rules::plan::plan_rule(head, body, &seed_atoms, &state.decls);
+                            for (seed_idx, plan) in plans.iter() {
+                                println!("plan seed #{} {}:", seed_idx, body[*seed_idx]);
+                                for (i, (atoms, terms, target)) in plan.iter().enumerate() {
+                                    let atom_descrs: Vec<String> = atoms.iter()
+                                        .map(|a| format!("#{} {}", a, body[*a]))
+                                        .collect();
+                                    let intro: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
+                                    let tgt: Vec<&str> = target.iter().map(|s| s.as_str()).collect();
+                                    println!("  stage {}: atoms=[{}] introduce={{{}}} target=[{}]",
+                                             i, atom_descrs.join(", "), intro.join(", "), tgt.join(", "));
+                                }
+                            }
+                        }
+                        Some(rules) => println!(".plan expected exactly one rule, got {}", rules.len()),
+                        None => println!(".plan: could not parse rule from {:?}", rest),
+                    }
+                }
                 ".prof" => {
                     for (rule, durs) in state.rules.iter() {
                         println!("{:>10}ms {}", durs.iter().sum::<std::time::Duration>().as_millis(), rule);
