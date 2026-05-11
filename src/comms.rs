@@ -122,6 +122,8 @@ impl Comms {
 
     /// Exchanges facts among all workers.
     pub fn exchange(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
+        // Single-worker: nothing to shuffle, facts already local.
+        if self.peers() == 1 { return; }
         let mut conduit = self.conduit();
         conduit.extend(facts);
         *facts = conduit.finish();
