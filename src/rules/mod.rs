@@ -38,7 +38,7 @@ pub(crate) fn build_atom(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
     decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
-    rules: &[(Rule, Vec<std::time::Duration>)],
+    rules: &[(Rule, Vec<Vec<(usize, std::time::Duration)>>)],
     body: &[Atom],
     plan_atom: usize,
     load_atom: usize,
@@ -82,6 +82,9 @@ pub struct StageExec {
 /// Pre-built apparatus for one seed of a rule: the seed atom (whose `.seed()`
 /// produces the initial salad) followed by the per-stage executables.
 pub struct SeedExec {
+    /// Body-atom index this seed corresponds to. Carried for diagnostics
+    /// (e.g. `.prof` per-seed timing aggregation across calls).
+    pub seed_idx: usize,
     pub seed: Box<dyn exec::ExecAtom<String>>,
     pub stages: Vec<StageExec>,
 }
@@ -101,7 +104,7 @@ pub fn plan_and_build_with_fields(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
     decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
-    rules: &[(Rule, Vec<std::time::Duration>)],
+    rules: &[(Rule, Vec<Vec<(usize, std::time::Duration)>>)],
     body: &[Atom],
     head: &[Atom],
     stable: bool,
@@ -145,7 +148,7 @@ pub fn plan_and_build_with_fields(
                     }
                 })
                 .collect();
-            SeedExec { seed, stages }
+            SeedExec { seed_idx: *plan_atom, seed, stages }
         })
         .collect()
 }
@@ -156,7 +159,7 @@ impl crate::types::State {
     ///
     /// The `stable` argument indicates whether we should perform a join with all facts (true),
     /// or only a join that involves novel facts (false).
-    pub fn implement(&mut self, rule: &Rule, stable: bool, active_relations: Option<&std::collections::BTreeSet<&str>>) {
+    pub fn implement(&mut self, rule: &Rule, stable: bool, active_relations: Option<&std::collections::BTreeSet<&str>>) -> Vec<(usize, std::time::Duration)> {
 
         let head = &rule.head[..];
         let body = &rule.body[..];
@@ -174,11 +177,15 @@ impl crate::types::State {
         // Per seed: seed → wco_join stages → emit head facts.
         // Seed atoms are pre-built, so each seed sees the round's input state
         // rather than facts that earlier seeds may have committed.
-        for SeedExec { seed, stages } in seed_execs {
+        let mut per_seed = Vec::with_capacity(seed_execs.len());
+        for SeedExec { seed_idx, seed, stages } in seed_execs {
+            let t = std::time::Instant::now();
             let mut salad = seed.seed(comms, !stable);
             run_wco_stages(comms, &mut salad, &stages);
             emit_head_facts(facts, comms, head, salad);
+            per_seed.push((seed_idx, t.elapsed()));
         }
+        per_seed
     }
 }
 

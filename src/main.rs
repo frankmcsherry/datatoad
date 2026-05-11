@@ -171,13 +171,120 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     else { println!(".load command requires arguments: <name> <patt> <file>"); }
                 }
                 ".note" => { }
-                ".prof" => {
-                    for (rule, durs) in state.rules.iter() {
-                        println!("{:>10}ms {}", durs.iter().sum::<std::time::Duration>().as_millis(), rule);
+                ".plan" => {
+                    // Parse the remainder of the line as a Datalog rule and print
+                    // the planner's stage-by-stage breakdown for each seed atom.
+                    // Does not execute the rule or mutate state.
+                    let rest = text.trim_start().strip_prefix(".plan").unwrap_or("").trim_start();
+                    match parse::datalog(rest) {
+                        Some(rules) if rules.len() == 1 => {
+                            let rule = &rules[0];
+                            let head = &rule.head[..];
+                            let body = &rule.body[..];
+                            let seed_atoms: Vec<usize> = (0..body.len()).collect();
+                            let (plans, _loads) = datatoad::rules::plan::plan_rule(head, body, &seed_atoms, &state.decls);
+                            for (seed_idx, plan) in plans.iter() {
+                                println!("plan seed #{} {}:", seed_idx, body[*seed_idx]);
+                                for (i, (atoms, terms, target)) in plan.iter().enumerate() {
+                                    let atom_descrs: Vec<String> = atoms.iter()
+                                        .map(|a| format!("#{} {}", a, body[*a]))
+                                        .collect();
+                                    let intro: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
+                                    let tgt: Vec<&str> = target.iter().map(|s| s.as_str()).collect();
+                                    println!("  stage {}: atoms=[{}] introduce={{{}}} target=[{}]",
+                                             i, atom_descrs.join(", "), intro.join(", "), tgt.join(", "));
+                                }
+                            }
+                        }
+                        Some(rules) => println!(".plan expected exactly one rule, got {}", rules.len()),
+                        None => println!(".plan: could not parse rule from {:?}", rest),
                     }
                 }
-                ".quit" => { std::process::exit(0); }
+                ".prof" => {
+                    // For each rule, total = sum across all calls and seeds.
+                    // Per-seed = sum across calls grouped by body-atom index (the
+                    // seed_idx carried alongside each duration).
+                    use std::collections::BTreeMap;
+                    for (rule, calls) in state.rules.iter() {
+                        let total: std::time::Duration =
+                            calls.iter().flat_map(|c| c.iter()).map(|(_, d)| *d).sum();
+                        println!("{:>10}ms {}", total.as_millis(), rule);
+                        let mut per_seed: BTreeMap<usize, std::time::Duration> = BTreeMap::new();
+                        for call in calls.iter() {
+                            for (idx, d) in call.iter() {
+                                *per_seed.entry(*idx).or_default() += *d;
+                            }
+                        }
+                        if per_seed.len() > 1 {
+                            for (idx, d) in per_seed.iter() {
+                                let atom_descr = rule.body.get(*idx)
+                                    .map(|a| format!("{}", a))
+                                    .unwrap_or_else(|| format!("#{}", idx));
+                                println!("{:>10}ms   seed #{} {}", d.as_millis(), idx, atom_descr);
+                            }
+                        }
+                    }
+                }
+                ".quit" => {
+                    let code = if state.test_failures > 0 {
+                        if state.comms.index() == 0 {
+                            eprintln!("{} .test assertion(s) failed", state.test_failures);
+                        }
+                        1
+                    } else { 0 };
+                    std::process::exit(code);
+                }
+                ".test" => {
+                    // `.test <rel> <count>` — assert that relation's globally-summed
+                    // row count equals `<count>`. Failures are tallied on `state` and
+                    // surfaced at `.quit` (nonzero exit). Only worker 0 prints.
+                    let args: Vec<&str> = words.collect();
+                    if args.len() != 2 {
+                        if state.comms.index() == 0 {
+                            println!(".test command requires arguments: <relation> <expected_count>");
+                        }
+                        state.test_failures += 1;
+                    } else {
+                        let name = args[0];
+                        let expected: u64 = match args[1].parse() {
+                            Ok(n) => n,
+                            Err(_) => {
+                                if state.comms.index() == 0 {
+                                    println!(".test: expected_count must be an integer, got {:?}", args[1]);
+                                }
+                                state.test_failures += 1;
+                                return;
+                            }
+                        };
+                        let local = state.facts.get(name).map(|f| f.len() as u64).unwrap_or(0);
+                        let actual = state.comms.all_reduce_sum(local);
+                        if state.facts.get(name).is_none() {
+                            if state.comms.index() == 0 {
+                                println!(".test FAIL {}: relation does not exist", name);
+                            }
+                            state.test_failures += 1;
+                        } else if actual == expected {
+                            if state.comms.index() == 0 {
+                                println!(".test ok   {}: {}", name, actual);
+                            }
+                        } else {
+                            if state.comms.index() == 0 {
+                                println!(".test FAIL {}: expected {}, got {}", name, expected, actual);
+                            }
+                            state.test_failures += 1;
+                        }
+                    }
+                }
                 ".save" => { println!("unimplemented: {:?}", word); }
+                ".sync" => {
+                    // Cluster-wide barrier: broadcast an empty FactLSM so every
+                    // peer waits to receive from every other peer. No-op in
+                    // single-process mode (peers() == 1). Useful at the top of
+                    // a script before the first `.time` measurement, to absorb
+                    // ssh/startup skew across processes.
+                    let mut empty = datatoad::facts::FactLSM::default();
+                    state.comms.broadcast(&mut empty);
+                }
                 ".time" => {
                     println!("time:\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());
                     *timer = std::time::Instant::now();

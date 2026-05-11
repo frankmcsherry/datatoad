@@ -319,6 +319,10 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
                     .collect();
             }
             terms.insert(next_term.clone());
+
+            // Invariant: we must include all atoms whose terms are fully covered.
+            next_atoms.extend(terms_to_atoms[&next_term].iter().filter(|a| body[a].terms().is_subset(&terms)));
+
             plan.push((next_atoms, [next_term].into_iter().collect(), Vec::new()));
         }
         else {
