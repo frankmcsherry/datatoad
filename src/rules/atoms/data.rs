@@ -35,8 +35,6 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
 
         let prefix = other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
         salad.align_to(comms, other_terms[..prefix].iter().cloned());
-        // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
-        assert!(prefix > 0 || comms.peers() == 1);
         if let Some(mut delta) = salad.facts.flatten() {
             let length = if prefix > 0 { delta.layer(prefix-1).list.values.len() } else { 1 };
             let mut counts = vec![0; length];
@@ -48,6 +46,9 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
                 let mut ranges = other_idxs.iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
                 for layer in prefix .. (prefix + terms.len()) { advance_bounds::<Terms>(other_part.layer(layer).borrow(), &mut ranges); }
                 for (delta_idx, range) in delta_idxs.iter().zip(ranges.iter()) { counts[*delta_idx] += range.1-range.0; }
+            }
+            if prefix == 0 && comms.peers() > 1 {
+                counts[0] = comms.all_reduce_sum(counts[0] as u64) as usize;
             }
 
             // We now project `counts` forward through `delta` to the `potato` column.
@@ -106,7 +107,15 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
         let (my_facts, my_terms, _) = self;
         let prefix = my_terms.iter().take_while(|t| salad.terms.contains(t)).count();
         salad.align_to(comms, my_terms[..prefix].iter().cloned());
-        // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
+        if prefix == 0 && comms.peers() > 1 && terms.is_empty() {
+            // Zero-prefix semijoin: retain salad iff atom is globally non-empty.
+            let any_local: u64 = (!my_facts.is_empty()) as u64;
+            if comms.all_reduce_sum(any_local) == 0 { salad.facts = Default::default(); }
+            return;
+        }
+        // Remaining zero-prefix multi-worker case is the cross-product join
+        // (`!terms.is_empty()`), which would need a broadcast or gather to be
+        // correct. Currently unreachable from the planner.
         assert!(prefix > 0 || comms.peers() == 1);
         if !terms.is_empty() {
             // join with atom: permute `salad.terms` into the right order, join adding the new column, permute into target order (`delta_terms_new`).

@@ -297,13 +297,21 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
             .next());
 
         if let Some(next_term) = next_term {
-            let mut next_atoms: BTreeSet<A> = terms_to_atoms[&next_term].iter()
-                .filter(|a| body[a].terms().contains(&next_term) && terms.iter().any(|t| body[a].terms().contains(t)))
-                .cloned()
+            // Atoms that ground `next_term` AND share at least one already-bound term:
+            // these are real (non-cross-product) participants.
+            let constrained: BTreeSet<A> = body.iter()
+                .filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term)
+                    && terms.iter().any(|t| boxed.terms().contains(t)))
+                .map(|(a, _)| *a)
                 .collect();
-            next_atoms.extend(body.iter()
-                .filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term))
-                .map(|(a, _)| *a));
+            // Fall back to any atom grounding `next_term` (including cross-product
+            // candidates) only when no constrained atoms exist for this term.
+            let mut next_atoms = constrained;
+            if next_atoms.is_empty() {
+                next_atoms.extend(body.iter()
+                    .filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term))
+                    .map(|(a, _)| *a));
+            }
             if next_atoms.is_empty() {
                 next_atoms = terms_to_atoms[&next_term].iter()
                     .filter(|a| body[a].terms().contains(&next_term))
