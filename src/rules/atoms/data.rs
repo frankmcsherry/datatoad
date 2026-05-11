@@ -35,20 +35,35 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
 
         let prefix = other_terms.iter().take_while(|t| salad.terms.contains(t)).count();
         salad.align_to(comms, other_terms[..prefix].iter().cloned());
+
+        // When `prefix == 0` and we have peers, the count must be summed across workers.
+        // This work needs to be done here, rather than conditionally for non-empty salad,
+        // to avoid workers hanging their peers by failing to participate.
+        let global_zero_count: Option<usize> = if prefix == 0 && comms.peers() > 1 {
+            let mut local: usize = 0;
+            for other_part in other_facts.iter() {
+                let mut ranges = vec![(0usize, 1usize)];
+                for layer in 0 .. terms.len() { advance_bounds::<Terms>(other_part.layer(layer).borrow(), &mut ranges); }
+                local += ranges[0].1 - ranges[0].0;
+            }
+            Some(comms.all_reduce_sum(local as u64) as usize)
+        } else { None };
+
         if let Some(mut delta) = salad.facts.flatten() {
             let length = if prefix > 0 { delta.layer(prefix-1).list.values.len() } else { 1 };
             let mut counts = vec![0; length];
-            for other_part in other_facts.iter() {
-                let mut delta_idxs = vec![0];
-                let mut other_idxs = vec![0];
-                for layer in 0 .. prefix { (delta_idxs, other_idxs) = intersection::<Terms>(delta.layer(layer).borrow(), other_part.layer(layer).borrow(), &delta_idxs, &other_idxs); }
-                // The count derives from projecting `other_idxs` forward through `terms`.
-                let mut ranges = other_idxs.iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
-                for layer in prefix .. (prefix + terms.len()) { advance_bounds::<Terms>(other_part.layer(layer).borrow(), &mut ranges); }
-                for (delta_idx, range) in delta_idxs.iter().zip(ranges.iter()) { counts[*delta_idx] += range.1-range.0; }
-            }
-            if prefix == 0 && comms.peers() > 1 {
-                counts[0] = comms.all_reduce_sum(counts[0] as u64) as usize;
+            // We may have a count override; if so, just apply it.
+            if let Some(g) = global_zero_count { counts[0] = g; }
+            else {
+                for other_part in other_facts.iter() {
+                    let mut delta_idxs = vec![0];
+                    let mut other_idxs = vec![0];
+                    for layer in 0 .. prefix { (delta_idxs, other_idxs) = intersection::<Terms>(delta.layer(layer).borrow(), other_part.layer(layer).borrow(), &delta_idxs, &other_idxs); }
+                    // The count derives from projecting `other_idxs` forward through `terms`.
+                    let mut ranges = other_idxs.iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
+                    for layer in prefix .. (prefix + terms.len()) { advance_bounds::<Terms>(other_part.layer(layer).borrow(), &mut ranges); }
+                    for (delta_idx, range) in delta_idxs.iter().zip(ranges.iter()) { counts[*delta_idx] += range.1-range.0; }
+                }
             }
 
             // We now project `counts` forward through `delta` to the `potato` column.
