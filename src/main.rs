@@ -225,7 +225,56 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                         }
                     }
                 }
-                ".quit" => { std::process::exit(0); }
+                ".quit" => {
+                    let code = if state.test_failures > 0 {
+                        if state.comms.index() == 0 {
+                            eprintln!("{} .test assertion(s) failed", state.test_failures);
+                        }
+                        1
+                    } else { 0 };
+                    std::process::exit(code);
+                }
+                ".test" => {
+                    // `.test <rel> <count>` — assert that relation's globally-summed
+                    // row count equals `<count>`. Failures are tallied on `state` and
+                    // surfaced at `.quit` (nonzero exit). Only worker 0 prints.
+                    let args: Vec<&str> = words.collect();
+                    if args.len() != 2 {
+                        if state.comms.index() == 0 {
+                            println!(".test command requires arguments: <relation> <expected_count>");
+                        }
+                        state.test_failures += 1;
+                    } else {
+                        let name = args[0];
+                        let expected: u64 = match args[1].parse() {
+                            Ok(n) => n,
+                            Err(_) => {
+                                if state.comms.index() == 0 {
+                                    println!(".test: expected_count must be an integer, got {:?}", args[1]);
+                                }
+                                state.test_failures += 1;
+                                return;
+                            }
+                        };
+                        let local = state.facts.get(name).map(|f| f.len() as u64).unwrap_or(0);
+                        let actual = state.comms.all_reduce_sum(local);
+                        if state.facts.get(name).is_none() {
+                            if state.comms.index() == 0 {
+                                println!(".test FAIL {}: relation does not exist", name);
+                            }
+                            state.test_failures += 1;
+                        } else if actual == expected {
+                            if state.comms.index() == 0 {
+                                println!(".test ok   {}: {}", name, actual);
+                            }
+                        } else {
+                            if state.comms.index() == 0 {
+                                println!(".test FAIL {}: expected {}, got {}", name, expected, actual);
+                            }
+                            state.test_failures += 1;
+                        }
+                    }
+                }
                 ".save" => { println!("unimplemented: {:?}", word); }
                 ".sync" => {
                     // Cluster-wide barrier: broadcast an empty FactLSM so every

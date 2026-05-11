@@ -104,6 +104,9 @@ pub mod types {
         /// Entries are inserted either by `.decl` (explicit) or by first use in a rule
         /// (implicit). Arity is checked for consistency on every subsequent reference.
         pub decls: std::collections::BTreeMap<String, RelationDecl>,
+        /// Count of `.test` directives that have reported a mismatch. Surfaced
+        /// at `.quit` so a script with any failed assertion exits nonzero.
+        pub test_failures: usize,
     }
 
     impl State {
