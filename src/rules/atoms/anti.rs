@@ -27,8 +27,13 @@ impl<T: Ord + Clone+std::fmt::Debug> ExecAtom<T> for Anti<(Vec<Forest<Terms>>, V
         let (my_facts, my_terms) = &self.0;
         let prefix = my_terms.iter().take_while(|t| salad.terms.contains(t)).count();
         salad.align_to(comms, my_terms[..prefix].iter().cloned());
-        // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
-        assert!(prefix > 0 || comms.peers() == 1);
+        if prefix == 0 && comms.peers() > 1 {
+            // Zero-prefix antijoin: drop salad iff atom is globally non-empty.
+            assert!(terms.is_empty());
+            let any_local: u64 = (!my_facts.is_empty()) as u64;
+            if comms.all_reduce_sum(any_local) > 0 { salad.facts = Default::default(); }
+            return;
+        }
         if let Some(delta) = salad.facts.flatten() {
             assert!(terms.is_empty());
             let others = my_facts.iter().map(|o| o.borrow()).collect::<Vec<_>>();

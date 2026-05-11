@@ -98,6 +98,28 @@ impl Comms {
         }
     }
 
+    /// All-reduce sum across peers. Returns the same value on every peer.
+    pub fn all_reduce_sum(&mut self, value: u64) -> u64 {
+        if self.peers() == 1 { return value; }
+        use columnar::Push;
+        let mut facts = FactLSM::default();
+        let mut column = Terms::default();
+        column.push(&value.to_be_bytes().to_vec());
+        if let Some(forest) = Forest::from_columns(vec![column]) { facts.extend([forest]); }
+        self.broadcast(&mut facts);
+        let mut total: u64 = 0;
+        if let Some(flat) = facts.flatten() {
+            use columnar::Borrow;
+            for i in 0 .. flat.layer(0).list.values.len() {
+                let bytes = flat.layer(0).list.values.borrow().get(i).as_slice();
+                if bytes.len() == 8 {
+                    total += u64::from_be_bytes(bytes.try_into().unwrap());
+                }
+            }
+        }
+        total
+    }
+
     /// Exchanges facts among all workers.
     pub fn exchange(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
         let mut conduit = self.conduit();

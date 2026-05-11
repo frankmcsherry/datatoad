@@ -159,7 +159,9 @@ pub fn wco_join<T: Ord + Clone + std::fmt::Debug>(
             wco_join_inner(comms, &mut prefix, terms, atoms, potato, &shared_target);
             prefix.align_to(comms, salad.terms[..shared.len()].iter().cloned());
 
-            // FIXME: the shuffling above is insufficient if the arity is zero and there are multiple workers.
+            // Zero shared columns multi-worker would be a cross-product; needs
+            // broadcast/gather of `prefix` (or `salad`) to be correct.
+            // Currently unreachable from the planner.
             assert!(shared.len() > 0 || comms.peers() == 1);
 
             // Re-install sequestered terms.
