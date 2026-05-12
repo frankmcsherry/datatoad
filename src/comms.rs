@@ -98,6 +98,18 @@ impl Comms {
         }
     }
 
+    /// Logical-OR across peers: `true` if any worker passes `true`.
+    pub fn any(&mut self, local: bool) -> bool {
+        if self.peers() == 1 { return local; }
+        self.all_reduce_sum(local as u64) > 0
+    }
+
+    /// Logical-AND across peers: `true` only if every worker passes `true`.
+    pub fn all(&mut self, local: bool) -> bool {
+        if self.peers() == 1 { return local; }
+        self.all_reduce_sum((!local) as u64) == 0
+    }
+
     /// All-reduce sum across peers. Returns the same value on every peer.
     pub fn all_reduce_sum(&mut self, value: u64) -> u64 {
         if self.peers() == 1 { return value; }

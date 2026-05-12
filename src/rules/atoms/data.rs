@@ -126,16 +126,41 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
             // Zero-prefix semijoin: retain salad iff atom is globally non-empty.
             // `retain_inner` with empty prefix slices underflows (`other_arity - 1`
             // when `other_arity == 0`), so we must short-circuit even in
-            // single-worker runs. Multi-worker case uses an all-reduce.
-            let any_local: u64 = (!my_facts.is_empty()) as u64;
-            let any_global = if comms.peers() > 1 { comms.all_reduce_sum(any_local) } else { any_local };
-            if any_global == 0 { salad.facts = Default::default(); }
+            // single-worker runs.
+            if !comms.any(!my_facts.is_empty()) { salad.facts = Default::default(); }
             return;
         }
-        // Remaining zero-prefix multi-worker case is the cross-product join
-        // (`!terms.is_empty()`), which would need a broadcast or gather to be
-        // correct. Currently unreachable from the planner.
-        assert!(prefix > 0 || comms.peers() == 1);
+        if prefix == 0 && comms.peers() > 1 {
+            // Zero-prefix multi-worker cross-product. Broadcast the salad so
+            // every worker holds the full union, then locally cross-join with
+            // this worker's atom shard. The output's column 0 is from the atom
+            // side, preserving the "column 0 is the partition key" invariant
+            // without any further coordination. Single-worker prefix-0 falls
+            // through to `join_many` below, which handles the local Cartesian.
+            use columnar::{Borrow, Container, Len};
+            use crate::facts::trie::Layer;
+            comms.broadcast(&mut salad.facts);
+            if let Some(salad_full) = salad.facts.flatten() {
+                for atom_part in my_facts.iter() {
+                    let n = atom_part.len();
+                    if n == 0 { continue; }
+                    let mut layers: Vec<Rc<Layer<Terms>>> = (0..atom_part.arity()).map(|i| atom_part.layer(i).clone()).collect();
+                    for j in 0..salad_full.arity() {
+                        let sj = salad_full.layer(j);
+                        let mut list = sj.list.clone();
+                        for _ in 1..n {
+                            list.extend_from_self(sj.list.borrow(), 0..sj.list.len());
+                        }
+                        layers.push(Rc::new(Layer { list }));
+                    }
+                    salad.facts.extend([layers.try_into().expect("non-empty by construction")]);
+                }
+            }
+            let prior_terms = std::mem::take(&mut salad.terms);
+            salad.terms = my_terms.iter().chain(prior_terms.iter()).cloned().collect();
+            salad.align_to(comms, after.iter().cloned());
+            return;
+        }
         if !terms.is_empty() {
             // join with atom: permute `salad.terms` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
             let conduit = comms.conduit();

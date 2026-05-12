@@ -284,7 +284,13 @@ pub fn extend_facts_with_fields(
     atom: &Atom,
     mut data: crate::facts::FactLSM<Forest<Terms>>,
 ) {
-    comms.exchange(&mut data);
+    // 0-arity heads are presence markers, not sharded relations:
+    // replicate via broadcast rather than partition-by-column-0.
+    if atom.terms.is_empty() {
+        comms.broadcast(&mut data);
+    } else {
+        comms.exchange(&mut data);
+    }
     // Always materialize the relation entry, even when this worker's shard is
     // empty. Otherwise the BTreeMap key set diverges across workers and the
     // index-based `active` set (via `active_indices`) means different relations
