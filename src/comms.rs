@@ -98,13 +98,33 @@ impl Comms {
         }
     }
 
+    /// Logical-OR across peers: `true` if any worker passes `true`.
+    pub fn any(&mut self, local: bool) -> bool {
+        if self.peers() == 1 { return local; }
+        self.all_reduce_sum(local as u64) > 0
+    }
+
+    /// Logical-AND across peers: `true` only if every worker passes `true`.
+    pub fn all(&mut self, local: bool) -> bool {
+        if self.peers() == 1 { return local; }
+        self.all_reduce_sum((!local) as u64) == 0
+    }
+
     /// All-reduce sum across peers. Returns the same value on every peer.
+    ///
+    /// Each contribution is tagged with the sender's index so that workers
+    /// reporting the same `value` produce distinct rows after broadcast.
+    /// Without the tag, `flatten()` (which unions / deduplicates) would
+    /// collapse equal contributions and silently undercount the sum.
     pub fn all_reduce_sum(&mut self, value: u64) -> u64 {
         if self.peers() == 1 { return value; }
         use columnar::Push;
         let mut facts = FactLSM::default();
         let mut column = Terms::default();
-        column.push(&value.to_be_bytes().to_vec());
+        let mut buf = [0u8; 16];
+        buf[..8].copy_from_slice(&(self.index() as u64).to_be_bytes());
+        buf[8..].copy_from_slice(&value.to_be_bytes());
+        column.push(&buf.to_vec());
         if let Some(forest) = Forest::from_columns(vec![column]) { facts.extend([forest]); }
         self.broadcast(&mut facts);
         let mut total: u64 = 0;
@@ -112,8 +132,8 @@ impl Comms {
             use columnar::Borrow;
             for i in 0 .. flat.layer(0).list.values.len() {
                 let bytes = flat.layer(0).list.values.borrow().get(i).as_slice();
-                if bytes.len() == 8 {
-                    total += u64::from_be_bytes(bytes.try_into().unwrap());
+                if bytes.len() == 16 {
+                    total += u64::from_be_bytes(bytes[8..].try_into().unwrap());
                 }
             }
         }

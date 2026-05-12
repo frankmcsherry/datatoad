@@ -30,8 +30,7 @@ impl<T: Ord + Clone+std::fmt::Debug> ExecAtom<T> for Anti<(Vec<Forest<Terms>>, V
         if prefix == 0 && comms.peers() > 1 {
             // Zero-prefix antijoin: drop salad iff atom is globally non-empty.
             assert!(terms.is_empty());
-            let any_local: u64 = (!my_facts.is_empty()) as u64;
-            if comms.all_reduce_sum(any_local) > 0 { salad.facts = Default::default(); }
+            if comms.any(!my_facts.is_empty()) { salad.facts = Default::default(); }
             return;
         }
         if let Some(delta) = salad.facts.flatten() {

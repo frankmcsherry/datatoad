@@ -99,12 +99,24 @@ impl Relations {
             for layer in base.stable.contents() {
                 fact_set.stable.extend(layer.act_on(action, thresh));
             }
-            comms.exchange(&mut fact_set.stable);
+            // 0-arity results (proj: []) have no partition key — they are
+            // presence/absence markers that must be replicated, not sharded.
+            // Static dispatch by the action's output arity keeps the choice
+            // identical across workers (no per-worker state inspection).
+            if action.projection.is_empty() {
+                comms.broadcast(&mut fact_set.stable);
+            } else {
+                comms.exchange(&mut fact_set.stable);
+            }
             // Flattening deduplicates, which may be necessary as `action` may introduce collisions
             // across LSM layers.
             if let Some(stable) = fact_set.stable.flatten() { fact_set.stable.push(stable); }
             let mut acted_on = if let Some(recent) = base.recent.as_ref() { recent.act_on(action, thresh) } else { FactLSM::default() };
-            comms.exchange(&mut acted_on);
+            if action.projection.is_empty() {
+                comms.broadcast(&mut acted_on);
+            } else {
+                comms.exchange(&mut acted_on);
+            }
             if let Some(recent) = acted_on.flatten() {
                 fact_set.recent = recent.antijoin(fact_set.stable.contents()).flatten();
             }

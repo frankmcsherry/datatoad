@@ -141,7 +141,13 @@ pub mod types {
         }
 
         pub fn extend_facts(&mut self, atom: &Atom, mut facts: crate::facts::FactLSM<crate::facts::Forest<crate::facts::Terms>>) {
-            self.comms.exchange(&mut facts);
+            // 0-arity heads are presence markers, not sharded relations:
+            // replicate via broadcast rather than partition-by-column-0.
+            if atom.terms.is_empty() {
+                self.comms.broadcast(&mut facts);
+            } else {
+                self.comms.exchange(&mut facts);
+            }
             // Always materialize the relation entry — see extend_facts_with_fields
             // in src/rules/mod.rs for the rationale.
             let entry = self.facts.entry(&atom);
