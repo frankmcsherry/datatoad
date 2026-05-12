@@ -159,25 +159,55 @@ pub fn wco_join<T: Ord + Clone + std::fmt::Debug>(
             wco_join_inner(comms, &mut prefix, terms, atoms, potato, &shared_target);
             prefix.align_to(comms, salad.terms[..shared.len()].iter().cloned());
 
-            // Zero shared columns multi-worker would be a cross-product; needs
-            // broadcast/gather of `prefix` (or `salad`) to be correct.
-            // Currently unreachable from the planner.
-            assert!(shared.len() > 0 || comms.peers() == 1);
-
-            // Re-install sequestered terms.
-            let conduit = comms.conduit();
-            if let Some(facts) = salad.facts.flatten() {
-                let mut crossed_terms = salad.terms.clone();
-                crossed_terms.extend(salad.terms[..shared.len()].iter().cloned());
-                crossed_terms.extend(terms.iter().cloned());
-                let projection = target.iter().map(|t| crossed_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
-                salad.facts = facts.join_many(prefix.facts.contents(), shared.len(), &projection[..], conduit);
+            if shared.len() == 0 && comms.peers() > 1 {
+                // Wrapper-level zero-shared cross-product. Symmetric with the
+                // prefix-0 case in `data.rs::join`: broadcast `salad` (the
+                // sequestered original) so every worker holds the full union,
+                // then locally cross-join with `prefix` (the WCO inner output).
+                // Column 0 of the result is from `prefix` (a new term),
+                // preserving the "column 0 is the partition key" invariant —
+                // each worker only has its shard of `prefix`, so the local
+                // contribution to the global Cartesian is exactly the slice
+                // whose key falls on this worker.
+                use columnar::{Borrow, Container, Len};
+                use crate::facts::trie::Layer;
+                comms.broadcast(&mut salad.facts);
+                let mut out = FactLSM::default();
+                if let Some(salad_full) = salad.facts.flatten() {
+                    for prefix_part in prefix.facts.contents() {
+                        let n = prefix_part.len();
+                        if n == 0 { continue; }
+                        let mut layers: Vec<Rc<Layer<Terms>>> = (0..prefix_part.arity()).map(|i| prefix_part.layer(i).clone()).collect();
+                        for j in 0..salad_full.arity() {
+                            let sj = salad_full.layer(j);
+                            let mut list = sj.list.clone();
+                            for _ in 1..n {
+                                list.extend_from_self(sj.list.borrow(), 0..sj.list.len());
+                            }
+                            layers.push(Rc::new(Layer { list }));
+                        }
+                        out.extend([layers.try_into().expect("non-empty by construction")]);
+                    }
+                }
+                salad.facts = out;
+                salad.terms = prefix.terms.iter().chain(salad.terms.iter()).cloned().collect();
+                salad.align_to(comms, target.iter().cloned());
+            } else {
+                // Re-install sequestered terms.
+                let conduit = comms.conduit();
+                if let Some(facts) = salad.facts.flatten() {
+                    let mut crossed_terms = salad.terms.clone();
+                    crossed_terms.extend(salad.terms[..shared.len()].iter().cloned());
+                    crossed_terms.extend(terms.iter().cloned());
+                    let projection = target.iter().map(|t| crossed_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
+                    salad.facts = facts.join_many(prefix.facts.contents(), shared.len(), &projection[..], conduit);
+                }
+                else {
+                    salad.facts = conduit.finish();
+                }
+                salad.terms.clear();
+                salad.terms.extend_from_slice(target);
             }
-            else {
-                salad.facts = conduit.finish();
-            }
-            salad.terms.clear();
-            salad.terms.extend_from_slice(target);
         }
         else { wco_join_inner(comms, salad, terms, atoms, potato, target) }
     }
