@@ -459,7 +459,7 @@ mod flow_log {
     /// Converts a CSV reader into a collection of facts, provided `KW` the bytes per whole record.
     fn to_facts<R: std::io::Read, const KW: usize>(mut reader: simd_csv::ZeroCopyReader<R>, bytes: Vec<u8>, step: usize) -> FactLSM<Forest<Terms>> {
         let mut array: [u8; KW] = bytes.try_into().unwrap();
-        let mut builder = PageBuilder::<[u8;KW], KW>::new(1024);
+        let mut builder = PageBuilder::<[u8;KW], KW>::default();
         let mut counter = 0;
         let mut result = FactLSM::default();
         builder.push(array);
@@ -476,8 +476,8 @@ mod flow_log {
 
             if counter * KW >= 4_000_000_000 {
                 let (mut data, diff) = builder.done();
-                builder = PageBuilder::<[u8;KW], KW>::new(1024);
-                lsb_paged(&mut data, &diff[..]);
+                builder = PageBuilder::<[u8;KW], KW>::default();
+                lsb_paged::<_, 1024>(&mut data, &diff[..]);
                 let iter = data.into_iter().flat_map(|page| page);
                 if let Some(layers) = build(iter) {
                     result.push(layers.into_iter().map(|l| std::rc::Rc::new(Layer { list: l }) ).collect::<Vec<_>>().try_into().unwrap());
@@ -489,7 +489,7 @@ mod flow_log {
         }
 
         let (mut data, diff) = builder.done();
-        lsb_paged(&mut data, &diff[..]);
+        lsb_paged::<_, 1024>(&mut data, &diff[..]);
         let iter = data.into_iter().flat_map(|page| page);
         if let Some(layers) = build(iter) {
             result.push(layers.into_iter().map(|l| std::rc::Rc::new(Layer { list: l }) ).collect::<Vec<_>>().try_into().unwrap());

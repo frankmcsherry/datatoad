@@ -417,24 +417,36 @@ pub mod radix_sort {
         /// with items, and finally call `done` to extract the list of pages and the bits that identify avoidable indexes.
         /// One should likely call `lsb_paged` with a reference to the list of pages and the bits, perhaps after any further
         /// masking of the bits that may be important (e.g. masking away "payload" bytes).
-        pub struct PageBuilder<R: Radixable, const W: usize> {
-            size: usize,        // page size.
+        pub struct PageBuilder<R: Radixable, const W: usize, const PAGE: usize = 1024> {
             diff: [bool; W],    // for each position, have we seen two distinct bytes.
             byte: [u8; W],      // for each position, the most recently seen byte.
             data: Vec<Vec<R>>,  // sequence of full pages.
-            page: Vec<R>,       // partial page we are assembling; at most `self.size` in length.
+            page: Vec<R>,       // partial page we are assembling; at most `PAGE` in length.
         }
-        impl<R: Radixable, const W: usize> PageBuilder<R, W> {
-            /// Create a new `Self` with a specific page size.
-            pub fn new(size: usize) -> Self { Self { size, diff: [false; W], byte: [0u8; W], data: Default::default(), page: Vec::with_capacity(size) }}
+        impl<R: Radixable, const W: usize, const PAGE: usize> PageBuilder<R, W, PAGE> {
+            #[inline(always)]
             pub fn push(&mut self, item: R) {
                 for index in 0 .. W { self.diff[index] |= self.byte[index] != item.byte(index); self.byte[index] = item.byte(index); }
                 self.page.push(item);
-                if self.page.len() >= self.size { self.data.push(std::mem::replace(&mut self.page, Vec::with_capacity(self.size))); }
+                if self.page.len() >= PAGE { self.data.push(std::mem::replace(&mut self.page, Vec::with_capacity(PAGE))); }
+            }
+            /// Append a pre-built page (length up to `PAGE`), scanning it once for per-position diff tracking.
+            /// Avoids the per-item capacity check that `push` pays when called in a tight loop.
+            pub fn push_page(&mut self, page: Vec<R>) {
+                debug_assert!(page.len() <= PAGE);
+                for item in &page {
+                    for index in 0 .. W {
+                        self.diff[index] |= self.byte[index] != item.byte(index);
+                        self.byte[index] = item.byte(index);
+                    }
+                }
+                if !page.is_empty() { self.data.push(page); }
             }
             pub fn done(mut self) -> (Vec<Vec<R>>, [bool;W]) { if !self.page.is_empty() { self.data.push(std::mem::take(&mut self.page)); } (self.data, self.diff) }
         }
-
+        impl<R: Radixable, const W: usize, const PAGE: usize> Default for PageBuilder<R, W, PAGE> {
+            fn default() -> Self { Self { diff: [false; W], byte: [0u8; W], data: Default::default(), page: Vec::with_capacity(PAGE) } }
+        }
         /// A page-oriented LSB radix sort, which consumes pages of `data` and shuffles into 256 streams of pages that we reassemble.
         ///
         /// The `data` pages should each be the same capacity, though they need not all be equally full.
@@ -443,45 +455,60 @@ pub mod radix_sort {
         ///
         /// The capacity of the first page in `data` will be used as the capacity for all pages; it is best if these capacities are consistent.
         /// The drained pages from `data` will be re-used, and if their capacities vary there may be either reallocations or unused capacity.
-        pub fn lsb_paged<R: Radixable>(data: &mut Vec<Vec<R>>, filter: &[bool]) {
+        #[inline(never)]
+        pub fn lsb_paged<R: Radixable, const PAGE: usize>(data: &mut Vec<Vec<R>>, filter: &[bool]) {
 
             if data.is_empty() { return; }
 
-            let page_len = data[0].capacity();
-
             let mut free: Vec<Vec<R>> = Vec::default();
             let mut full: [Vec<Vec<R>>; 256] = (0 .. 256).map(|_| Default::default()).collect::<Vec<_>>().try_into().unwrap();
-            let mut part: [Vec<R>; 256] = (0 .. 256).map(|_| Vec::with_capacity(page_len)).collect::<Vec<_>>().try_into().unwrap();
+            let mut part: [Vec<R>; 256] = (0 .. 256).map(|_| Vec::with_capacity(PAGE)).collect::<Vec<_>>().try_into().unwrap();
 
             for index in (0 .. R::WIDTH).rev() {
                 if filter[index] {
                     for mut page in data.drain(..) {
-                        for item in page.drain(..) {
-                            let byte = item.byte(index) as usize;
-                            part[byte].push(item);
-                            if part[byte].len() >= page_len {
-                                full[byte].push(std::mem::replace(&mut part[byte], free.pop().unwrap_or_else(|| Vec::with_capacity(page_len))));
+                        // Iterate by reference so the byte() read can hit the page directly
+                        // instead of materializing each item to stack first; only the bucket
+                        // write needs the by-value copy.
+                        for item_ref in page.iter() {
+                            let byte = item_ref.byte(index) as usize;
+                            part[byte].push(*item_ref);
+                            if part[byte].len() >= PAGE {
+                                full[byte].push(std::mem::replace(&mut part[byte], free.pop().unwrap_or_else(|| Vec::with_capacity(PAGE))));
                             }
                         }
+                        page.clear();
                         free.push(page);
                     }
 
-                    // Drain each `part` into `full`, and drain `full` into `data`.
-                    for byte in 0 .. 256 {
-                        // We want to append `full[byte]` then `part[byte]`.
-                        data.append(&mut full[byte]);
-                        // We may be able to copy part of `part[byte]` in rather than append the whole page.
-                        if let Some(last) = data.last_mut() {
-                            // Not helpful if there is another full page immediately afterwards.
-                            if last.len() < page_len && (byte == 255 || full[byte+1].is_empty()) {
-                                let to_drain = std::cmp::min(page_len - last.len(), part[byte].len());
-                                last.extend(part[byte].drain(0.. to_drain));
-                            }
-                        }
-                        if !part[byte].is_empty() {
-                            data.push(std::mem::replace(&mut part[byte], free.pop().unwrap_or_else(|| Vec::with_capacity(page_len))));
-                        }
+                    flush_buckets::<R, PAGE>(data, &mut full, &mut part, &mut free);
+                }
+            }
+        }
+
+        /// Drains `full[byte]` then `part[byte]` into `data` for each byte, recycling
+        /// emptied pages through `free`. Outlined so the hot per-item loop in
+        /// `lsb_paged` doesn't carry this code in its register-allocation footprint.
+        #[inline(never)]
+        fn flush_buckets<R: Radixable, const PAGE: usize>(
+            data: &mut Vec<Vec<R>>,
+            full: &mut [Vec<Vec<R>>; 256],
+            part: &mut [Vec<R>; 256],
+            free: &mut Vec<Vec<R>>,
+        ) {
+            for byte in 0 .. 256 {
+                // We want to append `full[byte]` then `part[byte]`.
+                data.append(&mut full[byte]);
+                // We may be able to copy part of `part[byte]` in rather than append the whole page.
+                if let Some(last) = data.last_mut() {
+                    // Not helpful if there is another full page immediately afterwards.
+                    if last.len() < PAGE && (byte == 255 || full[byte+1].is_empty()) {
+                        let to_drain = std::cmp::min(PAGE - last.len(), part[byte].len());
+                        last.extend(part[byte].drain(0.. to_drain));
                     }
+                }
+                if !part[byte].is_empty() {
+                    data.push(std::mem::replace(&mut part[byte], free.pop().unwrap_or_else(|| Vec::with_capacity(PAGE))));
                 }
             }
         }
