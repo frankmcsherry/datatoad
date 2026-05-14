@@ -443,6 +443,7 @@ pub mod radix_sort {
         ///
         /// The capacity of the first page in `data` will be used as the capacity for all pages; it is best if these capacities are consistent.
         /// The drained pages from `data` will be re-used, and if their capacities vary there may be either reallocations or unused capacity.
+        #[inline(never)]
         pub fn lsb_paged<R: Radixable>(data: &mut Vec<Vec<R>>, filter: &[bool]) {
 
             if data.is_empty() { return; }
@@ -456,32 +457,49 @@ pub mod radix_sort {
             for index in (0 .. R::WIDTH).rev() {
                 if filter[index] {
                     for mut page in data.drain(..) {
-                        for item in page.drain(..) {
-                            let byte = item.byte(index) as usize;
-                            part[byte].push(item);
+                        // Iterate by reference so the byte() read can hit the page directly
+                        // instead of materializing each item to stack first; only the bucket
+                        // write needs the by-value copy.
+                        for item_ref in page.iter() {
+                            let byte = item_ref.byte(index) as usize;
+                            part[byte].push(*item_ref);
                             if part[byte].len() >= page_len {
                                 full[byte].push(std::mem::replace(&mut part[byte], free.pop().unwrap_or_else(|| Vec::with_capacity(page_len))));
                             }
                         }
+                        page.clear();
                         free.push(page);
                     }
 
-                    // Drain each `part` into `full`, and drain `full` into `data`.
-                    for byte in 0 .. 256 {
-                        // We want to append `full[byte]` then `part[byte]`.
-                        data.append(&mut full[byte]);
-                        // We may be able to copy part of `part[byte]` in rather than append the whole page.
-                        if let Some(last) = data.last_mut() {
-                            // Not helpful if there is another full page immediately afterwards.
-                            if last.len() < page_len && (byte == 255 || full[byte+1].is_empty()) {
-                                let to_drain = std::cmp::min(page_len - last.len(), part[byte].len());
-                                last.extend(part[byte].drain(0.. to_drain));
-                            }
-                        }
-                        if !part[byte].is_empty() {
-                            data.push(std::mem::replace(&mut part[byte], free.pop().unwrap_or_else(|| Vec::with_capacity(page_len))));
-                        }
+                    flush_buckets(data, &mut full, &mut part, &mut free, page_len);
+                }
+            }
+        }
+
+        /// Drains `full[byte]` then `part[byte]` into `data` for each byte, recycling
+        /// emptied pages through `free`. Outlined so the hot per-item loop in
+        /// `lsb_paged` doesn't carry this code in its register-allocation footprint.
+        #[inline(never)]
+        fn flush_buckets<R: Radixable>(
+            data: &mut Vec<Vec<R>>,
+            full: &mut [Vec<Vec<R>>; 256],
+            part: &mut [Vec<R>; 256],
+            free: &mut Vec<Vec<R>>,
+            page_len: usize,
+        ) {
+            for byte in 0 .. 256 {
+                // We want to append `full[byte]` then `part[byte]`.
+                data.append(&mut full[byte]);
+                // We may be able to copy part of `part[byte]` in rather than append the whole page.
+                if let Some(last) = data.last_mut() {
+                    // Not helpful if there is another full page immediately afterwards.
+                    if last.len() < page_len && (byte == 255 || full[byte+1].is_empty()) {
+                        let to_drain = std::cmp::min(page_len - last.len(), part[byte].len());
+                        last.extend(part[byte].drain(0.. to_drain));
                     }
+                }
+                if !part[byte].is_empty() {
+                    data.push(std::mem::replace(&mut part[byte], free.pop().unwrap_or_else(|| Vec::with_capacity(page_len))));
                 }
             }
         }
