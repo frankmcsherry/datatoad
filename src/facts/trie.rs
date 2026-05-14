@@ -1202,9 +1202,8 @@ pub mod layers {
         for f in &mut filter[8..12] { *f = false; }
         lsb_paged::<_, 1024>(&mut pages, &filter[..]);
 
-        // Dedup pass: pull the first triple from the first non-empty page, then
-        // tight loop over remaining triples in that page, then tight loop over
-        // remaining pages. No per-iteration None/Some check.
+        // We want to mint a new item for each distinct (group, value).
+        // We want to seal a new list for each distinct group.
         let mut pages_iter = pages.iter_mut().filter(|p| !p.is_empty());
         if let Some(first_page) = pages_iter.next() {
             let triples = first_page.as_mut_slice().as_flattened_mut().as_chunks_mut::<4>().0.as_chunks_mut::<3>().0;
@@ -1231,6 +1230,8 @@ pub mod layers {
             output.bounds.push(output.values.len() as u64);
         }
 
+        // Sorting is optional, and could improve performance for large, disordered lists, or cost otherwise.
+        // If we retained the pages and allocation from the previous invocation it might be faster.
         for page in pages.iter() {
             let triples = page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
             for [g, _, i] in triples.iter() {
@@ -1264,6 +1265,8 @@ pub mod layers {
         let (mut pages, filter) = builder.done();
         lsb_paged::<_, 1024>(&mut pages, &filter[..]);
 
+        // We want to mint a new item for each distinct (group, value).
+        // We want to seal a new list for each distinct group.
         let mut pages_iter = pages.iter().filter(|p| !p.is_empty());
         if let Some(first_page) = pages_iter.next() {
             let pairs = first_page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<2>().0;

@@ -424,14 +424,14 @@ pub mod radix_sort {
             page: Vec<R>,       // partial page we are assembling; at most `PAGE` in length.
         }
         impl<R: Radixable, const W: usize, const PAGE: usize> PageBuilder<R, W, PAGE> {
+            #[inline(always)]
             pub fn push(&mut self, item: R) {
                 for index in 0 .. W { self.diff[index] |= self.byte[index] != item.byte(index); self.byte[index] = item.byte(index); }
                 self.page.push(item);
                 if self.page.len() >= PAGE { self.data.push(std::mem::replace(&mut self.page, Vec::with_capacity(PAGE))); }
             }
-            /// Append a pre-built page (length up to `PAGE`), scanning it once for
-            /// per-position diff tracking. Avoids the per-item capacity check that
-            /// `push` pays when called in a tight loop.
+            /// Append a pre-built page (length up to `PAGE`), scanning it once for per-position diff tracking.
+            /// Avoids the per-item capacity check that `push` pays when called in a tight loop.
             pub fn push_page(&mut self, page: Vec<R>) {
                 debug_assert!(page.len() <= PAGE);
                 for item in &page {
