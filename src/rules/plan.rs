@@ -74,6 +74,29 @@ pub trait PlanAtom<T: Ord> {
     /// any grounding of the input terms, as they may be called upon to be the ones to do this.
     fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T>;
 
+    /// Cardinality bound on `outs` (as a set) given ground values of `ins`, per input row.
+    ///
+    /// Returns `None` if the mode is unsupported — same predicate `ground` already
+    /// answers, so the default ties the two together: `Some((0, None))` whenever
+    /// `outs ⊆ ground(ins)`, `None` otherwise. Atoms with real cardinality
+    /// information override.
+    ///
+    /// Conventions on `outs`:
+    /// - `outs.is_empty()` is the existence question. `Some((0, 1))`-shaped
+    ///   answers say "this atom is a filter, contributing 0 or 1 surviving rows
+    ///   per input."
+    /// - `outs.len() == 1` is the proposer/cardinality question. `(min, max)`
+    ///   is the per-input row distinct-value count for that output term.
+    /// - `outs.len() > 1` is treated as the conservative default for now
+    ///   (multiplying per-column bounds is unsound when columns are correlated,
+    ///   which is the common datalog case).
+    ///
+    /// Implementors that override `range` must keep it consistent with
+    /// `ground`: returning `Some(_)` for a mode where `ground(ins)` would not
+    /// cover `outs` is a contract violation.
+    fn range(&self, ins: &BTreeSet<T>, outs: &BTreeSet<T>) -> Option<(usize, Option<usize>)> {
+        if outs.is_subset(&self.ground(ins)) { Some((0, None)) } else { None }
+    }
 }
 
 /// Fixpoint closure over a body's `ground` methods.
