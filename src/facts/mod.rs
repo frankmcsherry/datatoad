@@ -417,24 +417,23 @@ pub mod radix_sort {
         /// with items, and finally call `done` to extract the list of pages and the bits that identify avoidable indexes.
         /// One should likely call `lsb_paged` with a reference to the list of pages and the bits, perhaps after any further
         /// masking of the bits that may be important (e.g. masking away "payload" bytes).
-        pub struct PageBuilder<R: Radixable, const W: usize> {
-            size: usize,        // page size.
+        pub struct PageBuilder<R: Radixable, const W: usize, const PAGE: usize = 1024> {
             diff: [bool; W],    // for each position, have we seen two distinct bytes.
             byte: [u8; W],      // for each position, the most recently seen byte.
             data: Vec<Vec<R>>,  // sequence of full pages.
-            page: Vec<R>,       // partial page we are assembling; at most `self.size` in length.
+            page: Vec<R>,       // partial page we are assembling; at most `PAGE` in length.
         }
-        impl<R: Radixable, const W: usize> PageBuilder<R, W> {
-            /// Create a new `Self` with a specific page size.
-            pub fn new(size: usize) -> Self { Self { size, diff: [false; W], byte: [0u8; W], data: Default::default(), page: Vec::with_capacity(size) }}
+        impl<R: Radixable, const W: usize, const PAGE: usize> PageBuilder<R, W, PAGE> {
             pub fn push(&mut self, item: R) {
                 for index in 0 .. W { self.diff[index] |= self.byte[index] != item.byte(index); self.byte[index] = item.byte(index); }
                 self.page.push(item);
-                if self.page.len() >= self.size { self.data.push(std::mem::replace(&mut self.page, Vec::with_capacity(self.size))); }
+                if self.page.len() >= PAGE { self.data.push(std::mem::replace(&mut self.page, Vec::with_capacity(PAGE))); }
             }
             pub fn done(mut self) -> (Vec<Vec<R>>, [bool;W]) { if !self.page.is_empty() { self.data.push(std::mem::take(&mut self.page)); } (self.data, self.diff) }
         }
-
+        impl<R: Radixable, const W: usize, const PAGE: usize> Default for PageBuilder<R, W, PAGE> {
+            fn default() -> Self { Self { diff: [false; W], byte: [0u8; W], data: Default::default(), page: Vec::with_capacity(PAGE) } }
+        }
         /// A page-oriented LSB radix sort, which consumes pages of `data` and shuffles into 256 streams of pages that we reassemble.
         ///
         /// The `data` pages should each be the same capacity, though they need not all be equally full.
