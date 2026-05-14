@@ -271,7 +271,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                             let head = &rule.head[..];
                             let body = &rule.body[..];
                             let seed_atoms: Vec<usize> = (0..body.len()).collect();
-                            let (plans, _loads) = datatoad::rules::plan::plan_rule(head, body, &seed_atoms, &state.decls);
+                            let (plans, _loads) = datatoad::rules::plan::plan_rule(head, body, &seed_atoms, &state.decls, &state.rules);
                             for (seed_idx, plan) in plans.iter() {
                                 println!("plan seed #{} {}:", seed_idx, body[*seed_idx]);
                                 for (i, (atoms, terms, target)) in plan.iter().enumerate() {
