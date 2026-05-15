@@ -1204,39 +1204,31 @@ pub mod layers {
 
         // We want to mint a new item for each distinct (group, value).
         // We want to seal a new list for each distinct group.
-        let mut pages_iter = pages.iter_mut().filter(|p| !p.is_empty());
+        // We want to update groups with index as we go (random access potentially pessimal).
+        let mut pages_iter = pages.drain(..).filter(|p| !p.is_empty());
         if let Some(first_page) = pages_iter.next() {
-            let triples = first_page.as_mut_slice().as_flattened_mut().as_chunks_mut::<4>().0.as_chunks_mut::<3>().0;
-            let mut iter = triples.iter_mut();
-            let [group, value, _] = iter.next().expect("non-empty page has at least one row");
+            let triples = first_page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
+            let mut iter = triples.iter();
+            let [group, value, index] = iter.next().expect("non-empty page has at least one row");
             output.values.push(*value);
             let mut prev = (*group, *value);
-            *group = 0u32.to_be_bytes();
-            for [group, value, _] in iter {
+            groups[u32::from_be_bytes(*index) as usize] = 0;
+            for [group, value, index] in iter {
                 if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
                 if prev != (*group, *value) { output.values.push(*value); }
                 prev = (*group, *value);
-                *group = ((output.values.len() - 1) as u32).to_be_bytes();
+                groups[u32::from_be_bytes(*index) as usize] = output.values.len() - 1;
             }
             for page in pages_iter {
-                let triples = page.as_mut_slice().as_flattened_mut().as_chunks_mut::<4>().0.as_chunks_mut::<3>().0;
-                for [group, value, _] in triples.iter_mut() {
+                let triples = page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
+                for [group, value, index] in triples.iter() {
                     if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
                     if prev != (*group, *value) { output.values.push(*value); }
                     prev = (*group, *value);
-                    *group = ((output.values.len() - 1) as u32).to_be_bytes();
+                    groups[u32::from_be_bytes(*index) as usize] = output.values.len() - 1;
                 }
             }
             output.bounds.push(output.values.len() as u64);
-        }
-
-        // Sorting is optional, and could improve performance for large, disordered lists, or cost otherwise.
-        // If we retained the pages and allocation from the previous invocation it might be faster.
-        for page in pages.iter() {
-            let triples = page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
-            for [g, _, i] in triples.iter() {
-                groups[u32::from_be_bytes(*i) as usize] = u32::from_be_bytes(*g) as usize;
-            }
         }
 
         output
@@ -1267,7 +1259,9 @@ pub mod layers {
 
         // We want to mint a new item for each distinct (group, value).
         // We want to seal a new list for each distinct group.
-        let mut pages_iter = pages.iter().filter(|p| !p.is_empty());
+        // Drain pages as we consume them so the input memory drops monotonically
+        // while `output` grows; peak ~= max(input, output) rather than their sum.
+        let mut pages_iter = pages.drain(..).filter(|p| !p.is_empty());
         if let Some(first_page) = pages_iter.next() {
             let pairs = first_page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<2>().0;
             let mut iter = pairs.iter();
