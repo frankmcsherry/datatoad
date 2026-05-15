@@ -1204,31 +1204,28 @@ pub mod layers {
 
         // We want to mint a new item for each distinct (group, value).
         // We want to seal a new list for each distinct group.
-        // Fused: scatter `groups[i] = new_group_index` inline rather than overwriting
-        // the page's group byte and re-iterating in a second pass. This both removes
-        // a full pass over the data and lets us drain pages (peak memory shrinks
-        // monotonically as the loop advances).
+        // We want to update groups with index as we go (random access potentially pessimal).
         let mut pages_iter = pages.drain(..).filter(|p| !p.is_empty());
         if let Some(first_page) = pages_iter.next() {
             let triples = first_page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
             let mut iter = triples.iter();
-            let [group, value, i] = iter.next().expect("non-empty page has at least one row");
+            let [group, value, index] = iter.next().expect("non-empty page has at least one row");
             output.values.push(*value);
             let mut prev = (*group, *value);
-            groups[u32::from_be_bytes(*i) as usize] = 0;
-            for [group, value, i] in iter {
+            groups[u32::from_be_bytes(*index) as usize] = 0;
+            for [group, value, index] in iter {
                 if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
                 if prev != (*group, *value) { output.values.push(*value); }
                 prev = (*group, *value);
-                groups[u32::from_be_bytes(*i) as usize] = output.values.len() - 1;
+                groups[u32::from_be_bytes(*index) as usize] = output.values.len() - 1;
             }
             for page in pages_iter {
                 let triples = page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
-                for [group, value, i] in triples.iter() {
+                for [group, value, index] in triples.iter() {
                     if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
                     if prev != (*group, *value) { output.values.push(*value); }
                     prev = (*group, *value);
-                    groups[u32::from_be_bytes(*i) as usize] = output.values.len() - 1;
+                    groups[u32::from_be_bytes(*index) as usize] = output.values.len() - 1;
                 }
             }
             output.bounds.push(output.values.len() as u64);
