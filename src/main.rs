@@ -339,13 +339,13 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     state.comms.broadcast(&mut empty);
                 }
                 ".time" => {
-                    println!("time:\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());
+                    println!(".time\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());
                     *timer = std::time::Instant::now();
                 }
                 ".heap" => {
                     let h = heap_info();
                     println!(
-                        "heap:\trss={} peak_rss={} commit={} peak_commit={}\t{:?}",
+                        ".heap\trss={} peak_rss={} commit={} peak_commit={}\t{:?}",
                         fmt_bytes(h.rss), fmt_bytes(h.peak_rss),
                         fmt_bytes(h.commit), fmt_bytes(h.peak_commit),
                         words.collect::<Vec<_>>(),
