@@ -30,11 +30,12 @@ fn main() {
 
     free.remove(0); // remove binary
 
-    // Start multiple workers.
-    // Worker 0 will listen for input and broadcast to all workers.
-    // All workers then respond to each input synchronously.
-    // TODO: A future version should have one command stream, rather than workers that need the same inputs.
-    let guards = timely_communication::initialize(config, move |allocator| {
+    // Start multiple workers. Worker 0 owns the input stream and broadcasts
+    // each command line to every worker; non-zero workers receive and execute,
+    // but don't read files or stdin themselves. Driver-level commands (`.exec`,
+    // `.quit`) are handled by worker 0 inside `next_command_line` and never
+    // reach `handle_command`; everything else is broadcast verbatim.
+    timely_communication::initialize(config, move |allocator| {
 
         let mut state = types::State::default();
         let mut timer = std::time::Instant::now();
@@ -43,8 +44,11 @@ fn main() {
         state.comms = allocator.into();
         state.comms.set_mem_budget(mem_budget);
 
-        // Command-line arguments are treated as files to execute.
-        for filename in free.iter() { exec_file(filename.as_str(), &mut state, &mut bytes, &mut timer); }
+        // Worker 0's command stack; initially .exec <file> for each command line argument.
+        let mut cmd_stack: Vec<String> = Vec::new();
+        if state.comms.index() == 0 {
+            cmd_stack.extend(free.iter().rev().map(|f| format!(".exec {}", f)));
+        }
 
         let mut done = false;
         while !done {
@@ -56,23 +60,12 @@ fn main() {
             let mut command = FactLSM::default();
 
             if state.comms.index() == 0 {
-
-                use std::io::Write;
-                println!();
-                print!("> ");
-                let _ = std::io::stdout().flush();
-
-                let mut text = String::new();
-                if let Ok(size) = std::io::stdin().read_line(&mut text) {
-                    // Handle EOF.
-                    if size == 0 || text == ".quit" { }
-                    else {
-                        let mut list: Lists<Terms> = Default::default();
-                        list.push([text.as_bytes()]);
-                        command.push(vec![Rc::new(Layer { list })].try_into().unwrap());
-                    }
+                if let Some(text) = next_command_line(&mut cmd_stack) {
+                    let mut list: Lists<Terms> = Default::default();
+                    list.push([text.as_bytes()]);
+                    command.push(vec![Rc::new(Layer { list })].try_into().unwrap());
                 }
-
+                // None → leave `command` empty → broadcast tells workers to stop.
             }
 
             state.comms.broadcast(&mut command);
@@ -83,14 +76,53 @@ fn main() {
             else { done = true; }
         }
 
-    });
-
-    // computation runs until guards are joined or dropped.
-    if let Ok(guards) = guards { for _guard in guards.join() { } }
-    else { println!("error in computation"); }
-
+        // `.test` all_reduces fact counts internally, so every worker ends
+        // with the same `state.test_failures` value. Worker 0 panics if any
+        // failed; the unwind drops the comms layer cleanly, peers see EOF
+        // and finish normally, and the panic propagates through guards' Drop.
+        if state.comms.index() == 0 && state.test_failures > 0 {
+            panic!("{} .test assertion(s) failed", state.test_failures);
+        }
+    }).unwrap();
 }
 
+/// Pull the next command line from worker 0's command stack.
+///
+/// Driver-level directives (`.exec`, `.quit`) are interpreted here and consumed without
+/// surfacing to the engine. EOF on a source pops it; an empty stack returns `None`,
+/// signaling the worker loop to broadcast "no more commands".
+fn next_command_line(cmd_stack: &mut Vec<String>) -> Option<String> {
+
+    // Loop, because .exec of an empty file could result in an empty queue.
+    loop {
+        // If no pending commands, read one from the console.
+        if cmd_stack.is_empty() {
+            use std::io::Write;
+            println!();
+            print!("> ");
+            let _ = std::io::stdout().flush();
+            let mut text = String::new();
+            match std::io::stdin().read_line(&mut text) {
+                Ok(0) | Err(_) => { return None; },
+                Ok(_) => cmd_stack.push(text.trim_end().to_string()),
+            }
+        }
+
+        let text = cmd_stack.pop().unwrap();
+        let mut words = text.split_whitespace();
+        match words.next() {
+            Some(".quit") => { cmd_stack.clear(); return None; }
+            Some(".exec") => {
+                // Read each file in order, record their lines.
+                let new_cmds: Vec<String> = words.flat_map(|filename| BufReader::new(File::open(filename).unwrap()).lines()).flatten().collect();
+                cmd_stack.extend(new_cmds.into_iter().rev());
+            }
+            _ => return Some(text),
+        }
+    }
+}
+
+/// Commands executed symmetrically by all workers.
 fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec<u8>, usize>, timer: &mut std::time::Instant) {
 
     if let Some(parsed) = parse::datalog(text) {
@@ -102,7 +134,6 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
         let mut words = text.split_whitespace();
         if let Some(word) = words.next() {
             match word {
-                ".exec" => { for filename in words { exec_file(filename, state, bytes, timer); } }
                 ".list" => { state.facts.list() }
                 ".flow" => {
 
@@ -224,15 +255,6 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                             }
                         }
                     }
-                }
-                ".quit" => {
-                    let code = if state.test_failures > 0 {
-                        if state.comms.index() == 0 {
-                            eprintln!("{} .test assertion(s) failed", state.test_failures);
-                        }
-                        1
-                    } else { 0 };
-                    std::process::exit(code);
                 }
                 ".test" => {
                     // `.test <rel> <count>` — assert that relation's globally-summed
@@ -364,15 +386,6 @@ fn parse_byte_size(s: &str) -> Option<usize> {
                          else if let Some(rest) = s.strip_suffix(['K', 'k']) { (rest, 1_000) }
                          else { (s, 1) };
     digits.trim().parse::<usize>().ok().map(|n| n * mult)
-}
-
-fn exec_file(filename: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec<u8>, usize>, timer: &mut std::time::Instant) {
-    if let Ok(file) = File::open(filename) {
-        let file = BufReader::new(file);
-        for readline in file.lines() {
-            handle_command(readline.expect("Read error").as_str(), state, bytes, timer);
-        }
-    }
 }
 
 /// Specialized logic to load FlowLog evaluation files, which are unsigned 32bit integers as CSVs.
