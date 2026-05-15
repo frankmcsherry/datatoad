@@ -9,6 +9,37 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+/// Snapshot of process memory stats from mimalloc's `mi_process_info`.
+struct HeapInfo { rss: usize, peak_rss: usize, commit: usize, peak_commit: usize }
+
+fn heap_info() -> HeapInfo {
+    let mut v = [0usize; 8];
+    // SAFETY: `mi_process_info` writes to eight `usize` out-parameters and
+    // performs no other observable effects.
+    unsafe {
+        libmimalloc_sys::mi_process_info(
+            &mut v[0], &mut v[1], &mut v[2],
+            &mut v[3], &mut v[4], &mut v[5], &mut v[6], &mut v[7],
+        );
+    }
+    HeapInfo { rss: v[3], peak_rss: v[4], commit: v[5], peak_commit: v[6] }
+}
+
+fn fmt_bytes(n: usize) -> String {
+    // mimalloc tracks `current_commit` as a signed delta (commits minus
+    // purges to the OS) and stores it in a usize; if it goes negative it
+    // wraps near usize::MAX. Reinterpret as isize so negatives print as
+    // signed values instead of nonsense like "16777215.99TiB".
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let signed = n as isize;
+    let mag = signed.unsigned_abs();
+    let mut x = mag as f64;
+    let mut u = 0;
+    while x >= 1024.0 && u + 1 < UNITS.len() { x /= 1024.0; u += 1; }
+    let sign = if signed < 0 { "-" } else { "" };
+    if u == 0 { format!("{}{}B", sign, mag) } else { format!("{}{:.2}{}", sign, x, UNITS[u]) }
+}
+
 fn main() {
 
     use timely_communication::Config;
@@ -310,6 +341,15 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                 ".time" => {
                     println!("time:\t{:?}\t{:?}", timer.elapsed(), words.collect::<Vec<_>>());
                     *timer = std::time::Instant::now();
+                }
+                ".heap" => {
+                    let h = heap_info();
+                    println!(
+                        "heap:\trss={} peak_rss={} commit={} peak_commit={}\t{:?}",
+                        fmt_bytes(h.rss), fmt_bytes(h.peak_rss),
+                        fmt_bytes(h.commit), fmt_bytes(h.peak_commit),
+                        words.collect::<Vec<_>>(),
+                    );
                 }
                 ".decl" => {
                     // `.decl name(_, _, ...) [flags]` declares a relation's arity and any
