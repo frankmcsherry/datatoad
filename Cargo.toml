@@ -10,5 +10,5 @@ regex = "1.11.1"
 mimalloc = { version = "0.1.48", features = ["v3"] }
 libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
 simd-csv = "0.10.3"
-timely_bytes = { version = "0.29", path = "../timely-dataflow/bytes" }
-timely_communication = { version = "0.29", path = "../timely-dataflow/communication" }
+timely_bytes = { version = "0.30" }
+timely_communication = { version = "0.30" }
