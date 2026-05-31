@@ -119,7 +119,7 @@ fn main() {
 
 /// Pull the next command line from worker 0's command stack.
 ///
-/// Driver-level directives (`.exec`, `.quit`) are interpreted here and consumed without
+/// Driver-level directives (`.exec`, `.help`, `.quit`) are interpreted here and consumed without
 /// surfacing to the engine. EOF on a source pops it; an empty stack returns `None`,
 /// signaling the worker loop to broadcast "no more commands".
 fn next_command_line(cmd_stack: &mut Vec<String>) -> Option<String> {
@@ -148,9 +148,31 @@ fn next_command_line(cmd_stack: &mut Vec<String>) -> Option<String> {
                 let new_cmds: Vec<String> = words.flat_map(|filename| BufReader::new(File::open(filename).unwrap()).lines()).flatten().collect();
                 cmd_stack.extend(new_cmds.into_iter().rev());
             }
+            Some(".help") => { print_help(); }
             _ => return Some(text),
         }
     }
+}
+
+/// Print a summary of available directives.
+fn print_help() {
+    println!("Datatoad directives:");
+    println!("  .decl name(_, ...) [view]   declare a relation's arity (and optional flags)");
+    println!("  .exec <file> [<file> ...]   queue commands from one or more script files");
+    println!("  .flow <name> <file>         load a FlowLog-format relation from <file>");
+    println!("  .heap [tag ...]             print resident/peak memory usage");
+    println!("  .help                       show this message");
+    println!("  .list                       list all known relations and their sizes");
+    println!("  .load <name> <regex> <file> ingest <file>, extracting fields via named captures");
+    println!("  .note ...                   no-op; comment line");
+    println!("  .plan <rule>                show the planner's stage-by-stage breakdown for <rule>");
+    println!("  .prof                       print per-rule (and per-seed) accumulated runtime");
+    println!("  .quit                       exit datatoad");
+    println!("  .sync                       cluster-wide barrier (no-op single-process)");
+    println!("  .test <relation> <count>    assert global row count; nonzero exit on mismatch");
+    println!("  .time [tag ...]             print elapsed since previous .time and reset");
+    println!("  .wipe                       clear all facts, rules, and declarations");
+    println!("Datalog rules and facts are entered directly, e.g. `foo(x) :- bar(x).`");
 }
 
 /// Commands executed symmetrically by all workers.
