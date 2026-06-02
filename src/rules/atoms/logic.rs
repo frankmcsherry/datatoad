@@ -368,7 +368,7 @@ pub mod relations {
                     [Some(x), None,    Some(z)] => { if x > 0 && x <= z && (z / x) * x == z { output.1.push(&(z/x).to_be_bytes()[(8-width)..]) } },
                     // If we only have z, we there are only so many products that can form `z`.
                     [None,    None,    Some(z)] => {
-                        for i in 0 .. z.isqrt()+1 {
+                        for i in 1 .. z.isqrt()+1 {
                             if (z / i) * i == z { output.1.push(&i.to_be_bytes()[(8-width)..]); }
                         }
                     },
