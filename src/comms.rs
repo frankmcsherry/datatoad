@@ -70,9 +70,8 @@ impl Comms {
         indices.clear();
         self.broadcast(&mut facts);
         if let Some(flat) = facts.flatten() {
-            use columnar::Borrow;
-            for i in 0 .. flat.layer(0).list.values.len() {
-                let bytes = flat.layer(0).list.values.borrow().get(i).as_slice();
+            for i in 0 .. flat.layer(0).list.borrow().values.len() {
+                let bytes = flat.layer(0).list.borrow().values.get(i).as_slice();
                 if bytes.len() == 8 {
                     indices.insert(u64::from_be_bytes(bytes.try_into().unwrap()) as usize);
                 }
@@ -96,7 +95,7 @@ impl Comms {
 
             while countdown > 0 {
                 comms.receive();
-                while let Some(message) = receiver.recv() { if let Some(fact) = message.facts { facts.push(fact.into_iter().map(|l| std::rc::Rc::new(Layer { list: l })).collect::<Vec<_>>().try_into().unwrap()); } countdown -= 1; }
+                while let Some(message) = receiver.recv() { if let Some(fact) = message.facts { facts.push(fact.into_iter().map(|list| std::rc::Rc::new(Layer { list })).collect::<Vec<_>>().try_into().unwrap()); } countdown -= 1; }
                 comms.release();
             }
         }
@@ -133,9 +132,8 @@ impl Comms {
         self.broadcast(&mut facts);
         let mut total: u64 = 0;
         if let Some(flat) = facts.flatten() {
-            use columnar::Borrow;
-            for i in 0 .. flat.layer(0).list.values.len() {
-                let bytes = flat.layer(0).list.values.borrow().get(i).as_slice();
+            for i in 0 .. flat.layer(0).list.borrow().values.len() {
+                let bytes = flat.layer(0).list.borrow().values.get(i).as_slice();
                 if bytes.len() == 16 {
                     total += u64::from_be_bytes(bytes[8..].try_into().unwrap());
                 }
@@ -193,7 +191,7 @@ impl Channel {
         if let Some(facts) = facts.flatten() {
             let mut bools: std::collections::VecDeque<bool> = Default::default();
             for (index, sender) in self.sends.iter_mut().enumerate() {
-                bools.extend((0 .. facts.layer(0).list.values.len()).map(|i| (*facts.layer(0).list.values.borrow().get(i).as_slice().last().unwrap() as usize) % comms.peers() == index));
+                bools.extend((0 .. facts.layer(0).list.borrow().values.len()).map(|i| (*facts.layer(0).list.borrow().values.get(i).as_slice().last().unwrap() as usize) % comms.peers() == index));
                 if let Some(facts) = facts.clone().retain_core(1, bools.clone()).flatten() {
                     let layers = (0 .. facts.arity()).map(|i| facts.layer(i).clone()).collect::<Vec<_>>();
                     drop(facts);
@@ -209,7 +207,7 @@ impl Channel {
         // Receive data first, to allow early consolidation.
         while let Some(message) = self.recv.recv() {
             if let Some(fact) = message.facts {
-                facts.push(fact.into_iter().map(|l| std::rc::Rc::new(Layer { list: l })).collect::<Vec<_>>().try_into().unwrap());
+                facts.push(fact.into_iter().map(|list| std::rc::Rc::new(Layer { list })).collect::<Vec<_>>().try_into().unwrap());
             }
             else { self.count -= 1; }
         }
@@ -252,9 +250,9 @@ impl Conduit {
 ///
 /// The encoding is first the number of columns plus one, with zero indicating `None`.
 /// The columns are then appended.
-struct FactMessage { facts: Option<Vec<Lists<Terms>>> }
+struct FactMessage { facts: Option<Vec<columnar::bytes::stash::Stash<Lists<Terms>, timely_bytes::arc::Bytes>>> }
 
-use columnar::{Borrow, Container, Index, Len, bytes::{indexed, stash::Stash}};
+use columnar::{Index, Len, bytes::{indexed, stash::Stash}};
 
 impl Bytesable for FactMessage {
     fn from_bytes(mut bytes: timely_bytes::arc::Bytes) -> Self {
@@ -266,9 +264,7 @@ impl Bytesable for FactMessage {
                 let stash: Stash<Lists<Terms>, timely_bytes::arc::Bytes> = Stash::try_from_bytes(bytes.clone()).unwrap();
                 let length = stash.length_in_bytes();
                 let _ = bytes.extract_to(length);
-                let mut column: Lists<Terms> = Default::default();
-                column.extend_from_self(stash.borrow(), 0 .. stash.len());
-                columns.push(column);
+                columns.push(stash);
             }
             FactMessage { facts: Some(columns) }
         }

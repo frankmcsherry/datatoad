@@ -169,7 +169,7 @@ pub fn wco_join<T: Ord + Clone + std::fmt::Debug>(
                 // each worker only has its shard of `prefix`, so the local
                 // contribution to the global Cartesian is exactly the slice
                 // whose key falls on this worker.
-                use columnar::{Borrow, Container, Len};
+                use columnar::{Container, Len};
                 use crate::facts::trie::Layer;
                 comms.broadcast(&mut salad.facts);
                 let mut out = FactLSM::default();
@@ -234,13 +234,13 @@ fn wco_join_inner<T: Ord + Clone + std::fmt::Debug>(
     // Flatten to gain access to facts, to append counts.
     if let Some(mut facts) = salad.facts.flatten() {
         let values = vec![255u8; 4 * facts.len()];
-        facts.push_layer(Rc::new(Layer { list: Lists {
+        facts.push_layer(Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(Lists {
             bounds: Strides::new(1, facts.len() as u64),
             values: Lists {
                 bounds: Strides::new(4, facts.len() as u64),
                 values,
             },
-        }}));
+        }) }));
         salad.facts.push(facts);
     }
     salad.terms.push(potato);
@@ -250,11 +250,15 @@ fn wco_join_inner<T: Ord + Clone + std::fmt::Debug>(
 
     //  2.  Partition `salad.facts` by atom index, and join to get proposals.
     salad.terms.pop();
-    let notes = if let Some(mut facts) = salad.facts.flatten() {
-        let notes = Rc::unwrap_or_clone(facts.pop_layer().unwrap()).list.values.values;
+    let notes_layer: Option<Rc<crate::facts::trie::Layer<Terms>>> = if let Some(mut facts) = salad.facts.flatten() {
+        let layer = facts.pop_layer().unwrap();
         salad.extend([facts]);
-        notes
-    } else { Default::default() };
+        Some(layer)
+    } else { None };
+    let notes: &[u8] = match notes_layer.as_deref() {
+        Some(layer) => layer.list.borrow().values.values,
+        None => &[],
+    };
     let mut bools = std::collections::VecDeque::with_capacity(notes.len()/4);
 
     let mut shards = Vec::with_capacity(atoms.len());

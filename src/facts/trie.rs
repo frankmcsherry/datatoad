@@ -17,7 +17,7 @@
 //! the extracted column of values (forming runs of sorted values for prefixes).
 
 use std::rc::Rc;
-use columnar::{Borrow, Container, Len};
+use columnar::{Borrow, Len};
 use crate::facts::Lists;
 
 /// A non-empty collection of facts, represented as a trie with one layer per term.
@@ -32,16 +32,16 @@ use crate::facts::Lists;
 /// To represent an optionally empty collection consider an `Option<Forest<C>>` or
 /// a `FactLSM<Forest<C>>`.
 #[derive(Clone, Debug)]
-pub struct Forest<C> { layers: Vec<Rc<Layer<C>>> }
+pub struct Forest<C: columnar::ContainerBytes> { layers: Vec<Rc<Layer<C>>> }
 
-impl<C: Container> Forest<C> {
+impl<C: columnar::ContainerBytes> Forest<C> {
 
     /// The number of columns of facts in the collection.
     pub fn arity(&self) -> usize { self.layers.len() }
     /// A reference to the indexed layer.
     pub fn layer(&self, index: usize) -> &Rc<Layer<C>> { &self.layers[index] }
     /// The number of facts in the collection.
-    pub fn len(&self) -> usize { self.layers.last().map(|l| l.list.values.len()).unwrap_or(1) }
+    pub fn len(&self) -> usize { self.layers.last().map(|l| l.list.borrow().values.len()).unwrap_or(1) }
     /// A collection of borrowed containers.
     pub fn borrow<'a>(&'a self) -> Vec<<Lists<C> as Borrow>::Borrowed<'a>> {
         self.layers.iter().map(|x| x.list.borrow()).collect::<Vec<_>>()
@@ -61,7 +61,7 @@ impl<C: Container> Forest<C> {
     pub fn truncate(&mut self, arity: usize) { while self.arity() > arity { self.pop_layer(); } }
 }
 
-impl<C: Container> TryFrom<Vec<Rc<Layer<C>>>> for Forest<C> {
+impl<C: columnar::ContainerBytes> TryFrom<Vec<Rc<Layer<C>>>> for Forest<C> {
     type Error = Vec<Rc<Layer<C>>>;
     fn try_from(layers: Vec<Rc<Layer<C>>>) -> Result<Self, Self::Error> {
         for layer in layers.iter() { if layer.borrow().is_empty() { return Err(layers); } }
@@ -70,12 +70,12 @@ impl<C: Container> TryFrom<Vec<Rc<Layer<C>>>> for Forest<C> {
     }
 }
 
-impl<C: Container> crate::facts::Arity for Forest<C> {
+impl<C: columnar::ContainerBytes> crate::facts::Arity for Forest<C> {
     fn arity(&self) -> usize { self.arity() }
 }
 
 /// Advances pairs of lower and upper bounds on lists through each presented layer, to lower and upper bounds on items.
-pub fn advance_bounds<C: Container>(layers: &[<Lists<C> as Borrow>::Borrowed<'_>], bounds: &mut[(usize, usize)]) {
+pub fn advance_bounds<C: columnar::ContainerBytes>(layers: &[<Lists<C> as Borrow>::Borrowed<'_>], bounds: &mut[(usize, usize)]) {
     for layer in layers.iter() { crate::facts::trie::layers::advance_bounds::<C>(*layer, bounds); }
 }
 
@@ -85,9 +85,11 @@ pub fn advance_bounds<C: Container>(layers: &[<Lists<C> as Borrow>::Borrowed<'_>
 /// the node forks by way of the associated list of `T`, where each
 /// child has an index that can be used in a next layer (or not!).
 #[derive(Clone, Debug, Default)]
-pub struct Layer<C> { pub list: Lists<C> }
+pub struct Layer<C: columnar::ContainerBytes> {
+    pub list: columnar::bytes::stash::Stash<Lists<C>, timely_bytes::arc::Bytes>,
+}
 
-impl<C: Container> Layer<C> {
+impl<C: columnar::ContainerBytes> Layer<C> {
     pub fn borrow(&self) -> <Lists<C> as Borrow>::Borrowed<'_> { self.list.borrow() }
 }
 
@@ -139,7 +141,7 @@ pub mod terms {
                     values: column.borrow(),
                 };
                 // TODO: Figure out how to avoid `indexs` being literally just `0 .. len`.
-                Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(lists, &mut groups[..], &indexs[..], index == columns_len-1) })
+                Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(crate::facts::trie::layers::sort_terms(lists, &mut groups[..], &indexs[..], index == columns_len-1)) })
             }).collect();
             Some(layers.try_into().expect("empty columns tested earlier"))
         }
@@ -165,18 +167,18 @@ pub mod terms {
                 for col in group.iter() { if col > min { constraints.insert(*col, Ok(*min)); } }
             }
 
-            let mut active = (0 .. self.layers[0].list.values.len()).collect::<Vec<_>>();
+            let mut active = (0 .. self.layers[0].list.borrow().values.len()).collect::<Vec<_>>();
             let mut cursor = 0;
             for (col, filter) in constraints {
                 self.layers[cursor+1 .. col+1].iter().for_each(|l| {
-                    active = active.drain(..).flat_map(|i| { let (l,u) = l.list.bounds.bounds(i); l .. u}).collect::<Vec<_>>();
+                    active = active.drain(..).flat_map(|i| { let (l,u) = l.list.borrow().bounds.bounds(i); l .. u}).collect::<Vec<_>>();
                 });
                 cursor = col;
                 // `bounds` are now in terms of `col`s items.
                 match filter {
                     Ok(idx) => {
                         // naively start from all items at layer `idx`; could optimize to the active subset at the time.
-                        let mut bounds = (0 .. self.layers[idx].list.values.len()).map(|i| (i, i+1)).collect::<Vec<_>>();
+                        let mut bounds = (0 .. self.layers[idx].list.borrow().values.len()).map(|i| (i, i+1)).collect::<Vec<_>>();
                         crate::facts::trie::advance_bounds::<Terms>(&self.borrow()[idx+1..col+1], &mut bounds);
 
                         let mut active_peek = active.iter().copied().peekable();
@@ -187,7 +189,7 @@ pub mod terms {
                             std::iter::repeat(i).take(count)
                         }).collect::<Vec<_>>();
 
-                        crate::facts::trie::layers::filter_items::<Terms>(self.layers[col].borrow(), &mut active, self.layers[idx].list.values.borrow(), &aligned[..]);
+                        crate::facts::trie::layers::filter_items::<Terms>(self.layers[col].borrow(), &mut active, self.layers[idx].list.borrow().values, &aligned[..]);
                     }
                     Err(lit) => {
                         let mut literal = Lists::<Terms>::default();
@@ -199,7 +201,7 @@ pub mod terms {
             }
 
             // use `active` at `cursor` to retain lists and items.
-            let mut include = std::iter::repeat(false).take(self.layers[cursor].list.values.len()).collect::<std::collections::VecDeque<_>>();
+            let mut include = std::iter::repeat(false).take(self.layers[cursor].list.borrow().values.len()).collect::<std::collections::VecDeque<_>>();
             if active.is_empty() { return None; }
             for idx in active.iter().copied() { include[idx] = true; }
             let mut layers: Vec<Rc<_>> = Vec::new();
@@ -233,20 +235,20 @@ pub mod terms {
                         let first_pos = projection.iter().position(|c| c == &Ok(*col)).unwrap();
                         if first_pos == pos { self.layers.pop().unwrap() }
                         else {  // create a copy of this column at the end of `layers`.
-                            let mut bounds = (0 .. self.layers[*col].list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
+                            let mut bounds = (0 .. self.layers[*col].list.borrow().values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
                             for layer in self.layers[*col..].iter().skip(1) { crate::facts::trie::layers::advance_bounds::<Terms>(layer.borrow(), &mut bounds[..]); }
                             let mut list = Lists::<Terms>::default();
                             for (index, (lower, upper)) in bounds.into_iter().enumerate() {
-                                for _ in lower .. upper { use columnar::Push; list.push([self.layers[*col].list.values.borrow().get(index)]); }
+                                for _ in lower .. upper { use columnar::Push; list.push([self.layers[*col].list.borrow().values.get(index)]); }
                             }
-                            Rc::new(Layer { list })
+                            Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(list) })
                         }
                     },
                     Err(lit) => {
-                        let count = self.layers.last().map(|l| l.list.values.len()).unwrap_or(1);
+                        let count = self.layers.last().map(|l| l.list.borrow().values.len()).unwrap_or(1);
                         let mut list = Lists::<Terms>::default();
                         for _ in 0 .. count { use columnar::Push; list.push([lit]); }
-                        Rc::new(Layer { list })
+                        Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(list) })
                     },
                 });
             }
@@ -273,7 +275,7 @@ pub mod terms {
             for layer in 0 .. prefix {
                 let mut out_layer = <Lists::<Terms> as Container>::with_capacity_for([layers[layer]].into_iter());
                 for (lower, upper) in bounds.iter().copied() { out_layer.extend_from_self(layers[layer], lower .. upper); }
-                output.push(Rc::new(Layer { list: out_layer }));
+                output.push(Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(out_layer) }));
                 crate::facts::trie::layers::advance_bounds::<Terms>(layers[layer], &mut bounds);
             }
 
@@ -387,7 +389,7 @@ pub mod terms {
             groups_list_layer = col+1;
 
             let last = projection_idx == projection.len() - 1;
-            result.push(Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(layers[col], &mut groups, &indexs, last) }));
+            result.push(Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(crate::facts::trie::layers::sort_terms(layers[col], &mut groups, &indexs, last)) }));
 
             projection_idx += 1;
 
@@ -413,7 +415,7 @@ pub mod terms {
                 indexs.extend(idents.iter().copied().flat_map(|(l,u)| l..u).zip(bounds.iter().copied().map(|(l,u)| u-l)).flat_map(|(i,c)| std::iter::repeat(i).take(c)));
 
                 let last = projection_idx == projection.len() - 1;
-                result.push(Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(layers[col], &mut groups, &indexs, last) }));
+                result.push(Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(crate::facts::trie::layers::sort_terms(layers[col], &mut groups, &indexs, last)) }));
 
                 projection_idx += 1;
             }
@@ -618,7 +620,7 @@ pub mod terms {
                     expand(Rc::make_mut(&mut that_j), values, &mut others);
                     sort_terms(values, &mut groups, &that_j, last)
                 };
-                Rc::new(Layer { list })
+                Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(list) })
             }).collect::<Vec<_>>();
 
             output_lsm.push(layers.try_into().expect("non-empty intersection guarding"));
@@ -663,9 +665,10 @@ pub mod terms {
                     let mut layers = permute_subset(layers[index], projection, indexs[index], thresh);
                     let mut base: Layer<Terms> = Default::default();
                     use columnar::Push;
+                    let inner = base.list.make_typed();
                     // TODO: rework layers to allow this to be something akin to `&groups[index]` without the copy.
-                    base.list.values.extend(groups[index].iter().map(|g| (*g as u32).to_be_bytes()));
-                    base.list.bounds.push(groups[index].len() as u64);
+                    inner.values.extend(groups[index].iter().map(|g| (*g as u32).to_be_bytes()));
+                    inner.bounds.push(groups[index].len() as u64);
                     layers.insert(0, Rc::new(base));
                     extracted.layers.push(layers.try_into().expect("guarded by !groups[index].is_empty()"));
                 }
@@ -779,7 +782,7 @@ pub mod terms {
             });
 
             // First, collect reports to determine paths to retain to `self`.
-            let mut include = std::iter::repeat(!semi).take(self.layers[other_arity-1].list.values.len()).collect::<VecDeque<_>>();
+            let mut include = std::iter::repeat(!semi).take(self.layers[other_arity-1].list.borrow().values.len()).collect::<VecDeque<_>>();
             for other in others.iter() {
                 let mut reports = (vec![0], vec![0]);
                 for (layer0, layer1) in self.layers.iter().zip(other.iter()) {
@@ -797,7 +800,7 @@ pub mod terms {
         /// The bitmap is inserted between layer_index - 1 and layer_index, restricting either the items of layer_index-1 or the lists of layer_index.
         pub fn retain_core(mut self, layer_index: usize, mut include: std::collections::VecDeque<bool>) -> FactLSM<Self> {
 
-            if layer_index > 0 { assert_eq!(include.len(), self.layers[layer_index-1].list.values.len()); }
+            if layer_index > 0 { assert_eq!(include.len(), self.layers[layer_index-1].list.borrow().values.len()); }
             if layer_index < self.arity() { assert_eq!(include.len(), self.layers[layer_index].list.len()); }
 
             let aggr = include.iter().fold(0u8, |b, i| b | if *i { 1u8 } else { 2u8 });
@@ -869,16 +872,16 @@ pub mod layers {
     /// These sizes are not specifically important, but we do want to support this sort of thing.
     impl Layer<Terms> {
         /// Unions two layers, aligned through `reports`, which is refilled if `next` is set.
-        pub fn union(&self, other: &Self, reports: &mut VecDeque<Report>, next: bool) -> Self { Self { list: terms::union(self.borrow(), other.borrow(), reports, next) } }
+        pub fn union(&self, other: &Self, reports: &mut VecDeque<Report>, next: bool) -> Self { Self { list: columnar::bytes::stash::Stash::Typed(terms::union(self.borrow(), other.borrow(), reports, next)) } }
 
         /// Intersects two layers, aligned through `aligns`.
         pub fn intersection(&self, other: &Self, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) { terms::intersection(self.borrow(), other.borrow(), both0, both1) }
 
         /// Retains lists indicated by `retain`, which is refilled.
-        pub fn retain_lists(&self, bounds: &mut [(usize, usize)]) -> Self { Self { list: terms::retain_lists(self.borrow(), bounds) } }
+        pub fn retain_lists(&self, bounds: &mut [(usize, usize)]) -> Self { Self { list: columnar::bytes::stash::Stash::Typed(terms::retain_lists(self.borrow(), bounds)) } }
 
         /// Retains items indicated by `retain`, which is refilled.
-        pub fn retain_items(&self, retain: &mut VecDeque<bool>) -> Self { Self { list: terms::retain_items(self.borrow(), retain) } }
+        pub fn retain_items(&self, retain: &mut VecDeque<bool>) -> Self { Self { list: columnar::bytes::stash::Stash::Typed(terms::retain_items(self.borrow(), retain)) } }
     }
 
     pub mod terms {

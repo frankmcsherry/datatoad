@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-columnar = "0.12"
+columnar = { git = "https://github.com/frankmcsherry/columnar" }
+memmap2 = "0.9"
 getopts = { version = "0.2.24" }
 regex = "1.11.1"
 mimalloc = { version = "0.1.48", features = ["v3"], optional = true }

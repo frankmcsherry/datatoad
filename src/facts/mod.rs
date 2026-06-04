@@ -7,10 +7,12 @@ use columnar::primitive::offsets::Strides;
 
 use crate::types::Action;
 
+pub mod store;
 pub mod trie;
 
 /// A `Vecs` using strided offsets.
 pub type Lists<C> = Vecs<C, Strides>;
+
 /// Use the `List` type to access an alternate columnar container.
 pub type Terms = Lists<Vec<u8>>;
 

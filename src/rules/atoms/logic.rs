@@ -132,7 +132,7 @@ impl<T: Ord + Clone> exec::ExecAtom<T> for LogicRel<T> {
             //      Each present element of `self.bound` presents as a pair of borrowed container and list of counts for each element.
             //      All present pairs should have the same sum of counts, indicating the total number of argument tuples.
             let max = self.bound.iter().flatten().flat_map(|term| salad.terms.iter().position(|t| t == term)).max();
-            let cnt = max.map(|col| delta.layer(col).list.values.len()).unwrap_or(1);
+            let cnt = max.map(|col| delta.layer(col).list.borrow().values.len()).unwrap_or(1);
 
             //  Long-lived containers for literal values.
             //  In an FDB world, we would put these at the root, independent of any input data, rather than to the side.
@@ -145,10 +145,10 @@ impl<T: Ord + Clone> exec::ExecAtom<T> for LogicRel<T> {
                 match arg {
                     Ok(term) => {
                         salad.terms.iter().position(|t| t == term).map(|col| {
-                            let mut bounds = (0 .. delta.layer(col).list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
+                            let mut bounds = (0 .. delta.layer(col).list.borrow().values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
                             for i in col+1 .. max.unwrap()+1 { advance_bounds::<Terms>(delta.layer(i).borrow(), &mut bounds)};
                             let counts = bounds.into_iter().map(|(l, u)| u-l).collect::<Vec<_>>();
-                            (delta.layer(col).list.values.borrow(), counts)
+                            (delta.layer(col).list.borrow().values, counts)
                         })
                     },
                     Err(_) => { Some((lits[index].borrow(), vec![cnt] )) },
@@ -162,7 +162,7 @@ impl<T: Ord + Clone> exec::ExecAtom<T> for LogicRel<T> {
             //  3.  Project the output forward to the count column, potentially update count and index.
             let orders = match max {
                 Some(col) => {
-                    let mut bounds = (0 .. delta.layer(col).list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
+                    let mut bounds = (0 .. delta.layer(col).list.borrow().values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
                     for i in col+1 .. delta.arity() { advance_bounds::<Terms>(delta.layer(i).borrow(), &mut bounds)};
                     bounds.into_iter().map(|(l,u)| u-l).collect::<Vec<_>>()
                 },
@@ -170,7 +170,7 @@ impl<T: Ord + Clone> exec::ExecAtom<T> for LogicRel<T> {
             };
 
             let mut notes_rc = delta.pop_layer().unwrap();
-            let notes = &mut Rc::make_mut(&mut notes_rc).list.values.values;
+            let notes = &mut Rc::make_mut(&mut notes_rc).list.make_typed().values.values;
             for (index, order) in orders.into_iter().enumerate().flat_map(|(i,c)| std::iter::repeat(output[i]).take(c)).enumerate() {
                 if let Some(order) = order {
                     let order: u8 = (order+1).ilog2() as u8;
@@ -194,7 +194,7 @@ impl<T: Ord + Clone> exec::ExecAtom<T> for LogicRel<T> {
             //      Each present element of `self.bound` presents as a pair of borrowed container and list of counts for each element.
             //      All present pairs should have the same sum of counts, indicating the total number of argument tuples.
             let max = self.bound.iter().flatten().flat_map(|term| salad.terms.iter().position(|t| t == term)).max();
-            let cnt = max.map(|col| delta.layer(col).list.values.len()).unwrap_or(1);
+            let cnt = max.map(|col| delta.layer(col).list.borrow().values.len()).unwrap_or(1);
 
             //  Long-lived containers for literal values.
             //  In an FDB world, we would put these at the root, independent of any input data, rather than to the side.
@@ -207,10 +207,10 @@ impl<T: Ord + Clone> exec::ExecAtom<T> for LogicRel<T> {
                 match arg {
                     Ok(term) => {
                         salad.terms.iter().position(|t| t == term).map(|col| {
-                            let mut bounds = (0 .. delta.layer(col).list.values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
+                            let mut bounds = (0 .. delta.layer(col).list.borrow().values.len()).map(|i| (i,i+1)).collect::<Vec<_>>();
                             for i in col+1 .. max.unwrap()+1 { advance_bounds::<Terms>(delta.layer(i).borrow(), &mut bounds)};
                             let counts = bounds.into_iter().map(|(l, u)| u-l).collect::<Vec<_>>();
-                            (delta.layer(col).list.values.borrow(), counts)
+                            (delta.layer(col).list.borrow().values, counts)
                         })
                     },
                     Err(_) => { Some((lits[index].borrow(), vec![cnt] )) },
@@ -239,7 +239,7 @@ impl<T: Ord + Clone> exec::ExecAtom<T> for LogicRel<T> {
                             colnew.push(column.borrow().get(idx));
                         }
                     }
-                    delta.push_layer(Rc::new(Layer { list: colnew }));
+                    delta.push_layer(Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(colnew) }));
                     salad.facts.push(delta);
                 }
                 salad.terms.push(added.iter().next().unwrap().clone());
