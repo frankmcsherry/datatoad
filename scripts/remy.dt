@@ -1,0 +1,21 @@
+.note remy.dt — the chain-join intermediate-blowup query (from Remy Wang).
+.note A worst-case-optimal plan that lets T semijoin-prune y before fanning out the independent w dimension keeps the intermediate bounded.
+.note This is a canary: it runs fine today, and explodes to a 1T intermediate the moment the planner regresses to a binary-join-first shape.
+
+.time reset
+
+R(0, 0) :- .
+R(x, 999999) :- :range(1, x, 1000000).
+S(x, 0) :- :range(0, x, 999999).
+S(999999, x) :- :range(1, x, 1000000).
+T(0, x) :- :range(0, x, 999999).
+T(999999, 999999) :- .
+.time inputs built
+
+Q(w,x,y,z) :- R(w,x), S(x,y), T(y,z).
+.time Q complete
+
+.list
+.test Q 1999998
+
+.quit

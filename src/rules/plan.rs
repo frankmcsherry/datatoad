@@ -267,10 +267,22 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
         .cloned()
         .filter(|t| terms_to_atoms.contains_key(t) || need.contains(t))
         .collect();
-    // Body atoms whose terms are all already in `init_terms` should be present in stage 0.
+    // Stage-0 atoms semijoin-reduce the seed (see the `Plan` doc: "the atoms of the
+    // first stage intersect these terms, but they may not fully span it"). Two ways in:
+    //   - fully covered: every term is bound, a pure semijoin on all of them (this is
+    //     also how anti atoms participate — a complete antijoin);
+    //   - partial: the atom shares a bound term AND can `ground` from the bound set, so
+    //     it constrains the seed on the shared prefix. The `ground` check is what keeps
+    //     this sound: a pure filter (anti, equality predicate) grounds nothing, so it
+    //     can only enter fully covered, never on a strict subset.
     let init_atoms: BTreeSet<A> =
     body.iter()
-        .filter(|(_, boxed)| boxed.terms().iter().all(|t| init_terms.contains(t)))
+        .filter(|(_, boxed)| {
+            let terms = boxed.terms();
+            terms.iter().all(|t| init_terms.contains(t))
+            || (terms.iter().any(|t| init_terms.contains(t))
+                && !boxed.ground(&init_terms).is_empty())
+        })
         .map(|(a, _)| *a)
         .collect();
 
@@ -297,21 +309,14 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
             .next());
 
         if let Some(next_term) = next_term {
-            // Atoms that ground `next_term` AND share at least one already-bound term:
-            // these are real (non-cross-product) participants.
-            let constrained: BTreeSet<A> = body.iter()
-                .filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term)
-                    && terms.iter().any(|t| boxed.terms().contains(t)))
+            // Generous: any atom that can ground `next_term` participates in this stage,
+            // independent of whether it shares an already-bound term. Atoms with no bound
+            // term in common still semijoin on `next_term`, intersecting its candidate
+            // values here rather than deferring the constraint to a later stage.
+            let mut next_atoms: BTreeSet<A> = body.iter()
+                .filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term))
                 .map(|(a, _)| *a)
                 .collect();
-            // Fall back to any atom grounding `next_term` (including cross-product
-            // candidates) only when no constrained atoms exist for this term.
-            let mut next_atoms = constrained;
-            if next_atoms.is_empty() {
-                next_atoms.extend(body.iter()
-                    .filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term))
-                    .map(|(a, _)| *a));
-            }
             if next_atoms.is_empty() {
                 next_atoms = terms_to_atoms[&next_term].iter()
                     .filter(|a| body[a].terms().contains(&next_term))
@@ -332,7 +337,13 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
 
     // Fuse adjacent stages with the same single-atom set: the same atom introducing
     // multiple consecutive variables is one stage, not several.
-    for index in (1 .. plan.len()).rev() {
+    // Start at index 2: a fusion target must itself be an *introducing* stage. Stage 0
+    // is the seed stage — its atoms semijoin the seed rather than introduce its terms —
+    // so it is never a fusion target, else its introduced-nothing would absorb a real
+    // term and the executor (which runs stage 0 with empty `terms`) would drop it. We
+    // can't defer this to `ground`: at the seed boundary nothing is bound, so `ground`
+    // is cross-join-optimistic and can't distinguish the seed stage.
+    for index in (2 .. plan.len()).rev() {
         if plan[index].0 == plan[index-1].0 && plan[index].0.len() == 1 {
             let stage = plan.remove(index);
             plan[index-1].1.extend(stage.1);
