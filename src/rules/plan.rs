@@ -297,21 +297,14 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
             .next());
 
         if let Some(next_term) = next_term {
-            // Atoms that ground `next_term` AND share at least one already-bound term:
-            // these are real (non-cross-product) participants.
-            let constrained: BTreeSet<A> = body.iter()
-                .filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term)
-                    && terms.iter().any(|t| boxed.terms().contains(t)))
+            // Generous: any atom that can ground `next_term` participates in this stage,
+            // independent of whether it shares an already-bound term. Atoms with no bound
+            // term in common still semijoin on `next_term`, intersecting its candidate
+            // values here rather than deferring the constraint to a later stage.
+            let mut next_atoms: BTreeSet<A> = body.iter()
+                .filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term))
                 .map(|(a, _)| *a)
                 .collect();
-            // Fall back to any atom grounding `next_term` (including cross-product
-            // candidates) only when no constrained atoms exist for this term.
-            let mut next_atoms = constrained;
-            if next_atoms.is_empty() {
-                next_atoms.extend(body.iter()
-                    .filter(|(_a, boxed)| boxed.ground(&terms).contains(&next_term))
-                    .map(|(a, _)| *a));
-            }
             if next_atoms.is_empty() {
                 next_atoms = terms_to_atoms[&next_term].iter()
                     .filter(|a| body[a].terms().contains(&next_term))
