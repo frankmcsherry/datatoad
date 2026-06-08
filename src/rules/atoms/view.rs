@@ -177,9 +177,11 @@ fn build_join_apparatus(
     // If sum is the sole atom in this stage, it acts as the proposer (count protocol
     // short-circuits to atom.join with terms). Pattern is sum's terms minus what this
     // stage introduces. Otherwise sum is a validator and all of sum's terms are bound
-    // by the time `join` is called.
+    // by the time `join` is called. Stage 0 is excluded from the proposer case: it is
+    // run with empty `terms`, so even a sole atom there is a semijoin (introduces
+    // nothing), and its bound pattern is the terms it shares with the seed.
     let pattern: BTreeSet<String> =
-        if stage_atoms.len() == 1 && stage_atoms.contains(&load_atom) {
+        if stage_idx != 0 && stage_atoms.len() == 1 && stage_atoms.contains(&load_atom) {
             load_terms_set.difference(&stage_terms_to_intro).cloned().collect()
         } else {
             let mut all_bound = bound_at_stage.clone();
