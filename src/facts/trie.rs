@@ -1181,54 +1181,36 @@ pub mod layers {
 
         let mut output = Lists::<Vec<[u8;4]>>::default();
 
-        use crate::facts::radix_sort::{PageBuilder, lsb_paged};
-        let n = groups.len();
-        let mut row_iter = groups.iter().zip(indexs.iter()).enumerate().map(|(i, (group, index))| {
-            let mut row = [0u8; 12];
-            row[0..4].copy_from_slice(&(*group as u32).to_be_bytes());
-            row[4..8].copy_from_slice(&items[*index]);
-            row[8..12].copy_from_slice(&(i as u32).to_be_bytes());
-            row
-        });
-        let mut builder = PageBuilder::<[u8; 12], 12, 1024>::default();
-        let n_pages = (n + 1024 - 1) / 1024;
-        for _ in 0 .. n_pages {
-            // Vec::from_iter on a take()-bounded iterator pre-allocates exactly,
-            // avoiding the per-item cap check that PageBuilder::push pays.
-            let page: Vec<[u8; 12]> = row_iter.by_ref().take(1024).collect();
-            builder.push_page(page);
+        // Populate a byte vector with the content we want.
+        let mut to_sort: Vec<u8> = Vec::with_capacity(12 * groups.len());
+        for (i,(group,index)) in groups.iter().zip(indexs.iter()).enumerate() {
+            to_sort.extend(&(*group as u32).to_be_bytes());
+            to_sort.extend(&items[*index]);
+            to_sort.extend(&(i as u32).to_be_bytes());
         }
-        let (mut pages, mut filter) = builder.done();
-        for f in &mut filter[8..12] { *f = false; }
-        lsb_paged::<_, 1024>(&mut pages, &filter[..]);
+
+        crate::facts::radix_sort::lsb_be8(to_sort.as_chunks_mut::<12>().0);
+
+        let to_sort = to_sort.as_chunks_mut::<4>().0.as_chunks_mut::<3>().0;
 
         // We want to mint a new item for each distinct (group, value).
         // We want to seal a new list for each distinct group.
-        // We want to update groups with index as we go (random access potentially pessimal).
-        let mut pages_iter = pages.drain(..).filter(|p| !p.is_empty());
-        if let Some(first_page) = pages_iter.next() {
-            let triples = first_page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
-            let mut iter = triples.iter();
-            let [group, value, index] = iter.next().expect("non-empty page has at least one row");
+        let mut iter = to_sort.iter_mut();
+        if let Some([group, value, _index]) = iter.next() {
             output.values.push(*value);
-            let mut prev = (*group, *value);
-            groups[u32::from_be_bytes(*index) as usize] = 0;
-            for [group, value, index] in iter {
+            let mut prev = (*group, value);
+            *group = 0u32.to_be_bytes();
+            for [group, value, _index] in iter {
                 if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
-                if prev != (*group, *value) { output.values.push(*value); }
-                prev = (*group, *value);
-                groups[u32::from_be_bytes(*index) as usize] = output.values.len() - 1;
-            }
-            for page in pages_iter {
-                let triples = page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
-                for [group, value, index] in triples.iter() {
-                    if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
-                    if prev != (*group, *value) { output.values.push(*value); }
-                    prev = (*group, *value);
-                    groups[u32::from_be_bytes(*index) as usize] = output.values.len() - 1;
-                }
+                if prev != (*group, value) { output.values.push(*value); }
+                prev = (*group, value);
+                *group = ((output.values.len() - 1) as u32).to_be_bytes();
             }
             output.bounds.push(output.values.len() as u64);
+        }
+
+        if !last {
+            for [g, _, i] in to_sort { groups[u32::from_be_bytes(*i) as usize] = u32::from_be_bytes(*g) as usize; }
         }
 
         output
@@ -1240,46 +1222,27 @@ pub mod layers {
 
         let mut output = Lists::<Vec<[u8;4]>>::default();
 
-        use crate::facts::radix_sort::{PageBuilder, lsb_paged};
-        let n = groups.len();
-        let mut row_iter = groups.iter().zip(indexs.iter()).map(|(group, index)| {
-            let mut row = [0u8; 8];
-            row[0..4].copy_from_slice(&(*group as u32).to_be_bytes());
-            row[4..8].copy_from_slice(&items[*index]);
-            row
-        });
-        let mut builder = PageBuilder::<[u8; 8], 8, 1024>::default();
-        let n_pages = (n + 1024 - 1) / 1024;
-        for _ in 0 .. n_pages {
-            let page: Vec<[u8; 8]> = row_iter.by_ref().take(1024).collect();
-            builder.push_page(page);
+        // Populate a byte vector with the content we want.
+        let mut to_sort: Vec<u8> = Vec::with_capacity(8 * groups.len());
+        for (group, index) in groups.iter().zip(indexs.iter()) {
+            to_sort.extend(&(*group as u32).to_be_bytes());
+            to_sort.extend(&items[*index]);
         }
-        let (mut pages, filter) = builder.done();
-        lsb_paged::<_, 1024>(&mut pages, &filter[..]);
+
+        crate::facts::radix_sort::lsb_be8(to_sort.as_chunks_mut::<8>().0);
+
+        let to_sort = to_sort.as_chunks_mut::<4>().0.as_chunks_mut::<2>().0;
 
         // We want to mint a new item for each distinct (group, value).
         // We want to seal a new list for each distinct group.
-        // Drain pages as we consume them so the input memory drops monotonically
-        // while `output` grows; peak ~= max(input, output) rather than their sum.
-        let mut pages_iter = pages.drain(..).filter(|p| !p.is_empty());
-        if let Some(first_page) = pages_iter.next() {
-            let pairs = first_page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<2>().0;
-            let mut iter = pairs.iter();
-            let [group, value] = iter.next().expect("non-empty page has at least one row");
+        let mut iter = to_sort.iter_mut();
+        if let Some([group, value]) = iter.next() {
             output.values.push(*value);
-            let mut prev = (*group, *value);
+            let mut prev = (*group, value);
             for [group, value] in iter {
                 if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
-                if prev != (*group, *value) { output.values.push(*value); }
-                prev = (*group, *value);
-            }
-            for page in pages_iter {
-                let pairs = page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<2>().0;
-                for [group, value] in pairs.iter() {
-                    if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
-                    if prev != (*group, *value) { output.values.push(*value); }
-                    prev = (*group, *value);
-                }
+                if prev != (*group, value) { output.values.push(*value); }
+                prev = (*group, value);
             }
             output.bounds.push(output.values.len() as u64);
         }

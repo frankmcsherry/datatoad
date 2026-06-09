@@ -346,6 +346,11 @@ pub mod radix_sort {
     #[inline(never)]
     pub fn lsb<R: Radixable>(data: &mut [R]) { lsb_range(data, 0, R::WIDTH) }
 
+    /// Sort `[u8; W]` rows by the first 8 bytes as a big-endian u64.
+    pub fn lsb_be8<const W: usize>(rows: &mut [[u8; W]]) {
+        lsb_range(rows, 0, 8);
+    }
+
     pub fn lsb_range<R: Radixable>(data: &mut [R], lower: usize, upper: usize) {
 
         let mut filter = vec![false; R::WIDTH];
