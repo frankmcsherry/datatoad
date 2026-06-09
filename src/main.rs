@@ -99,7 +99,7 @@ fn main() {
                 if let Some(text) = next_command_line(&mut cmd_stack) {
                     let mut list: Lists<Terms> = Default::default();
                     list.push([text.as_bytes()]);
-                    command.push(vec![Rc::new(Layer { list })].try_into().unwrap());
+                    command.push(vec![Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(list) })].try_into().unwrap());
                 }
                 // None → leave `command` empty → broadcast tells workers to stop.
             }
@@ -168,7 +168,8 @@ fn print_help() {
     println!("  .heap [tag ...]             print resident/peak memory usage");
     println!("  .help                       show this message");
     println!("  .list                       list all known relations and their sizes");
-    println!("  .load <name> <regex> <file> ingest <file>, extracting fields via named captures");
+    println!("  .read <name> <regex> <file> ingest <file>, extracting fields via named captures");
+    println!("  .load <name> <dir>         mmap a previously .save'd relation from <dir>");
     println!("  .note ...                   no-op; comment line");
     println!("  .plan <rule>                show the planner's stage-by-stage breakdown for <rule>");
     println!("  .prof                       print per-rule (and per-seed) accumulated runtime");
@@ -203,11 +204,36 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     else { println!(".flow command requires arguments: <name> <file>"); }
                 }
                 ".load" => {
+                    // `.load <name> <dir>` mmaps a previously `.save`d Identity
+                    // form back into the relation.
+                    let parts: Vec<&str> = words.collect();
+                    let args: Result<[_;2],_> = parts.try_into();
+                    if let Ok([name, dir]) = args {
+                        match datatoad::facts::store::load_identity(name, std::path::Path::new(dir)) {
+                            Ok(forests) => {
+                                let total: usize = forests.iter().map(|f| f.len()).sum();
+                                let arity = forests.first().map(|f| f.arity()).unwrap_or(0);
+                                let atom = crate::types::Atom { name: name.to_string(), anti: false, terms: vec![crate::types::Term::Lit(vec![]); arity] };
+                                // Loaded forests are already deduped & sorted (they were
+                                // stable LSM layers when saved). Pushing them directly to
+                                // `stable` keeps them as separate layers — no flatten over
+                                // 134 MB just to honor the to_add → recent → stable pipeline.
+                                let entry = state.facts.entry(&atom);
+                                for forest in forests { entry.stable.push(forest); }
+                                if state.comms.index() == 0 { println!(".load ok   {}: {} facts", name, total); }
+                            }
+                            Err(e) => { if state.comms.index() == 0 { println!(".load FAIL {}: {}", name, e); } }
+                        }
+                    }
+                    else { if state.comms.index() == 0 { println!(".load command requires arguments: <name> <dir>"); } }
+                }
+                ".read" => {
 
                     use std::io::{BufRead, BufReader};
                     use std::fs::File;
 
-                    let args: Result<[_;3],_> = words.take(3).collect::<Vec<_>>().try_into();
+                    let parts: Vec<&str> = words.collect();
+                    let args: Result<[_;3],_> = parts.try_into();
                     if let Ok(args) = args {
                         let name = args[0].to_string();
                         let pattern = args[1];
@@ -257,7 +283,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                         }
                         else { println!("invalid regex: {:?}", pattern); }
                     }
-                    else { println!(".load command requires arguments: <name> <patt> <file>"); }
+                    else { println!(".read command requires arguments: <name> <patt> <file>"); }
                 }
                 ".note" => { }
                 ".plan" => {
@@ -355,7 +381,24 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                         }
                     }
                 }
-                ".save" => { println!("unimplemented: {:?}", word); }
+                ".save" => {
+                    // `.save <name> <dir>` — write the Identity form of <name>
+                    // to disk under <dir>/<name>/identity/. Each LSM layer
+                    // (plus `recent`) becomes a numbered subdirectory; each
+                    // trie layer within that becomes a column subdirectory
+                    // of small binary blobs. Single-worker scope for now.
+                    let args: Result<[_;2],_> = words.take(2).collect::<Vec<_>>().try_into();
+                    match args {
+                        Ok([name, dir]) => match state.facts.get(name) {
+                            Some(facts) => match datatoad::facts::store::save_identity(name, std::path::Path::new(dir), facts) {
+                                Ok(n) => { if state.comms.index() == 0 { println!(".save ok   {}: {} layer(s) under {}", name, n, dir); } }
+                                Err(e) => { if state.comms.index() == 0 { println!(".save FAIL {}: {}", name, e); } }
+                            },
+                            None => { if state.comms.index() == 0 { println!(".save FAIL {}: relation does not exist", name); } }
+                        },
+                        Err(_) => { if state.comms.index() == 0 { println!(".save command requires arguments: <name> <dir>"); } }
+                    }
+                }
                 ".sync" => {
                     // Cluster-wide barrier: broadcast an empty FactLSM so every
                     // peer waits to receive from every other peer. No-op in
@@ -565,7 +608,7 @@ mod flow_log {
                 lsb_paged::<_, 1024>(&mut data, &diff[..]);
                 let iter = data.into_iter().flat_map(|page| page);
                 if let Some(layers) = build(iter) {
-                    result.push(layers.into_iter().map(|l| std::rc::Rc::new(Layer { list: l }) ).collect::<Vec<_>>().try_into().unwrap());
+                    result.push(layers.into_iter().map(|l| std::rc::Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(l) }) ).collect::<Vec<_>>().try_into().unwrap());
                 }
                 counter = 0;
             }
@@ -577,7 +620,7 @@ mod flow_log {
         lsb_paged::<_, 1024>(&mut data, &diff[..]);
         let iter = data.into_iter().flat_map(|page| page);
         if let Some(layers) = build(iter) {
-            result.push(layers.into_iter().map(|l| std::rc::Rc::new(Layer { list: l }) ).collect::<Vec<_>>().try_into().unwrap());
+            result.push(layers.into_iter().map(|l| std::rc::Rc::new(Layer { list: columnar::bytes::stash::Stash::Typed(l) }) ).collect::<Vec<_>>().try_into().unwrap());
         }
 
         result

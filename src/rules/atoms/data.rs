@@ -50,7 +50,7 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
         } else { None };
 
         if let Some(mut delta) = salad.facts.flatten() {
-            let length = if prefix > 0 { delta.layer(prefix-1).list.values.len() } else { 1 };
+            let length = if prefix > 0 { delta.layer(prefix-1).list.borrow().values.len() } else { 1 };
             let mut counts = vec![0; length];
             // We may have a count override; if so, just apply it.
             if let Some(g) = global_zero_count { counts[0] = g; }
@@ -94,7 +94,7 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
                 }
                 for index in (0 .. prefix).rev() { layers.insert(0, Rc::new(delta.layer(index).retain_items(&mut bools))); }
 
-                assert_eq!(counts.len(), layers[prefix-1].list.values.len());
+                assert_eq!(counts.len(), layers[prefix-1].list.borrow().values.len());
                 delta = layers.try_into().expect("non-empty due to count.is_empty() guard");
             }
 
@@ -103,7 +103,7 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
             for layer in prefix .. delta.arity() { advance_bounds::<Terms>(delta.layer(layer).borrow(), &mut ranges); }
 
             let mut notes_rc = delta.pop_layer().unwrap();
-            let notes = &mut Rc::make_mut(&mut notes_rc).list.values.values;
+            let notes = &mut Rc::make_mut(&mut notes_rc).list.make_typed().values.values;
             for (count, range) in counts.iter().zip(ranges.iter()) {
                 let order = (count+1).ilog2() as u8;
                 for index in range.0 .. range.1 {
@@ -137,7 +137,7 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
             // side, preserving the "column 0 is the partition key" invariant
             // without any further coordination. Single-worker prefix-0 falls
             // through to `join_many` below, which handles the local Cartesian.
-            use columnar::{Borrow, Container, Len};
+            use columnar::{Container, Len};
             use crate::facts::trie::Layer;
             comms.broadcast(&mut salad.facts);
             if let Some(salad_full) = salad.facts.flatten() {

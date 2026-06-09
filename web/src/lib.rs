@@ -54,7 +54,7 @@ pub unsafe extern "C" fn eval(ptr: *mut u8, len: usize) {
 /// Command dispatch: a focused subset of the CLI's `handle_command`, covering
 /// what the talk demos need. Rules and facts go through the parser; directives
 /// are matched by leading token. `.plan`/`.prof` read in-memory state and so
-/// port cleanly; `.heap`/`.load`/`.flow` stay CLI-only (mimalloc / real files).
+/// port cleanly; `.heap`/`.load`/`.read`/`.flow` stay CLI-only (mimalloc / real files).
 fn dispatch(state: &mut types::State, text: &str) {
     if let Some(parsed) = parse::datalog(text) {
         state.extend(parsed);
