@@ -4,14 +4,18 @@ use std::collections::BTreeMap;
 
 use datatoad::{parse, types};
 
+#[cfg(feature = "mimalloc")]
 use mimalloc::MiMalloc;
 
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
 /// Snapshot of process memory stats from mimalloc's `mi_process_info`.
+#[cfg(feature = "mimalloc")]
 struct HeapInfo { rss: usize, peak_rss: usize, commit: usize, peak_commit: usize }
 
+#[cfg(feature = "mimalloc")]
 fn heap_info() -> HeapInfo {
     let mut v = [0usize; 8];
     // SAFETY: `mi_process_info` writes to eight `usize` out-parameters and
@@ -25,6 +29,7 @@ fn heap_info() -> HeapInfo {
     HeapInfo { rss: v[3], peak_rss: v[4], commit: v[5], peak_commit: v[6] }
 }
 
+#[cfg(feature = "mimalloc")]
 fn fmt_bytes(n: usize) -> String {
     // mimalloc tracks `current_commit` as a signed delta (commits minus
     // purges to the OS) and stores it in a usize; if it goes negative it
@@ -365,13 +370,18 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     *timer = std::time::Instant::now();
                 }
                 ".heap" => {
-                    let h = heap_info();
-                    println!(
-                        ".heap\trss={} peak_rss={} commit={} peak_commit={}\t{:?}",
-                        fmt_bytes(h.rss), fmt_bytes(h.peak_rss),
-                        fmt_bytes(h.commit), fmt_bytes(h.peak_commit),
-                        words.collect::<Vec<_>>(),
-                    );
+                    #[cfg(feature = "mimalloc")]
+                    {
+                        let h = heap_info();
+                        println!(
+                            ".heap\trss={} peak_rss={} commit={} peak_commit={}\t{:?}",
+                            fmt_bytes(h.rss), fmt_bytes(h.peak_rss),
+                            fmt_bytes(h.commit), fmt_bytes(h.peak_commit),
+                            words.collect::<Vec<_>>(),
+                        );
+                    }
+                    #[cfg(not(feature = "mimalloc"))]
+                    println!(".heap\tunavailable (built without mimalloc)\t{:?}", words.collect::<Vec<_>>());
                 }
                 ".decl" => {
                     // `.decl name(_, _, ...) [flags]` declares a relation's arity and any
