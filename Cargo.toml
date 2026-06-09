@@ -13,6 +13,14 @@ simd-csv = "0.10.3"
 timely_bytes = { version = "0.30" }
 timely_communication = { version = "0.30" }
 
+[profile.release]
+# One codegen unit, so that inlining is deterministic across builds. The default (16)
+# partitions the crate by size estimate, and a one-line source change can reshuffle
+# which functions share a unit, silently swinging hot-path inlining and benchmarks by
+# 10-25%. A single unit also measured faster than the default (fewer cycles, despite
+# more instructions retired), and compile time is not a constraint here.
+codegen-units = 1
+
 [features]
 # mimalloc is the CLI allocator and backs the `.heap` directive's stats. It is C, so
 # cross-compiling it to wasm needs a wasi-sdk (clang + sysroot) we don't carry — not
