@@ -1,0 +1,5 @@
+# Build artifacts and dependencies — rebuilt via `cargo build --target wasm32-wasip1`
+# and `npm install`.
+/target
+node_modules/
+datatoad_web.wasm

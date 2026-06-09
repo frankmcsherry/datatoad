@@ -1,0 +1,20 @@
+# Standalone reactor crate: compiles datatoad to a wasm32-wasip1 *reactor*
+# module (exported functions, persistent linear memory) for the browser demo.
+# Its own `[workspace]` keeps cargo from folding it into the root package.
+[workspace]
+
+[package]
+name = "datatoad-web"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# No default features → no mimalloc / libmimalloc-sys (C, won't target wasm).
+datatoad = { path = "..", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
