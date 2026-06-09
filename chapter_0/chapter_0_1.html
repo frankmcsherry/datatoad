@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-da115c78.js";
+            window.path_to_searchindex_js = "../searchindex-4e7cf34e.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-7b8d27c9.js"></script>
@@ -178,9 +178,9 @@
 <p>Datalog is a declarative language for expressing recursive queries over relations.</p>
 <p>A Datalog program consists of <em>facts</em> (things that are true) and <em>rules</em> (ways to derive new facts from existing ones).</p>
 <p>For example, given edges in a graph:</p>
-<pre><code>edge(1, 2).
-edge(2, 3).
-edge(3, 4).
+<pre><code>edge(1, 2) :- .
+edge(2, 3) :- .
+edge(3, 4) :- .
 </code></pre>
 <p>We can define reachability:</p>
 <pre><code>reach(x, y) :- edge(x, y).
@@ -190,6 +190,9 @@ reach(x, y) :- edge(x, z), reach(z, y).
 The second says: if there is an edge from <code>x</code> to <code>z</code>, and <code>y</code> is reachable from <code>z</code>, then <code>y</code> is reachable from <code>x</code>.</p>
 <p>The engine computes the fixpoint: it repeatedly applies the rules until no new facts are derived.
 The result is every <code>(x, y)</code> pair where <code>y</code> is reachable from <code>x</code>.</p>
+<blockquote>
+<p><strong>▶ Try it.</strong> Paste the facts and rules above into the <a href="../demo/">browser demo</a>, then run <code>.list</code> to see the derived <code>reach</code> relation. (Facts are written <code>edge(1, 2) :- .</code> — a rule with an empty body.)</p>
+</blockquote>
 <h2 id="incremental-datalog"><a class="header" href="#incremental-datalog">Incremental Datalog</a></h2>
 <p>The core loop of (semi-naive, bottom-up) Datalog evaluation is</p>
 <ol>

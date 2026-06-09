@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-da115c78.js";
+            window.path_to_searchindex_js = "../searchindex-4e7cf34e.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-7b8d27c9.js"></script>
@@ -192,6 +192,9 @@ Any binary join plan for triangles on this graph must consider roughly a trillio
 </code></pre>
 <p>Datatoad handles this in about a second.
 A worst-case optimal join avoids the intermediate blowup entirely: for each <code>(a,b)</code> it finds the <code>c</code> by intersecting values from <code>arc(b,c)</code> and <code>arc(c,a)</code> efficiently, and similarly for the other edge inputs.</p>
+<blockquote>
+<p><strong>▶ Try it.</strong> Paste both blocks above into the <a href="../demo/">browser demo</a>. This one is heavy — it builds a few million <code>arc</code> facts, and the demo runs single-threaded WebAssembly, so it takes noticeably longer than the ~1s above and pauses the page while it runs.</p>
+</blockquote>
 <p>For comparison, the equivalent SQL</p>
 <pre><code class="language-sql">select count(*)
 from arc ab, arc bc, arc ca

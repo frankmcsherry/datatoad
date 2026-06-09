@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-da115c78.js";
+            window.path_to_searchindex_js = "../searchindex-4e7cf34e.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-7b8d27c9.js"></script>
@@ -178,14 +178,17 @@
 <p>Running datatoad (<code>cargo run</code>), you are dropped into a REPL.
 If you would like it to go faster, you can use cargo’s <code>--release</code> flag.</p>
 <p>Let’s compute transitive closure of a small graph:</p>
-<pre><code>&gt; edge(1, 2) :- .
-&gt; edge(2, 3) :- .
-&gt; edge(3, 1) :- .
+<pre><code>edge(1, 2) :- .
+edge(2, 3) :- .
+edge(3, 1) :- .
 
-&gt; reach(x, y) :- edge(x, y).
-&gt; reach(x, y) :- edge(x, z), reach(z, y).
+reach(x, y) :- edge(x, y).
+reach(x, y) :- edge(x, z), reach(z, y).
 </code></pre>
 <p>Datatoad evaluates the rules to a fixpoint, and then returns a prompt.</p>
+<blockquote>
+<p><strong>▶ Try it.</strong> Paste the block above into the <a href="../demo/">browser demo</a> and run <code>.list</code> to see the result; the <code>:print</code> query below works there too.</p>
+</blockquote>
 <p>The <code>.list</code> command prints all relations and their sizes.
 You should see something like</p>
 <pre><code>&gt; .list
