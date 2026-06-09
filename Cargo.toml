@@ -13,6 +13,9 @@ simd-csv = "0.10.3"
 timely_bytes = { version = "0.30" }
 timely_communication = { version = "0.30" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = { version = "0.29", optional = true }
+
 [features]
 # mimalloc is the CLI allocator and backs the `.heap` directive's stats. It is C, so
 # cross-compiling it to wasm needs a wasi-sdk (clang + sysroot) we don't carry — not
@@ -21,3 +24,8 @@ timely_communication = { version = "0.30" }
 # `default-features = false` to drop it.
 default = ["mimalloc"]
 mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
+metal = ["dep:metal"]
+
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"

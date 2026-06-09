@@ -9,6 +9,9 @@ use crate::types::Action;
 
 pub mod trie;
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub mod radix_sort_metal;
+
 /// A `Vecs` using strided offsets.
 pub type Lists<C> = Vecs<C, Strides>;
 /// Use the `List` type to access an alternate columnar container.
@@ -347,7 +350,19 @@ pub mod radix_sort {
     pub fn lsb<R: Radixable>(data: &mut [R]) { lsb_range(data, 0, R::WIDTH) }
 
     /// Sort `[u8; W]` rows by the first 8 bytes as a big-endian u64.
+    /// Dispatches to the Metal sort when built with `--features metal`
+    /// and the input is large enough; otherwise falls back to `lsb_range`.
     pub fn lsb_be8<const W: usize>(rows: &mut [[u8; W]]) {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        {
+            // Below this, dispatch overhead and kernel startup dominate.
+            const GPU_THRESHOLD: usize = 250_000;
+            if rows.len() >= GPU_THRESHOLD && (W == 8 || W == 12) {
+                if crate::facts::radix_sort_metal::try_sort_u64_be(rows) {
+                    return;
+                }
+            }
+        }
         lsb_range(rows, 0, 8);
     }
 
