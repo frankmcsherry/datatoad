@@ -57,7 +57,11 @@ impl Comms {
         if !indices.is_empty() {
             let mut column = Terms::default();
             for index in indices.iter() {
-                column.push(&index.to_be_bytes().to_vec());
+                // Encode width-independently as `u64`: `usize::to_be_bytes` is 8
+                // bytes on 64-bit targets but 4 on wasm32, and the decode below
+                // matches on `len() == 8`. A bare `usize` here silently drops
+                // every index on wasm32, collapsing the fixpoint to one round.
+                column.push(&(*index as u64).to_be_bytes().to_vec());
             }
             if let Some(forest) = Forest::from_columns(vec![column]) {
                 facts.extend([forest]);
@@ -70,7 +74,7 @@ impl Comms {
             for i in 0 .. flat.layer(0).list.values.len() {
                 let bytes = flat.layer(0).list.values.borrow().get(i).as_slice();
                 if bytes.len() == 8 {
-                    indices.insert(usize::from_be_bytes(bytes.try_into().unwrap()));
+                    indices.insert(u64::from_be_bytes(bytes.try_into().unwrap()) as usize);
                 }
             }
         }
