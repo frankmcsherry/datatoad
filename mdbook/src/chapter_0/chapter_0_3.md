@@ -6,15 +6,17 @@ If you would like it to go faster, you can use cargo's `--release` flag.
 Let's compute transitive closure of a small graph:
 
 ```
-> edge(1, 2) :- .
-> edge(2, 3) :- .
-> edge(3, 1) :- .
+edge(1, 2) :- .
+edge(2, 3) :- .
+edge(3, 1) :- .
 
-> reach(x, y) :- edge(x, y).
-> reach(x, y) :- edge(x, z), reach(z, y).
+reach(x, y) :- edge(x, y).
+reach(x, y) :- edge(x, z), reach(z, y).
 ```
 
 Datatoad evaluates the rules to a fixpoint, and then returns a prompt.
+
+> **▶ Try it.** This whole page is a REPL session you can replay in the [browser demo](../demo/): paste the block above, then follow along with `.list` and `:print` below.
 
 The `.list` command prints all relations and their sizes.
 You should see something like
