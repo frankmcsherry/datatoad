@@ -74,6 +74,55 @@ pub trait PlanAtom<T: Ord> {
     /// any grounding of the input terms, as they may be called upon to be the ones to do this.
     fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T>;
 
+    /// Cardinality bound on `outs` (as a set) given ground values of `ins`, per input row.
+    ///
+    /// Returns `None` if the mode is unsupported — same predicate `ground` already
+    /// answers, so the default ties the two together: `Some((0, None))` whenever
+    /// `outs ⊆ ground(ins)`, `None` otherwise. Atoms with real cardinality
+    /// information override.
+    ///
+    /// Conventions on `outs`:
+    /// - `outs.is_empty()` is the existence question. `Some((0, 1))`-shaped
+    ///   answers say "this atom is a filter, contributing 0 or 1 surviving rows
+    ///   per input."
+    /// - `outs.len() == 1` is the proposer/cardinality question. `(min, max)`
+    ///   is the per-input row distinct-value count for that output term.
+    /// - `outs.len() > 1` is treated as the conservative default for now
+    ///   (multiplying per-column bounds is unsound when columns are correlated,
+    ///   which is the common datalog case).
+    ///
+    /// Implementors that override `range` must keep it consistent with
+    /// `ground`: returning `Some(_)` for a mode where `ground(ins)` would not
+    /// cover `outs` is a contract violation.
+    fn range(&self, ins: &BTreeSet<T>, outs: &BTreeSet<T>) -> Option<(usize, Option<usize>)> {
+        if outs.is_subset(&self.ground(ins)) { Some((0, None)) } else { None }
+    }
+}
+
+/// Fixpoint closure over a body's `ground` methods.
+///
+/// Starting from `seed`, repeatedly unions in every atom's `ground(closure)` until
+/// no atom can extend it further. Order-free: this answers reachability ("which
+/// terms can the body ground given these inputs"), not planning ("in what order").
+///
+/// Composite atoms (currently views) use this to implement their own `ground` by
+/// asking what their disjunct bodies can produce. The planner itself does *not*
+/// use this — `plan_body` wants one-hop "what can we add next," not transitive
+/// closure, because each newly-bound term reshapes the cost landscape.
+pub fn ground_closure<A: Ord, T: Ord + Clone>(
+    atoms: &BTreeMap<A, Box<dyn PlanAtom<T> + '_>>,
+    seed: &BTreeSet<T>,
+) -> BTreeSet<T> {
+    let mut closure: BTreeSet<T> = seed.clone();
+    loop {
+        let mut grew = false;
+        for boxed in atoms.values() {
+            for term in boxed.ground(&closure) {
+                if closure.insert(term) { grew = true; }
+            }
+        }
+        if !grew { return closure; }
+    }
 }
 
 use std::collections::{BTreeSet, BTreeMap};
@@ -110,6 +159,7 @@ pub fn plan_rule(
     body: &[Atom],
     seed_atoms: &[usize],
     decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
+    rules: &[(crate::types::Rule, Vec<Vec<(usize, std::time::Duration)>>)],
 ) -> (Plans<usize, String>, Loads<usize, String>) {
 
     let head_terms = head_order(head);
@@ -121,7 +171,7 @@ pub fn plan_rule(
     // One atoms map; each iteration takes a seed_idx out as the seed and puts it back
     // at the end. Same round-robin shape as semi-naive: the body's atoms are stable;
     // which one supplies the novelty rotates.
-    let mut atoms = build_atoms_map(body, decls);
+    let mut atoms = build_atoms_map(body, decls, rules);
     for &seed_idx in seed_atoms {
         if let Some(seed_atom) = atoms.remove(&seed_idx) {
             if seed_atom.terms() == seed_atom.ground(&Default::default()) {
@@ -226,8 +276,9 @@ pub fn plan_rule_seeded(
     seed: &[String],
     need: &[String],
     decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
+    rules: &[(crate::types::Rule, Vec<Vec<(usize, std::time::Duration)>>)],
 ) -> (Plan<usize, String>, BTreeMap<usize, Load<String>>) {
-    let atoms = build_atoms_map(body, decls);
+    let atoms = build_atoms_map(body, decls, rules);
     let base_actions = base_actions_for(body);
     let plan = plan_body(seed, &atoms, need);
     let loads = body_load(&plan, &atoms, &base_actions);
@@ -384,16 +435,21 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
 /// Dispatches on atom kind: logic atoms (`logic::resolve`), views
 /// (`view::ViewPlan`), antijoins (`anti::Anti`), or plain data relations (a bare
 /// `BTreeSet` of variable terms).
+///
+/// `rules` is required because `ViewPlan` needs to consult each defining disjunct's
+/// head and body to honestly answer `ground` (see `view::ViewPlan::ground`). Other
+/// atom kinds ignore it.
 pub fn build_atoms_map(
     body: &[Atom],
     decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
+    rules: &[(crate::types::Rule, Vec<Vec<(usize, std::time::Duration)>>)],
 ) -> BTreeMap<usize, Box<dyn PlanAtom<String>>> {
     body.iter().enumerate().map(|(index, atom)| {
         let terms: BTreeSet<String> = atom.terms.iter().filter_map(|t| t.as_var().cloned()).collect();
         let boxed_atom: Box<dyn PlanAtom<String>> =
         if let Some(logic) = crate::rules::atoms::logic::resolve(atom) { Box::new(logic) }
         else if decls.get(atom.name.as_str()).map_or(false, |d| d.view) {
-            Box::new(crate::rules::atoms::view::ViewPlan { head_terms: terms })
+            Box::new(crate::rules::atoms::view::ViewPlan::build(atom, decls, rules))
         }
         else if !atom.anti { Box::new(terms) }
         else { Box::new(crate::rules::atoms::anti::Anti(terms)) };

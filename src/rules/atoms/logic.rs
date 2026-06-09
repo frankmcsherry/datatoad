@@ -60,6 +60,19 @@ pub trait Logic {
     /// The number of results should not exceed the value reported by `self.count`, though the only certain correctness requirement
     /// is that it should not plan to return any values if the count was advertised as `Some(0)`, as it may not get the chance.
     fn delve(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], output: (usize, &mut Terms));
+
+    /// Static, mode-only cardinality bound on `output` (as a set) given concrete
+    /// values for `args`, per input row. Distinct from `count`, which is the
+    /// runtime per-input-row evaluation.
+    ///
+    /// `None` means the mode is unsupported (parallels `bound` returning a set
+    /// that doesn't cover `output`). Default mirrors `bound`: `Some((0, None))`
+    /// when `output ⊆ bound(args)`, `None` otherwise. Implementors override
+    /// when they can say something tighter — most logic predicates are
+    /// functional in well-formed modes and can claim `Some((0, Some(1)))`.
+    fn range(&self, args: &BTreeSet<usize>, output: &BTreeSet<usize>) -> Option<(usize, Option<usize>)> {
+        if output.is_subset(&self.bound(args)) { Some((0, None)) } else { None }
+    }
 }
 
 pub trait BatchLogic {
@@ -73,6 +86,10 @@ pub trait BatchLogic {
     fn count(&self, args: &[Option<(<Terms as columnar::Borrow>::Borrowed<'_>, Vec<usize>)>], output: &BTreeSet<usize>) -> Vec<Option<usize>>;
     /// For a subset of arguments, populate distinct values for arguments in `output`.
     fn delve(&self, args: &[Option<(<Terms as columnar::Borrow>::Borrowed<'_>, Vec<usize>)>], output: usize) -> Options<Lists<Terms>>;
+    /// Static, mode-only cardinality bound on `output` per input row. See `Logic::range`.
+    fn range(&self, args: &BTreeSet<usize>, output: &BTreeSet<usize>) -> Option<(usize, Option<usize>)> {
+        if output.is_subset(&self.bound(args)) { Some((0, None)) } else { None }
+    }
 }
 
 /// A wrapper for general logic-backed relations that manages the terms in each position.
@@ -106,6 +123,23 @@ impl <T: Ord + Clone> plan::PlanAtom<T> for LogicRel<T> {
             Err(_) => true,
         }).map(|(index,_term)| index).collect();
         self.logic.bound(&indexes).into_iter().map(|index| self.bound[index].as_ref().unwrap()).cloned().collect()
+    }
+    fn range(&self, ins: &BTreeSet<T>, outs: &BTreeSet<T>) -> Option<(usize, Option<usize>)> {
+        // Translate term-name modes to column-index modes for the inner BatchLogic.
+        // Literal positions count as bound (their value is fixed at construction);
+        // variable positions are bound iff the variable name is in `ins`.
+        let in_idx: BTreeSet<usize> = self.bound.iter().enumerate().filter(|(_, t)| match t {
+            Ok(name) => ins.contains(name),
+            Err(_) => true,
+        }).map(|(i, _)| i).collect();
+        // Outputs must be variable positions whose name is in `outs`. Outputs naming
+        // a literal-position term, or naming a term this atom doesn't reference, fall
+        // through to the default behavior (which will refuse the mode).
+        let out_idx: Option<BTreeSet<usize>> = outs.iter().map(|name| {
+            self.bound.iter().position(|t| matches!(t, Ok(n) if n == name))
+        }).collect();
+        let out_idx = out_idx?;
+        self.logic.range(&in_idx, &out_idx)
     }
 }
 
@@ -255,6 +289,7 @@ pub struct BatchedLogic<L: Logic> { pub logic: L }
 impl<L: Logic> BatchLogic for BatchedLogic<L> {
     fn arity(&self) -> usize { self.logic.arity() }
     fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { self.logic.bound(args) }
+    fn range(&self, args: &BTreeSet<usize>, output: &BTreeSet<usize>) -> Option<(usize, Option<usize>)> { self.logic.range(args, output) }
     fn count(&self, args: &[Option<(<Terms as columnar::Borrow>::Borrowed<'_>, Vec<usize>)>], output: &BTreeSet<usize>) -> Vec<Option<usize>> {
 
         // The following is .. neither clear nor performant. It should be at least one of those two things.
@@ -298,6 +333,7 @@ pub mod relations {
     use columnar::Push;
     use crate::facts::Terms;
 
+
     /// Big-endian interpretation of `bytes` as `u64`, if the length is at most eight.
     fn as_u64(bytes: &[u8]) -> Option<u64> {
         if bytes.len() > 8 { None }
@@ -336,6 +372,20 @@ pub mod relations {
             }
         }
         fn delve(&self, _args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: (usize, &mut Terms)) { panic!("NotEq asked to enumerate values"); }
+        fn range(&self, args: &BTreeSet<usize>, output: &BTreeSet<usize>) -> Option<(usize, Option<usize>)> {
+            // Pure filter: never produces values. `bound` is always empty, so
+            // any non-empty `output` is unsupported.
+            if !output.is_empty() { return None; }
+            // Both args bound: actual x != y filter, 0 or 1 per input. Single or
+            // no arg bound: trivially satisfiable (some y != x always exists),
+            // so survives every input row — keep the (1, _) lower bound so the
+            // planner doesn't pick it as a no-op semijoin.
+            if args.contains(&0) && args.contains(&1) {
+                Some((0, Some(1)))
+            } else {
+                Some((1, Some(1)))
+            }
+        }
     }
 
     /// The relation R(x,y,z) : x * y = z, for terms all of the same length (up to eight bytes).
@@ -344,6 +394,21 @@ pub mod relations {
         fn arity(&self) -> usize { 3 }
         fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> {
             if args.len() > 1 || args.contains(&2) { (0 .. 3).filter(|i| !args.contains(i)).collect() } else { Default::default() }
+        }
+        fn range(&self, args: &BTreeSet<usize>, output: &BTreeSet<usize>) -> Option<(usize, Option<usize>)> {
+            if !output.is_subset(&self.bound(args)) { return None; }
+            // Filter / functional factoring: z bound alongside x or y. See `Plus::range`
+            // for the productive vs filter split; same shape applies here.
+            if args.contains(&2) && (args.contains(&0) || args.contains(&1)) {
+                return Some((0, Some(1)));
+            }
+            // z bound alone, asked to produce x or y: up to sqrt(z) factor pairs,
+            // unbounded statically.
+            if args.contains(&2) && !output.is_empty() {
+                return Some((0, None));
+            }
+            // Productive (compute z) or trivially-satisfiable existence.
+            Some((1, Some(1)))
         }
         fn count(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
             // Any two+ bound terms should lead to a `Some(0)` or `Some(1)` determination.
@@ -383,6 +448,22 @@ pub mod relations {
     impl super::Logic for Plus {
         fn arity(&self) -> usize { 3 }
         fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { if args.len() > 1 { (0 .. 3).filter(|i| !args.contains(i)).collect() } else { Default::default() } }
+        fn range(&self, args: &BTreeSet<usize>, output: &BTreeSet<usize>) -> Option<(usize, Option<usize>)> {
+            if !output.is_subset(&self.bound(args)) { return None; }
+            // z bound alongside x or y: filter shape (subtraction can fail when
+            // the operand exceeds z; all-bound is a pure equality check). Every
+            // other supported mode is either productive (compute z from x and y)
+            // or trivially satisfiable (the relation always admits a completion),
+            // so every input row survives — the (1, _) lower bound is what tells
+            // the planner this would be a no-op as a pure semijoin.
+            // Overflow caveat: at the byte-width boundary the (1, Some(1)) cases
+            // can technically drop to 0; practical rules don't sit on that edge.
+            if args.contains(&2) && (args.contains(&0) || args.contains(&1)) {
+                Some((0, Some(1)))
+            } else {
+                Some((1, Some(1)))
+            }
+        }
         fn count(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
             // Any two+ bound terms should lead to a `Some(0)` or `Some(1)` determination.
             if let Some((decoded, width)) = decode_u64::<3>(args) {
@@ -415,6 +496,19 @@ pub mod relations {
     impl super::Logic for Range {
         fn arity(&self) -> usize { 3 }
         fn bound(&self, args: &BTreeSet<usize>) -> BTreeSet<usize> { if args.contains(&0) && args.contains(&2) && !args.contains(&1) { [1].into_iter().collect() } else { Default::default() } }
+        fn range(&self, args: &BTreeSet<usize>, output: &BTreeSet<usize>) -> Option<(usize, Option<usize>)> {
+            if !output.is_subset(&self.bound(args)) { return None; }
+            // Asked to produce v: enumerates `u - l` values, statically unbounded.
+            if !output.is_empty() { return Some((0, None)); }
+            // Existence modes. Trivially satisfiable when u is unbound and at
+            // most one of l/v is bound — we can always pick the rest to satisfy
+            // l <= v < u. Otherwise the inequality can fail per input.
+            if !args.contains(&2) && args.len() <= 1 {
+                Some((1, Some(1)))
+            } else {
+                Some((0, Some(1)))
+            }
+        }
         fn count(&self, args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: &BTreeSet<usize>) -> Option<usize> {
             // `decode_u64` returns `None` on all input `None`, meaning we must handle that specially to avoid a `Some(0)` response.
             // TODO: Also, calling this method with all `None` seems like a bad use of everyone's time; find out why and prevent it.
@@ -453,5 +547,15 @@ pub mod relations {
             Some(1)
         } else { None } }
         fn delve(&self, _args: &[Option<<Terms as columnar::Borrow>::Ref<'_>>], _output: (usize, &mut Terms)) { unimplemented!() }
+        fn range(&self, args: &BTreeSet<usize>, output: &BTreeSet<usize>) -> Option<(usize, Option<usize>)> {
+            // Side-effect predicate: every input row survives and prints. The
+            // truthful cardinality is (1, Some(1)), but we deliberately under-
+            // claim it as (0, Some(1)) so a "skip pure no-op filters" planner
+            // pass doesn't elide Print and silently drop its side effects.
+            // Treat this as opting out of tight bounds rather than a lie:
+            // (0, Some(1)) is still a correct over-approximation of (1, Some(1)).
+            if !output.is_empty() { return None; }
+            if (0 .. self.0).all(|i| args.contains(&i)) { Some((0, Some(1))) } else { None }
+        }
     }
 }
