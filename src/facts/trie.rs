@@ -475,7 +475,7 @@ pub mod terms {
             let mut this_aligned = Vec::new();
             for other in 0 .. thats.len() {
                 let layer1 = &thats[other][layer];
-                let results = crate::facts::trie::layers::intersection::<Terms>(*layer0, *layer1, &aligned[other].0, &aligned[other].1);
+                let results = crate::facts::trie::layers::terms::intersection(*layer0, *layer1, &aligned[other].0, &aligned[other].1);
                 this_aligned.extend_from_slice(&results.0);
                 aligned[other] = (Rc::new(results.0), Rc::new(results.1));
             }
