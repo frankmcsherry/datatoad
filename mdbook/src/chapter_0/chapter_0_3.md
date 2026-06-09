@@ -16,7 +16,7 @@ reach(x, y) :- edge(x, z), reach(z, y).
 
 Datatoad evaluates the rules to a fixpoint, and then returns a prompt.
 
-> **▶ Try it.** This whole page is a REPL session you can replay in the [browser demo](../demo/): paste the block above, then follow along with `.list` and `:print` below.
+> **▶ Try it.** Paste the block above into the [browser demo](../demo/) and run `.list` to see the result; the `:print` query below works there too.
 
 The `.list` command prints all relations and their sizes.
 You should see something like
