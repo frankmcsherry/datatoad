@@ -61,9 +61,9 @@ function emit(text, cls) {
 const stdout = ConsoleStdout.lineBuffered((l) => emit(l));
 const stderr = ConsoleStdout.lineBuffered((l) => emit(l, "err"));
 
-// Fetch the sample CSV and mount it in a virtual filesystem at "/arc.csv".
-const csv = new Uint8Array(await (await fetch("./arc.csv")).arrayBuffer());
-const root = new PreopenDirectory("/", new Map([["arc.csv", new File(csv)]]));
+// An empty virtual filesystem; the demo reads no files (data comes from rules
+// and `:range`, not `.flow`).
+const root = new PreopenDirectory("/", new Map());
 
 const wasi = new WASI([], [], [new OpenFile(new File([])), stdout, stderr, root]);
 const wasmBytes = await (await fetch("./datatoad_web.wasm")).arrayBuffer();

@@ -27,7 +27,7 @@ jobs:
       - run: cd web && npm ci
       - run: |
           mkdir -p mdbook/book/demo/node_modules/@bjorn3
-          cp web/index.html web/arc.csv mdbook/book/demo/
+          cp web/index.html mdbook/book/demo/
           cp web/target/wasm32-wasip1/release/datatoad_web.wasm mdbook/book/demo/
           cp -r web/node_modules/@bjorn3/browser_wasi_shim mdbook/book/demo/node_modules/@bjorn3/
       - uses: JamesIves/github-pages-deploy-action@v4
