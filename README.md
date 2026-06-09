@@ -1,6 +1,8 @@
 # datatoad
 An interactive, columnar, worst-case optimal Datalog
 
+📖 **[Read the book](http://www.frankmcsherry.org/datatoad/)** · 🐸 **[Try it in your browser](http://www.frankmcsherry.org/datatoad/demo/)** (datatoad compiled to WebAssembly, running client-side)
+
 [Datalog](https://en.wikipedia.org/wiki/Datalog) is a logic programming language whose evaluation is most commonly based on repeated application of relational equijoins.
 A Datalog program is a collection of rules, each of which describes conditions under which some facts being true leads to other facts being true.
 When combined with a starting set of facts, rules lead to an iterative process in which more facts can be inferred, iteratively, until eventually no additional facts can be learned.
