@@ -6,6 +6,10 @@ Datalog is a declarative logic programming language: you state rules about what 
 Datatoad is an interactive runtime for evaluating Datalog programs, with a focus on robust performance.
 It has a few "big ideas", revolving around unlocks from columnar data layouts, which are discussed in the next chapter.
 
+> **Try it in your browser.**
+> Datatoad compiles to WebAssembly and runs entirely client-side, with no install and nothing sent to a server.
+> [Open the live demo](../demo/) and type rules at the prompt.
+
 Although a lot of what follows is in the framing of Datalog, relatively little of datatoad is specific to Datalog.
 It just happens that Datalog is also a minimal shell of requirements for streaming, incremental, relational joins.
 Don't get attached to the logic programming part of the language on my account, at least.

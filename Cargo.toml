@@ -7,8 +7,17 @@ edition = "2024"
 columnar = "0.12"
 getopts = { version = "0.2.24" }
 regex = "1.11.1"
-mimalloc = { version = "0.1.48", features = ["v3"] }
-libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
+mimalloc = { version = "0.1.48", features = ["v3"], optional = true }
+libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"], optional = true }
 simd-csv = "0.10.3"
 timely_bytes = { version = "0.30" }
 timely_communication = { version = "0.30" }
+
+[features]
+# mimalloc is the CLI allocator and backs the `.heap` directive's stats. It is C, so
+# cross-compiling it to wasm needs a wasi-sdk (clang + sysroot) we don't carry — not
+# worth it for a demo that has no `.heap` and where the stock wasm allocator is fine.
+# On by default so the CLI binary is unchanged; the wasm web crate builds with
+# `default-features = false` to drop it.
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]

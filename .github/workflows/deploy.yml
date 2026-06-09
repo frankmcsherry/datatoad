@@ -18,6 +18,18 @@ jobs:
       - uses: actions/checkout@v6
       - run: cargo install mdbook --version 0.5.2
       - run: cd mdbook && mdbook build
+      # Build the browser WASM demo and stage it under the book output, so the
+      # single (clean) deploy of mdbook/book carries the book at /datatoad/ and
+      # the demo at /datatoad/demo/. The .wasm is rebuilt from the merged engine
+      # each deploy, so it can never drift from the code.
+      - run: rustup target add wasm32-wasip1
+      - run: cd web && cargo build --release --target wasm32-wasip1
+      - run: cd web && npm ci
+      - run: |
+          mkdir -p mdbook/book/demo/node_modules/@bjorn3
+          cp web/index.html mdbook/book/demo/
+          cp web/target/wasm32-wasip1/release/datatoad_web.wasm mdbook/book/demo/
+          cp -r web/node_modules/@bjorn3/browser_wasi_shim mdbook/book/demo/node_modules/@bjorn3/
       - uses: JamesIves/github-pages-deploy-action@v4
         with:
           branch: gh-pages

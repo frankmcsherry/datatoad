@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>datatoad — in the browser</title>
+<style>
+  :root { color-scheme: light; }
+  html, body { margin: 0; height: 100%; background: #ffffff; color: #24292f;
+    font: 20px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #app { display: flex; flex-direction: column; height: 100vh; padding: 12px 14px; box-sizing: border-box; }
+  h1 { font-size: 21px; margin: 0 0 8px; color: #1f883d; font-weight: 600; }
+  h1 small { color: #6e7781; font-weight: 400; }
+  #out { flex: 1; overflow: auto; white-space: pre-wrap; margin: 0; padding: 10px 12px;
+    background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; }
+  .prompt { color: #0969da; }
+  .tm { color: #57606a; font-size: 16px; }
+  .err { color: #cf222e; }
+  #bar { display: flex; gap: 6px; margin-top: 8px; }
+  #in { flex: 1; padding: 8px 10px; background: #ffffff; color: #24292f;
+    border: 1px solid #d0d7de; border-radius: 6px; font: inherit; resize: vertical; }
+  #run { align-self: stretch; }
+  button { padding: 8px 10px; background: #f6f8fa; color: #24292f; border: 1px solid #d0d7de;
+    border-radius: 6px; font: inherit; cursor: pointer; }
+  button:hover { background: #eaeef2; }
+  #btns { display: flex; flex-direction: column; gap: 6px; }
+  #btns button { min-width: 84px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>datatoad <small>— worst-case-optimal Datalog, compiled to WASM, running in your browser</small></h1>
+  <pre id="out"></pre>
+  <div id="bar">
+    <span class="prompt" style="align-self:start; padding-top:8px">&gt;</span>
+    <textarea id="in" rows="4" autofocus autocomplete="off" spellcheck="false"
+      placeholder="One command per line. Enter runs the whole block; Shift+Enter for a newline."></textarea>
+    <div id="btns">
+      <button id="run">Run &#9654;</button>
+      <button data-run=".list">.list</button>
+      <button data-run=".wipe">.wipe</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { WASI, File, OpenFile, PreopenDirectory, ConsoleStdout }
+  from "./node_modules/@bjorn3/browser_wasi_shim/dist/index.js";
+
+const out = document.getElementById("out");
+const input = document.getElementById("in");
+function emit(text, cls) {
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = text + "\n";
+  out.appendChild(span);
+  out.scrollTop = out.scrollHeight;
+}
+
+// fd 1 / fd 2 → the page. Line-buffered so each println lands as one line.
+const stdout = ConsoleStdout.lineBuffered((l) => emit(l));
+const stderr = ConsoleStdout.lineBuffered((l) => emit(l, "err"));
+
+// An empty virtual filesystem; the demo reads no files (data comes from rules
+// and `:range`, not `.flow`).
+const root = new PreopenDirectory("/", new Map());
+
+const wasi = new WASI([], [], [new OpenFile(new File([])), stdout, stderr, root]);
+const wasmBytes = await (await fetch("./datatoad_web.wasm")).arrayBuffer();
+const { instance } = await WebAssembly.instantiate(wasmBytes, {
+  wasi_snapshot_preview1: wasi.wasiImport,
+});
+wasi.initialize(instance); // reactor: keeps State alive across eval() calls
+
+const { alloc, eval: evalLine, memory } = instance.exports;
+const enc = new TextEncoder();
+function fmtMs(ms) {
+  return ms < 1000 ? `${ms.toFixed(ms < 10 ? 1 : 0)}ms` : `${(ms / 1000).toFixed(2)}s`;
+}
+function run(line) {
+  // Echo the command; keep the element so we can stamp its own elapsed time
+  // onto it once eval returns. The shim flushes this command's stdout
+  // synchronously during eval, so by the time we measure dt all of its output
+  // lines are already on the page below this echo.
+  const echo = document.createElement("span");
+  echo.className = "prompt";
+  echo.textContent = "> " + line;
+  out.appendChild(echo);
+
+  const bytes = enc.encode(line);
+  const ptr = alloc(bytes.length);
+  new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+  const t0 = performance.now();
+  evalLine(ptr, bytes.length);
+  const dt = performance.now() - t0;
+
+  const tm = document.createElement("span");
+  tm.className = "tm";
+  tm.textContent = "  " + fmtMs(dt);
+  echo.appendChild(tm);
+  echo.appendChild(document.createTextNode("\n"));
+  out.scrollTop = out.scrollHeight;
+}
+
+// Run a block of text one command per line — same as the CLI reads a script.
+// This is what makes `.time reset` work: it lands on its own line, not mashed
+// into the next command (a single-line <input> collapses pasted newlines).
+function runBlock(text) {
+  for (const line of text.split("\n").map((s) => s.trim()).filter(Boolean)) run(line);
+}
+function submit() {
+  if (input.value.trim()) { runBlock(input.value); input.value = ""; }
+  input.focus();
+}
+input.addEventListener("keydown", (e) => {
+  // Enter runs the block; Shift+Enter inserts a newline for composing scripts.
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+});
+document.getElementById("run").addEventListener("click", submit);
+for (const b of document.querySelectorAll("button[data-run]")) {
+  b.addEventListener("click", () => { run(b.dataset.run); input.focus(); });
+}
+</script>
+</body>
+</html>
