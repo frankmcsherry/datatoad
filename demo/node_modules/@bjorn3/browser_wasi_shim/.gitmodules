@@ -1,0 +1,11 @@
+[submodule "examples/wasm-rustc"]
+	path = examples/wasm-rustc
+	url = git@github.com:bjorn3/wasm-rustc.git
+[submodule "test/wasi-testsuite"]
+	path = test/wasi-testsuite
+	url = https://github.com/WebAssembly/wasi-testsuite
+	branch = prod/testsuite-base
+[submodule "threads/examples/wasi_multi_threads_rustc/rust_wasm"]
+	path = threads/examples/wasi_multi_threads_rustc/rust_wasm
+	url = https://github.com/oligamiq/rust_wasm
+	shallow = true
