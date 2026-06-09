@@ -62,6 +62,8 @@ tri(a, b, c) :- arc(a,b), arc(b,c), arc(c,a).
 For me, this loads the data in ~100ms, and enumerates all triangles in an additional 1s.
 Also for me, the PostgreSQL query is still running five minutes later, and has spun up two additional helper processes to help max out my CPUs.
 
+> **▶ Try it in your browser.** Paste the `datatoad` block above into the [live demo](http://www.frankmcsherry.org/datatoad/demo/). It builds a few million facts in single-threaded WebAssembly, so it runs slower than the native ~1s and pauses the page while it works.
+
 ### Predicates as Relations
 
 You may have noticed the `:range` and `:plus` above, and wondered what they represent?

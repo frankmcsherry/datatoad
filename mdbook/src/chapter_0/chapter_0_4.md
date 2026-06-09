@@ -25,6 +25,8 @@ tri(a, b, c) :- arc(a,b), arc(b,c), arc(c,a).
 Datatoad handles this in about a second.
 A worst-case optimal join avoids the intermediate blowup entirely: for each `(a,b)` it finds the `c` by intersecting values from `arc(b,c)` and `arc(c,a)` efficiently, and similarly for the other edge inputs.
 
+> **▶ Try it.** Paste both blocks above into the [browser demo](../demo/). This one is heavy — it builds a few million `arc` facts, and the demo runs single-threaded WebAssembly, so it takes noticeably longer than the ~1s above and pauses the page while it runs.
+
 For comparison, the equivalent SQL
 ```sql
 select count(*)

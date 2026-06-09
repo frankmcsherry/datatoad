@@ -7,9 +7,9 @@ A Datalog program consists of *facts* (things that are true) and *rules* (ways t
 For example, given edges in a graph:
 
 ```
-edge(1, 2).
-edge(2, 3).
-edge(3, 4).
+edge(1, 2) :- .
+edge(2, 3) :- .
+edge(3, 4) :- .
 ```
 
 We can define reachability:
@@ -24,6 +24,8 @@ The second says: if there is an edge from `x` to `z`, and `y` is reachable from 
 
 The engine computes the fixpoint: it repeatedly applies the rules until no new facts are derived.
 The result is every `(x, y)` pair where `y` is reachable from `x`.
+
+> **▶ Try it.** Paste the facts and rules above into the [browser demo](../demo/), then run `.list` to see the derived `reach` relation. (Facts are written `edge(1, 2) :- .` — a rule with an empty body.)
 
 ## Incremental Datalog
 
