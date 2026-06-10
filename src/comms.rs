@@ -15,7 +15,7 @@ pub struct Comms {
     /// An incrementing channel identifier.
     count: usize,
     /// Cluster-wide budget for in-flight intermediate tuples (bytes).
-    /// Configurable via `-m`/`--memory` CLI flag or `DATATOAD_MEMORY` env var.
+    /// Configurable via the `-m`/`--memory` CLI flag.
     mem_budget: usize,
 }
 
