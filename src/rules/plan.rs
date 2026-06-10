@@ -350,6 +350,20 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
         }
     }
 
+    if plan.len() >= 2 {
+        // Elide an atom that ends phase 0 and starts phase 1: the LAST stage-0
+        // semijoin in execution order that is also the FIRST stage-1 atom in count
+        // order. Adjacency makes the elision free on every axis: no sibling stage-0
+        // semijoin sees unfiltered rows (they all ran earlier), no other count
+        // touches dead rows (its count runs first, and zero counts prune), and its
+        // count's align_to is the same permute the semijoin would have performed.
+        let s0_last = plan[0].0.iter().next_back().cloned();
+        let s1_first = plan[1].0.iter().next().cloned();
+        if let (Some(a), Some(b)) = (s0_last, s1_first) {
+            if a == b { plan[0].0.remove(&a); }
+        }
+    }
+
     // Set each stage's projection target by demand from later stages plus `need`.
     for index in 1 .. plan.len() {
         let (this, rest) = plan.split_at_mut(index);
