@@ -362,7 +362,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     // single-process mode (peers() == 1). Useful at the top of
                     // a script before the first `.time` measurement, to absorb
                     // ssh/startup skew across processes.
-                    let mut empty = datatoad::facts::FactLSM::default();
+                    let mut empty = datatoad::facts::FactLSM::<datatoad::facts::FactCollection>::default();
                     state.comms.broadcast(&mut empty);
                 }
                 ".time" => {

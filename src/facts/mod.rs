@@ -135,6 +135,7 @@ impl Relations {
 
 // pub use list::FactList as FactCollection;
 pub use trie::Forest;
+pub use trie::layers::FactColumn;
 pub type FactCollection = Forest<Terms>;
 
 /// A constant integer to which the facts could be upgraded.
@@ -187,7 +188,7 @@ pub trait Arity {
 }
 
 /// A type that can contain and work with facts.
-pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
+pub trait FactContainer : Length + Merge + Arity + Sized + Clone + crate::comms::Exchangeable {
 
     /// Applies an action to the facts, building the corresponding output.
     fn act_on(&self, action: &Action<Vec<u8>>, thresh: usize) -> FactLSM<Self>;
@@ -199,7 +200,7 @@ pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
     /// Joins `self` and `others` on the first `arity` columns, putting projected results in `builders`.
     ///
     /// The default implementation processes `others` in order, but more thoughtful implementations exist.
-    fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize], conduit: crate::comms::Conduit) -> FactLSM<Self>;
+    fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize], conduit: crate::comms::Conduit<Self>) -> FactLSM<Self>;
 }
 
 /// An evolving set of facts.
