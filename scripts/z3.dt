@@ -1,0 +1,85 @@
+.note currently planning fails due to antijoin with unconstrained term, e.g. `!foo(a, _)`; manually worked around.
+.note in profiling, very sort heavy (90%+ of the time).
+.sync
+.time reset
+
+.flow Arch_memory_access                    flowlog/z3/Arch_memory_access_truncate.csv # cut -f1-2,5-7,9 Arch_memory_access.csv > $DATATOAD_DATA/Arch_memory_access_truncate.csv
+.flow Arch_reg_reg_arithmetic_operation     $DATATOAD_DATA/flowlog/z3/Arch_reg_reg_arithmetic_operation.csv
+.flow Arch_return_reg                       $DATATOAD_DATA/flowlog/z3/Arch_return_reg.csv
+.flow Block_next                            $DATATOAD_DATA/flowlog/z3/Block_next.csv
+.flow Block_last_instruction                $DATATOAD_DATA/flowlog/z3/Block_last_instruction.csv
+.flow Code_in_block                         $DATATOAD_DATA/flowlog/z3/Code_in_block.csv
+.flow Direct_call                           $DATATOAD_DATA/flowlog/z3/Direct_call.csv
+.flow May_fallthrough                       $DATATOAD_DATA/flowlog/z3/May_fallthrough.csv
+.flow Reg_def_use_block_last_def            $DATATOAD_DATA/flowlog/z3/Reg_def_use_block_last_def.csv
+.flow Reg_def_use_defined_in_block          $DATATOAD_DATA/flowlog/z3/Reg_def_use_defined_in_block.csv
+.flow Reg_def_use_flow_def                  $DATATOAD_DATA/flowlog/z3/Reg_def_use_flow_def.csv
+.flow Reg_def_use_live_var_def              $DATATOAD_DATA/flowlog/z3/Reg_def_use_live_var_def.csv
+.flow Reg_def_use_ref_in_block              $DATATOAD_DATA/flowlog/z3/Reg_def_use_ref_in_block.csv
+.flow Reg_def_use_return_block_end          $DATATOAD_DATA/flowlog/z3/Reg_def_use_return_block_end.csv
+.flow Reg_def_use_used                      $DATATOAD_DATA/flowlog/z3/Reg_def_use_used.csv
+.flow Reg_def_use_used_in_block             $DATATOAD_DATA/flowlog/z3/Reg_def_use_used_in_block.csv
+.flow Reg_used_for                          $DATATOAD_DATA/flowlog/z3/Reg_used_for.csv
+.flow Relative_jump_table_entry_candidate   $DATATOAD_DATA/flowlog/z3/Relative_jump_table_entry_candidate.csv
+.flow Stack_def_use_def                     $DATATOAD_DATA/flowlog/z3/Stack_def_use_def.csv
+.flow Stack_def_use_defined_in_block        $DATATOAD_DATA/flowlog/z3/Stack_def_use_defined_in_block.csv
+.flow Stack_def_use_live_var_def            $DATATOAD_DATA/flowlog/z3/Stack_def_use_live_var_def.csv
+.flow Stack_def_use_ref_in_block            $DATATOAD_DATA/flowlog/z3/Stack_def_use_ref_in_block.csv
+.flow Stack_def_use_used_in_block           $DATATOAD_DATA/flowlog/z3/Stack_def_use_used_in_block.csv
+.flow Stack_def_use_used                    $DATATOAD_DATA/flowlog/z3/Stack_def_use_used.csv
+
+.flow Stack_def_use_live_var_used           $DATATOAD_DATA/flowlog/z3/Stack_def_use_live_var_used.csv
+.flow Jump_table_start                      $DATATOAD_DATA/flowlog/z3/Jump_table_start.csv
+.flow Def_used_for_address_0                $DATATOAD_DATA/flowlog/z3/Def_used_for_address.csv
+.flow Stack_def_use_block_last_def          $DATATOAD_DATA/flowlog/z3/Stack_def_use_block_last_def.csv
+
+.time DDISASM z3 loaded
+
+Jump_table_target(EA,Dest) :- Jump_table_start(EA,Size,TableStart,_0,_1),  Relative_jump_table_entry_candidate(_2,TableStart,Size,_3,Dest,_4,_5).
+
+Reg_def_use_def_used(EA_def,Var,EA_used,Index) :- Reg_def_use_used(EA_used,Var,Index), Reg_def_use_block_last_def(EA_used,EA_def,Var).
+Reg_def_use_def_used(EA_def,VarIdentity,EA_used,Index) :- Reg_def_use_live_var_at_block_end(Block,BlockUsed,Var), Reg_def_use_live_var_def(Block,VarIdentity,Var,EA_def), Reg_def_use_live_var_used(BlockUsed,Var,EA_used,Index).
+Reg_def_use_def_used(EA_def,Var,Next_EA_used,NextIndex) :- Reg_def_use_live_var_at_prior_used(EA_used,NextUsedBlock,Var), Reg_def_use_def_used(EA_def,Var,EA_used,_6), Reg_def_use_live_var_used(NextUsedBlock,Var,Next_EA_used,NextIndex).
+Reg_def_use_def_used(EA_def,Reg,EA_used,Index) :- Reg_def_use_return_val_used(_7,Callee,Reg,EA_used,Index), Reg_def_use_return_block_end(Callee,_8,_9,BlockEnd), Reg_def_use_block_last_def(BlockEnd,EA_def,Reg).
+
+Reg_def_use_return_val_used(EA_call,Callee,Reg,EA_used,Index_used) :- Arch_return_reg(Reg), Reg_def_use_def_used(EA_call,Reg,EA_used,Index_used), Direct_call(EA_call,Callee).
+
+ANTIJOIN_TEMP0(x, y) :- Reg_def_use_block_last_def(x, _0, y).
+ANTIJOIN_TEMP1(x, y, z) :- Reg_def_use_flow_def(x, y, z, _0).
+
+Reg_def_use_live_var_used(Block,Var,EA_used,Index) :- Reg_def_use_used_in_block(Block,EA_used,Var,Index), !ANTIJOIN_TEMP0(EA_used,Var).
+Reg_def_use_live_var_used(RetBlock,Reg,EA_used,Index) :- Reg_def_use_return_block_end(Callee,_0,RetBlock,RetBlockEnd), !ANTIJOIN_TEMP0(RetBlockEnd,Reg), Reg_def_use_return_val_used(_1,Callee,Reg,EA_used,Index).
+
+Reg_def_use_live_var_at_prior_used(EA_used,BlockUsed,Var) :- Reg_def_use_live_var_at_block_end(Block,BlockUsed,Var), Reg_def_use_used_in_block(Block,EA_used,Var,_0), !Reg_def_use_defined_in_block(Block,Var).
+Reg_def_use_live_var_at_block_end(PrevBlock,Block,Var) :- Block_next(PrevBlock,PrevBlockEnd,Block), Reg_def_use_live_var_used(Block,Var,_0,_1), !ANTIJOIN_TEMP1(PrevBlockEnd,Var,Block).
+Reg_def_use_live_var_at_block_end(PrevBlock,BlockUsed,Var) :- Reg_def_use_live_var_at_block_end(Block,BlockUsed,Var), !Reg_def_use_ref_in_block(Block,Var), Block_next(PrevBlock,_0,Block).
+
+Reg_reg_arithmetic_operation_defs(EA,Reg_def,EA_def1,Reg1,EA_def2,Reg2,Mult,Offset) :- Def_used_for_address(EA,Reg_def,_0), Arch_reg_reg_arithmetic_operation(EA,Reg_def,Reg1,Reg2,Mult,Offset), :noteq(Reg1, Reg2), Reg_def_use_def_used(EA_def1,Reg1,EA,_1), :noteq(EA, EA_def1), Reg_def_use_def_used(EA_def2,Reg2,EA,_3), :noteq(EA, EA_def2).
+
+Def_used_for_address(EA,Reg,8859592) :- Def_used_for_address_0(EA,Reg,8859592).
+Def_used_for_address(EA_def,Reg,Type) :- Reg_def_use_def_used(EA_def,Reg,EA,_0), Reg_used_for(EA,Reg,Type).
+Def_used_for_address(EA_def,Reg,Type) :- Def_used_for_address(EA_used,_1,Type), Reg_def_use_def_used(EA_def,Reg,EA_used,_2).
+Def_used_for_address(EA_def,Reg1,Type) :- Def_used_for_address(EALoad,Reg2,Type), Arch_memory_access(0,EALoad,Reg2,RegBaseLoad,4,StackPosLoad), Stack_def_use_def_used(EAStore,RegBaseStore,StackPosStore,EALoad,RegBaseLoad,StackPosLoad), Arch_memory_access(2309374,EAStore,Reg1,RegBaseStore,4,StackPosStore), Reg_def_use_def_used(EA_def,Reg1,EAStore,_0).
+
+Stack_def_use_def_used(EA_def,Varr,Varp,EA_used,Varr,Varp) :- Stack_def_use_used(EA_used,Varr,Varp,_0), Stack_def_use_block_last_def(EA_used,EA_def,Varr,Varp).
+Stack_def_use_def_used(EA_def,DefVarr,DefVarp,EA_used,VarUsedr,VarUsedp) :- Stack_def_use_live_var_at_block_end(Block,BlockUsed,Varr,Varp), Stack_def_use_live_var_def(Block,DefVarr,DefVarp,Varr,Varp,EA_def), Stack_def_use_live_var_used(BlockUsed,Varr,Varp,VarUsedr,VarUsedp,EA_used,_0,_1).
+Stack_def_use_def_used(EA_def,DefVarr,DefVarp,EA_used,UsedVarr,UsedVarp) :- Stack_def_use_live_var_used(EA,DefVarr,DefVarp,UsedVarr,UsedVarp,EA_used,_0,_1), May_fallthrough(EA_def,EA), Code_in_block(EA_def,Block), Code_in_block(EA,Block), Stack_def_use_def(EA_def,DefVarr,DefVarp).
+Stack_def_use_def_used(EA_def,VarDefr,VarDefp,Next_EA_used,VarUsedr,VarUsedp) :- Stack_def_use_live_var_at_prior_used(EA_used,NextUsedBlock,Varr,Varp), Stack_def_use_def_used(EA_def,VarDefr,VarDefp,EA_used,Varr,Varp), Stack_def_use_live_var_used(NextUsedBlock,Varr,Varp,VarUsedr,VarUsedp,Next_EA_used,_0,_1).
+
+Stack_def_use_live_var_at_block_end(PrevBlock,BlockUsed,inlined_BaseReg_374,inlined_StackPos_374) :- Stack_def_use_live_var_at_block_end(Block,BlockUsed,inlined_BaseReg_374,inlined_StackPos_374), !Stack_def_use_ref_in_block(Block,inlined_BaseReg_374,inlined_StackPos_374), !Reg_def_use_defined_in_block(Block,inlined_BaseReg_374), Block_next(PrevBlock,_0,Block).
+Stack_def_use_live_var_at_block_end(PrevBlock,Block,Varr,Varp) :- Block_next(PrevBlock,_5,Block), Stack_def_use_live_var_used(Block,Varr,Varp,_0,_1,_2,_3,_4).
+Stack_def_use_live_var_at_prior_used(EA_used,BlockUsed,inlined_BaseReg_375,inlined_StackPos_375) :- Stack_def_use_live_var_at_block_end(Block,BlockUsed,inlined_BaseReg_375,inlined_StackPos_375), Stack_def_use_used_in_block(Block,EA_used,inlined_BaseReg_375,inlined_StackPos_375,_0), !Reg_def_use_defined_in_block(Block,inlined_BaseReg_375), !Stack_def_use_defined_in_block(Block,inlined_BaseReg_375,inlined_StackPos_375).
+
+.time DDISASM z3 complete
+.list
+
+.test Reg_def_use_def_used 8886292
+.test Reg_def_use_live_var_at_block_end 17474127
+.test Reg_def_use_live_var_at_prior_used 4505301
+.test Reg_def_use_live_var_used 4460395
+.test Reg_def_use_return_val_used 628021
+.test Stack_def_use_live_var_at_block_end 37769498
+.test Stack_def_use_def_used 578706
+.test Def_used_for_address 1398119
+.test Reg_reg_arithmetic_operation_defs 242234
+.quit

@@ -1,0 +1,43 @@
+# Harness for running the benchmark suite.
+#
+# Each script resolves its data files from environment variables, so set those
+# before running (and `.exec` resolves these paths relative to this file, so it
+# runs from any directory):
+#
+#   DATATOAD_DATA=/path/to/datasets datatoad scripts/bench.dt
+
+.exec andersen.dt
+.exec batik.dt
+.exec batik-alt.dt
+.exec biojava.dt
+.exec bipartite.dt
+.exec bipartite-alt.dt
+.exec crdt.dt
+.exec crdt-slow.dt
+.exec csda.dt
+.exec csda-alt.dt
+.exec cspa.dt
+.exec cspa-alt.dt
+.exec cvc5.dt
+.exec cvc5-alt.dt
+.exec dyck.dt
+.exec galen.dt
+.exec polonius.dt
+.exec polonius-naive.dt
+.exec polonius-naive-alt.dt
+.exec polonius2.dt
+.exec reach.dt
+.exec remy.dt
+.exec sg-10k.dt
+.exec sg-20k.dt
+# Note: sg.dt includes G40K, which exceeds the 900s budget on all systems;
+# run separately if needed.
+.exec snomed.dt
+.exec tc-10k.dt
+.exec tc-20k.dt
+# Note: tc.dt includes G40K, which exceeds the 900s budget on all systems;
+# run separately if needed.
+.exec z3.dt
+.exec z3-alt.dt
+
+.quit

@@ -1,0 +1,28 @@
+.wipe
+.time reset
+
+.flow Arc $DATATOAD_DATA/flowlog/G10K-0.001/Arc.csv
+.time g10k tc loaded
+Tc(x, y) :- Arc(x, y).
+Tc(x, y) :- Arc(z, y), Tc(x, z).
+.time g10k tc complete
+.list
+.test Tc 100000000
+.wipe
+
+.flow Arc $DATATOAD_DATA/flowlog/G20K-0.001/Arc.csv
+.time g20k tc loaded
+Tc(x, y) :- Arc(x, y).
+Tc(x, y) :- Arc(z, y), Tc(x, z).
+.time g20k tc complete
+.list
+.wipe
+
+.flow Arc $DATATOAD_DATA/flowlog/G40K-0.001/Arc.csv
+.time g40k tc loaded
+Tc(x, y) :- Arc(x, y).
+Tc(x, y) :- Arc(z, y), Tc(x, z).
+.time g40k tc complete
+.list
+.wipe
+.quit

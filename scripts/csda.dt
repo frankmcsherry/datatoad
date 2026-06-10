@@ -1,0 +1,34 @@
+.wipe
+.sync
+.time reset
+
+.flow Edge $DATATOAD_DATA/flowlog/csda-httpd/Edge.csv
+.flow NullEdge $DATATOAD_DATA/flowlog/csda-httpd/NullEdge.csv
+.time httpd csda loaded
+NullNode(x, y) :- NullEdge(x, y).
+NullNode(x, y) :- NullNode(x, w), Edge(w, y).
+.time httpd csda complete
+.list
+.test NullNode 9393283
+.wipe
+
+.flow Edge $DATATOAD_DATA/flowlog/csda-linux/Edge.csv
+.flow NullEdge $DATATOAD_DATA/flowlog/csda-linux/NullEdge.csv
+.time linux csda loaded
+NullNode(x, y) :- NullEdge(x, y).
+NullNode(x, y) :- NullNode(x, w), Edge(w, y).
+.time linux csda complete
+.list
+.test NullNode 55751178
+.wipe
+
+.flow Edge $DATATOAD_DATA/flowlog/csda-postgresql/Edge.csv
+.flow NullEdge $DATATOAD_DATA/flowlog/csda-postgresql/NullEdge.csv
+.time postgresql csda loaded
+NullNode(x, y) :- NullEdge(x, y).
+NullNode(x, y) :- NullNode(x, w), Edge(w, y).
+.time postgresql csda complete
+.list
+.test NullNode 21503813
+.wipe
+.quit

@@ -1,0 +1,53 @@
+.note Port of FlowLog examples/crdt.dl. Infix arithmetic and comparisons are
+.note rewritten as chains of :times / :plus / :range. Wildcards (_) become
+.note named placeholders. Datatoad requires each rule on one line.
+.sync
+.time reset
+
+.flow Insert_input $DATATOAD_DATA/flowlog/crdt/Insert_input.csv
+.flow Remove_input $DATATOAD_DATA/flowlog/crdt/Remove_input.csv
+.time crdt loaded
+
+insert(a, b, c, d) :- Insert_input(a, b, c, d).
+remove(a, b) :- Remove_input(a, b).
+assign(ctr, n, ctr, n, n) :- insert(ctr, n, _p, _q).
+hasChild(ParentCtr, ParentN) :- insert(_c, _n, ParentCtr, ParentN).
+
+laterChild(ParentCtr, ParentN, Ctr2, N2) :- insert(Ctr1, N1, ParentCtr, ParentN), insert(Ctr2, N2, ParentCtr, ParentN), :times(Ctr1, 10, t1), :plus(t1, N1, key1), :times(Ctr2, 10, t2), :plus(t2, N2, key2), :range(0, key2, key1).
+
+firstChild(ParentCtr, ParentN, ChildCtr, ChildN) :- insert(ChildCtr, ChildN, ParentCtr, ParentN), !laterChild(ParentCtr, ParentN, ChildCtr, ChildN).
+
+sibling(ChildCtr1, ChildN1, ChildCtr2, ChildN2) :- insert(ChildCtr1, ChildN1, ParentCtr, ParentN), insert(ChildCtr2, ChildN2, ParentCtr, ParentN).
+
+laterSibling(Ctr1, N1, Ctr2, N2) :- sibling(Ctr1, N1, Ctr2, N2), :times(Ctr1, 10, t1), :plus(t1, N1, key1), :times(Ctr2, 10, t2), :plus(t2, N2, key2), :range(0, key2, key1).
+
+laterSibling2(Ctr1, N1, Ctr3, N3) :- sibling(Ctr1, N1, Ctr2, N2), sibling(Ctr1, N1, Ctr3, N3), :times(Ctr1, 10, t1), :plus(t1, N1, k1), :times(Ctr2, 10, t2), :plus(t2, N2, k2), :times(Ctr3, 10, t3), :plus(t3, N3, k3), :range(0, k2, k1), :range(0, k3, k2).
+
+nextSibling(Ctr1, N1, Ctr2, N2) :- laterSibling(Ctr1, N1, Ctr2, N2), !laterSibling2(Ctr1, N1, Ctr2, N2).
+
+hasNextSibling(SibCtr1, SibN1) :- laterSibling(SibCtr1, SibN1, _c, _n).
+
+nextSiblingAnc(StartCtr, StartN, NextCtr, NextN) :- nextSibling(StartCtr, StartN, NextCtr, NextN).
+nextSiblingAnc(StartCtr, StartN, NextCtr, NextN) :- !hasNextSibling(StartCtr, StartN), insert(StartCtr, StartN, ParentCtr, ParentN), nextSiblingAnc(ParentCtr, ParentN, NextCtr, NextN).
+
+nextElem(PrevCtr, PrevN, NextCtr, NextN) :- firstChild(PrevCtr, PrevN, NextCtr, NextN).
+nextElem(PrevCtr, PrevN, NextCtr, NextN) :- !hasChild(PrevCtr, PrevN), nextSiblingAnc(PrevCtr, PrevN, NextCtr, NextN).
+
+currentValue(ElemCtr, ElemN, Value) :- assign(IDCtr, IDN, ElemCtr, ElemN, Value), !remove(IDCtr, IDN).
+hasValue(ElemCtr, ElemN) :- currentValue(ElemCtr, ElemN, _v).
+valueStep(FromCtr, FromN, ToCtr, ToN) :- hasValue(FromCtr, FromN), nextElem(FromCtr, FromN, ToCtr, ToN).
+blankStep(FromCtr, FromN, ToCtr, ToN) :- !valueStep(FromCtr, FromN, ToCtr, ToN), nextElem(FromCtr, FromN, ToCtr, ToN).
+
+value_blank_star(FromCtr, FromN, ToCtr, ToN) :- valueStep(FromCtr, FromN, ToCtr, ToN).
+value_blank_star(FromCtr, FromN, ToCtr, ToN) :- value_blank_star(FromCtr, FromN, ViaCtr, ViaN), blankStep(ViaCtr, ViaN, ToCtr, ToN).
+
+nextVisible(PrevCtr, PrevN, NextCtr, NextN) :- value_blank_star(PrevCtr, PrevN, NextCtr, NextN), hasValue(NextCtr, NextN).
+
+result(ctr1, ctr2, value) :- nextVisible(ctr1, _n1, ctr2, N2), currentValue(ctr2, N2, value).
+
+.time crdt complete
+.list
+.test nextSiblingAnc 181836
+.test value_blank_star 182314
+.test result 104851
+.quit

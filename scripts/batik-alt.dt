@@ -1,0 +1,233 @@
+.flow  DirectSuperclass        $DATATOAD_DATA/flowlog/batik/DirectSuperclass.csv
+.flow  DirectSuperinterface    $DATATOAD_DATA/flowlog/batik/DirectSuperinterface.csv
+.flow  MainClass               $DATATOAD_DATA/flowlog/batik/MainClass.csv
+.flow  FormalParam             $DATATOAD_DATA/flowlog/batik/FormalParam.csv
+.flow  ComponentType           $DATATOAD_DATA/flowlog/batik/ComponentType.csv
+.flow  AssignReturnValue       $DATATOAD_DATA/flowlog/batik/AssignReturnValue.csv
+.flow  ActualParam             $DATATOAD_DATA/flowlog/batik/ActualParam.csv
+.flow  Method_Modifier         $DATATOAD_DATA/flowlog/batik/Method_Modifier.csv
+.flow  Var_Type                $DATATOAD_DATA/flowlog/batik/Var_Type.csv
+.flow  HeapAllocation_Type     $DATATOAD_DATA/flowlog/batik/HeapAllocation_Type.csv
+
+.flow  _ClassType               $DATATOAD_DATA/flowlog/batik/ClassType.csv
+.flow  _ArrayType               $DATATOAD_DATA/flowlog/batik/ArrayType.csv
+.flow  _InterfaceType           $DATATOAD_DATA/flowlog/batik/InterfaceType.csv
+.flow  _Var_DeclaringMethod     $DATATOAD_DATA/flowlog/batik/Var_DeclaringMethod.csv 
+.flow  _ApplicationClass        $DATATOAD_DATA/flowlog/batik/ApplicationClass.csv
+.flow  _ThisVar                 $DATATOAD_DATA/flowlog/batik/ThisVar.csv
+.flow  _NormalHeap              $DATATOAD_DATA/flowlog/batik/NormalHeap.csv
+.flow  _StringConstant          $DATATOAD_DATA/flowlog/batik/StringConstant.csv
+.flow  _AssignHeapAllocation    $DATATOAD_DATA/flowlog/batik/AssignHeapAllocation.csv
+.flow  _AssignLocal             $DATATOAD_DATA/flowlog/batik/AssignLocal.csv
+.flow  _AssignCast              $DATATOAD_DATA/flowlog/batik/AssignCast.csv
+.flow  _Field                   $DATATOAD_DATA/flowlog/batik/Field.csv
+
+.flow  _StaticMethodInvocation  $DATATOAD_DATA/flowlog/batik/StaticMethodInvocation.csv
+.flow  _SpecialMethodInvocation $DATATOAD_DATA/flowlog/batik/SpecialMethodInvocation.csv
+.flow  _VirtualMethodInvocation $DATATOAD_DATA/flowlog/batik/VirtualMethodInvocation.csv
+.flow  _Method                  $DATATOAD_DATA/flowlog/batik/Method.csv
+.flow  Method_Descriptor       $DATATOAD_DATA/flowlog/batik/Method_Descriptor.csv
+.flow  _StoreInstanceField      $DATATOAD_DATA/flowlog/batik/StoreInstanceField.csv
+.flow  _LoadInstanceField       $DATATOAD_DATA/flowlog/batik/LoadInstanceField.csv
+.flow  _StoreStaticField        $DATATOAD_DATA/flowlog/batik/StoreStaticField.csv
+.flow  _LoadStaticField         $DATATOAD_DATA/flowlog/batik/LoadStaticField.csv
+.flow  _StoreArrayIndex         $DATATOAD_DATA/flowlog/batik/StoreArrayIndex.csv
+.flow  _LoadArrayIndex          $DATATOAD_DATA/flowlog/batik/LoadArrayIndex.csv
+.flow  _Return                  $DATATOAD_DATA/flowlog/batik/Return.csv
+
+.time doop batik loaded
+
+isType(class) :- _ClassType(class).
+isReferenceType(class) :- _ClassType(class).
+isClassType(class) :- _ClassType(class).
+
+isType(arrayType) :- _ArrayType(arrayType).
+isReferenceType(arrayType) :- _ArrayType(arrayType).
+isArrayType(arrayType) :- _ArrayType(arrayType).
+
+isType(interface) :- _InterfaceType(interface).
+isReferenceType(interface) :- _InterfaceType(interface).
+isInterfaceType(interface) :- _InterfaceType(interface).
+
+Var_DeclaringMethod(var, method) :- _Var_DeclaringMethod(var, method).
+
+isType(type) :- _ApplicationClass(type).
+isReferenceType(type) :- _ApplicationClass(type).
+ApplicationClass(type) :- _ApplicationClass(type).
+
+ThisVar(method, var) :- _ThisVar(method, var).
+
+isType(type) :- _NormalHeap(_0, type).
+
+Instruction_Method(instruction, method) :- _AssignHeapAllocation(instruction, index, heap, to, method, linenumber).
+AssignInstruction_To(instruction, to) :- _AssignHeapAllocation(instruction, index, heap, to, method, linenumber).
+AssignHeapAllocation_Heap(instruction, heap) :- _AssignHeapAllocation(instruction, index, heap, to, method, linenumber).
+
+Instruction_Method(instruction, method) :- _AssignLocal(instruction, index, from, to, method).
+AssignLocal_From(instruction, from) :- _AssignLocal(instruction, index, from, to, method).
+AssignInstruction_To(instruction, to) :- _AssignLocal(instruction, index, from, to, method).
+
+Instruction_Method(instruction, method) :- _AssignCast(instruction, index, from, to, type, method).
+AssignCast_Type(instruction, type) :- _AssignCast(instruction, index, from, to, type, method).
+AssignCast_From(instruction, from) :- _AssignCast(instruction, index, from, to, type, method).
+AssignInstruction_To(instruction, to) :- _AssignCast(instruction, index, from, to, type, method).
+
+Field_DeclaringType(signature, declaringType) :- _Field(signature, declaringType, _0, _1).
+
+MethodInvocation_Base(invocation, base) :- VirtualMethodInvocation_Base(invocation, base).
+MethodInvocation_Base(invocation, base) :- SpecialMethodInvocation_Base(invocation, base).
+
+Instruction_Method(instruction, method) :- _StaticMethodInvocation(instruction, index, signature, method).
+isStaticMethodInvocation_Insn(instruction) :- _StaticMethodInvocation(instruction, index, signature, method).
+MethodInvocation_Method(instruction, signature) :- _StaticMethodInvocation(instruction, index, signature, method).
+
+Instruction_Method(instruction, method) :- _SpecialMethodInvocation(instruction, index, signature, base, method).
+SpecialMethodInvocation_Base(instruction, base) :- _SpecialMethodInvocation(instruction, index, signature, base, method).
+MethodInvocation_Method(instruction, signature) :- _SpecialMethodInvocation(instruction, index, signature, base, method).
+
+Instruction_Method(instruction, method) :- _VirtualMethodInvocation(instruction, index, signature, base, method).
+isVirtualMethodInvocation_Insn(instruction) :- _VirtualMethodInvocation(instruction, index, signature, base, method).
+VirtualMethodInvocation_Base(instruction, base) :- _VirtualMethodInvocation(instruction, index, signature, base, method).
+MethodInvocation_Method(instruction, signature) :- _VirtualMethodInvocation(instruction, index, signature, base, method).
+
+Method_SimpleName(method, simplename) :- _Method(method, simplename, params, declaringType, returnType, jvmDescriptor, arity).
+Method_DeclaringType(method, declaringType) :- _Method(method, simplename, params, declaringType, returnType, jvmDescriptor, arity).
+
+Instruction_Method(instruction, method) :- _StoreInstanceField(instruction, index, from, base, signature, method).
+FieldInstruction_Signature(instruction, signature) :- _StoreInstanceField(instruction, index, from, base, signature, method).
+StoreInstanceField_Base(instruction, base) :- _StoreInstanceField(instruction, index, from, base, signature, method).
+StoreInstanceField_From(instruction, from) :- _StoreInstanceField(instruction, index, from, base, signature, method).
+
+Instruction_Method(instruction, method) :- _LoadInstanceField(instruction, index, to, base, signature, method).
+FieldInstruction_Signature(instruction, signature) :- _LoadInstanceField(instruction, index, to, base, signature, method).
+LoadInstanceField_Base(instruction, base) :- _LoadInstanceField(instruction, index, to, base, signature, method).
+LoadInstanceField_To(instruction, to) :- _LoadInstanceField(instruction, index, to, base, signature, method).
+
+Instruction_Method(instruction, method) :- _StoreStaticField(instruction, index, from, signature, method).
+FieldInstruction_Signature(instruction, signature) :- _StoreStaticField(instruction, index, from, signature, method).
+StoreStaticField_From(instruction, from) :- _StoreStaticField(instruction, index, from, signature, method).
+
+Instruction_Method(instruction, method) :- _LoadStaticField(instruction, index, to, signature, method).
+FieldInstruction_Signature(instruction, signature) :- _LoadStaticField(instruction, index, to, signature, method).
+LoadStaticField_To(instruction, to) :- _LoadStaticField(instruction, index, to, signature, method).
+
+Instruction_Method(instruction, method) :- _StoreArrayIndex(instruction, index, from, base, method).
+StoreArrayIndex_Base(instruction, base) :- _StoreArrayIndex(instruction, index, from, base, method).
+StoreArrayIndex_From(instruction, from) :- _StoreArrayIndex(instruction, index, from, base, method).
+
+Instruction_Method(instruction, method) :- _LoadArrayIndex(instruction, index, to, base, method).
+LoadArrayIndex_Base(instruction, base) :- _LoadArrayIndex(instruction, index, to, base, method).
+LoadArrayIndex_To(instruction, to) :- _LoadArrayIndex(instruction, index, to, base, method).
+
+Instruction_Method(instruction, method) :- _Return(instruction, index, var, method).
+ReturnNonvoid_Var(instruction, var) :- _Return(instruction, index, var, method).
+
+LoadInstanceField(base, sig, to, inmethod) :- Instruction_Method(insn, inmethod), LoadInstanceField_Base(insn, base), FieldInstruction_Signature(insn, sig), LoadInstanceField_To(insn, to).
+StoreInstanceField(from, base, sig, inmethod) :- Instruction_Method(insn, inmethod), StoreInstanceField_From(insn, from), StoreInstanceField_Base(insn, base), FieldInstruction_Signature(insn, sig).
+LoadStaticField(sig, to, inmethod) :- Instruction_Method(insn, inmethod), FieldInstruction_Signature(insn, sig), LoadStaticField_To(insn, to).
+StoreStaticField(from, sig, inmethod) :- Instruction_Method(insn, inmethod), StoreStaticField_From(insn, from), FieldInstruction_Signature(insn, sig).
+LoadArrayIndex(base, to, inmethod) :- Instruction_Method(insn, inmethod), LoadArrayIndex_Base(insn, base), LoadArrayIndex_To(insn, to).
+StoreArrayIndex(from, base, inmethod) :- Instruction_Method(insn, inmethod), StoreArrayIndex_From(insn, from), StoreArrayIndex_Base(insn, base).
+AssignCast(type, from, to, inmethod) :- Instruction_Method(insn, inmethod), AssignCast_From(insn, from), AssignInstruction_To(insn, to), AssignCast_Type(insn, type).
+AssignLocal(from, to, inmethod) :- AssignInstruction_To(insn, to), Instruction_Method(insn, inmethod), AssignLocal_From(insn, from).
+AssignHeapAllocation(heap, to, inmethod) :- Instruction_Method(insn, inmethod), AssignHeapAllocation_Heap(insn, heap), AssignInstruction_To(insn, to).
+ReturnVar(var, method) :- Instruction_Method(insn, method), ReturnNonvoid_Var(insn, var).
+StaticMethodInvocation(invocation, signature, inmethod) :- isStaticMethodInvocation_Insn(invocation), Instruction_Method(invocation, inmethod), MethodInvocation_Method(invocation, signature).
+VirtualMethodInvocation_SimpleName(invocation, simplename) :- isVirtualMethodInvocation_Insn(invocation), MethodInvocation_Method(invocation, signature), Method_SimpleName(signature, simplename), Method_Descriptor(signature, descriptor).
+VirtualMethodInvocation_Descriptor(invocation, descriptor) :- isVirtualMethodInvocation_Insn(invocation), MethodInvocation_Method(invocation, signature), Method_SimpleName(signature, simplename), Method_Descriptor(signature, descriptor).
+
+MethodImplemented(simplename, descriptor, type, method) :- Method_SimpleName(method, simplename), Method_Descriptor(method, descriptor), Method_DeclaringType(method, type), ! Method_Modifier(2161502, method).
+
+ANTIJOIN_TEMP0(x, y, z) :- MethodImplemented(x, y, z, _0).
+
+MethodLookup(simplename, descriptor, type, method) :- MethodImplemented(simplename, descriptor, type, method).
+MethodLookup(simplename, descriptor, type, method) :- DirectSuperclass(type, supertype), MethodLookup(simplename, descriptor, supertype, method), ! ANTIJOIN_TEMP0(simplename, descriptor, type).
+MethodLookup(simplename, descriptor, type, method) :- DirectSuperinterface(type, supertype), MethodLookup(simplename, descriptor, supertype, method), ! ANTIJOIN_TEMP0(simplename, descriptor, type).
+MainMethodDeclaration(method) :- MainClass(type), Method_DeclaringType(method, type), :noteq(method, 590319), :noteq(method, 1138805), :noteq(method, 926489), Method_SimpleName(method, 2979023), Method_Descriptor(method, 3018506), Method_Modifier(976234, method), Method_Modifier(909718, method).
+
+DirectSubclass(a, c) :- DirectSuperclass(a, c).
+Subclass(c, a) :- DirectSubclass(a, c).
+Subclass(c, a) :- Subclass(b, a), DirectSubclass(b, c).
+Superclass(c, a) :- Subclass(a, c).
+Superinterface(k, c) :- DirectSuperinterface(c, k).
+Superinterface(k, c) :- DirectSuperinterface(c, j), Superinterface(k, j).
+Superinterface(k, c) :- DirectSuperclass(c, super), Superinterface(k, super).
+
+SubtypeOf(s, s) :- isClassType(s).
+SubtypeOf(t, t) :- isType(t).
+SubtypeOf(s, t) :- Subclass(t, s).
+SubtypeOf(s, s) :- isInterfaceType(s).
+SubtypeOf(s, t) :- isClassType(s), Superinterface(t, s).
+SubtypeOf(s, 427039) :- isInterfaceType(s), isType(427039).
+SubtypeOf(s, 427039) :- isArrayType(s), isType(427039).
+SubtypeOf(s, t) :- isInterfaceType(s), Superinterface(t, s).
+SubtypeOf(s, t) :- SubtypeOf(sc, tc), ComponentType(s, sc), ComponentType(t, tc), isReferenceType(sc), isReferenceType(tc).
+SubtypeOf(s, 1088934) :- isArrayType(s), isInterfaceType(1088934), isType(1088934).
+SubtypeOf(s, 716731) :- isArrayType(s), isInterfaceType(716731), isType(716731).
+
+SupertypeOf(s, t) :- SubtypeOf(t, s).
+SubtypeOfDifferent(s, t) :- SubtypeOf(s, t), :noteq(s, t).
+
+ClassInitializer(type, method) :-  MethodImplemented(894110, 3016219, type, method).
+InitializedClass(superclass) :-  InitializedClass(class),  DirectSuperclass(class, superclass).
+InitializedClass(superinterface) :-  InitializedClass(classOrInterface),  DirectSuperinterface(classOrInterface, superinterface).
+InitializedClass(class) :-  MainMethodDeclaration(method),  Method_DeclaringType(method, class).
+InitializedClass(class) :-  Reachable(inmethod),  AssignHeapAllocation(heap, _0, inmethod),  HeapAllocation_Type(heap, class).
+InitializedClass(class) :-  Reachable(inmethod),  Instruction_Method(invocation, inmethod),  isStaticMethodInvocation_Insn(invocation),  MethodInvocation_Method(invocation, signature),  Method_DeclaringType(signature, class).
+InitializedClass(classOrInterface) :-  Reachable(inmethod),  StoreStaticField(_0, signature, inmethod),  Field_DeclaringType(signature, classOrInterface).
+InitializedClass(classOrInterface) :-  Reachable(inmethod),  LoadStaticField(signature, _0, inmethod),  Field_DeclaringType(signature, classOrInterface).
+Reachable(clinit) :-  InitializedClass(class),  ClassInitializer(class, clinit).
+
+Assign(actual, formal) :-                       CallGraphEdge(invocation, method), FormalParam(index, method, formal), ActualParam(index, invocation, actual).
+Assign(return, local) :-                        CallGraphEdge(invocation, method), ReturnVar(return, method), AssignReturnValue(invocation, local).
+VarPointsTo(heap, var) :-                       AssignHeapAllocation(heap, var, inMethod), Reachable(inMethod).
+VarPointsTo(heap, to) :-                        Assign(from, to), VarPointsTo(heap, from).
+VarPointsTo(heap, to) :-                        Reachable(inmethod), AssignLocal(from, to, inmethod), VarPointsTo(heap, from).
+VarPointsTo(heap, to) :-                        Reachable(inmethod), AssignCast(type, from, to, inmethod), SupertypeOf(type, heaptype), HeapAllocation_Type(heap, heaptype), VarPointsTo(heap, from).
+# alt: split the data-flow join (which value-heaps are actually stored into which
+# array-heaps) from the type-compatibility check. AStore forces base -> from -> heap;
+# the type atoms in the second rule can then only validate concrete (baseheap, heap).
+AStore(baseheap, heap) :-                        Reachable(inmethod), StoreArrayIndex(from, base, inmethod), VarPointsTo(baseheap, base), VarPointsTo(heap, from).
+ArrayIndexPointsTo(baseheap, heap) :-           AStore(baseheap, heap), HeapAllocation_Type(heap, heaptype), HeapAllocation_Type(baseheap, baseheaptype), ComponentType(baseheaptype, componenttype), SupertypeOf(componenttype, heaptype).
+VarPointsTo(heap, to) :-                        Reachable(inmethod), LoadArrayIndex(base, to, inmethod), VarPointsTo(baseheap, base), ArrayIndexPointsTo(baseheap, heap), Var_Type(to, type), HeapAllocation_Type(baseheap, baseheaptype), ComponentType(baseheaptype, basecomponenttype), SupertypeOf(type, basecomponenttype).
+VarPointsTo(heap, to) :-                        Reachable(inmethod), LoadInstanceField(base, signature, to, inmethod), VarPointsTo(baseheap, base), InstanceFieldPointsTo(heap, signature, baseheap).
+VarPointsTo(heap, to) :-                        Reachable(inmethod), LoadStaticField(fld, to, inmethod), StaticFieldPointsTo(heap, fld).
+# alt: resolve virtual dispatch with the receiver's concrete type (heaptype) bound
+# BEFORE MethodLookup, so it returns the single target rather than fanning out over
+# every (heaptype, toMethod) for the name+descriptor. Shared by the three dispatch rules.
+VRecv(invocation, heap, heaptype) :-            Reachable(inMethod), Instruction_Method(invocation, inMethod), VirtualMethodInvocation_Base(invocation, base), VarPointsTo(heap, base), HeapAllocation_Type(heap, heaptype).
+VTarget(invocation, heap, toMethod) :-          VRecv(invocation, heap, heaptype), VirtualMethodInvocation_SimpleName(invocation, simplename), VirtualMethodInvocation_Descriptor(invocation, descriptor), MethodLookup(simplename, descriptor, heaptype, toMethod).
+VarPointsTo(heap, this) :-                      VTarget(invocation, heap, toMethod), ThisVar(toMethod, this).
+
+InstanceFieldPointsTo(heap, fld, baseheap) :-   Reachable(inmethod), StoreInstanceField(from, base, fld, inmethod), VarPointsTo(heap, from), VarPointsTo(baseheap, base).
+StaticFieldPointsTo(heap, fld) :-               Reachable(inmethod), StoreStaticField(from, fld, inmethod), VarPointsTo(heap, from).
+
+Reachable(toMethod) :-                          VTarget(invocation, heap, toMethod).
+CallGraphEdge(invocation, toMethod) :-          VTarget(invocation, heap, toMethod).
+
+Reachable(tomethod) :-                          Reachable(inmethod), StaticMethodInvocation(invocation, tomethod, inmethod).
+CallGraphEdge(invocation, tomethod) :-          Reachable(inmethod), StaticMethodInvocation(invocation, tomethod, inmethod).
+
+Reachable(tomethod) :-                          Reachable(inmethod), Instruction_Method(invocation, inmethod), SpecialMethodInvocation_Base(invocation, base), VarPointsTo(heap, base), MethodInvocation_Method(invocation, tomethod), ThisVar(tomethod, this).
+CallGraphEdge(invocation, tomethod) :-          Reachable(inmethod), Instruction_Method(invocation, inmethod), SpecialMethodInvocation_Base(invocation, base), VarPointsTo(heap, base), MethodInvocation_Method(invocation, tomethod), ThisVar(tomethod, this).
+VarPointsTo(heap, this) :-                      Reachable(inmethod), Instruction_Method(invocation, inmethod), SpecialMethodInvocation_Base(invocation, base), VarPointsTo(heap, base), MethodInvocation_Method(invocation, tomethod), ThisVar(tomethod, this).
+
+Reachable(method) :- MainMethodDeclaration(method).
+
+.time doop batik complete
+.list
+
+.test Superinterface 16501
+.test Subclass 17499
+.test SubtypeOf 48824
+.test MethodLookup 407629
+.test ArrayIndexPointsTo 314695
+.test Assign 155849
+.test CallGraphEdge 85000
+.test InitializedClass 3488
+.test InstanceFieldPointsTo 14110900
+.test Reachable 16806
+.test StaticFieldPointsTo 61324
+.test VarPointsTo 39498905
+.prof
+.quit
