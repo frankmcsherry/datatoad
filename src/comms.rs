@@ -2,7 +2,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 
 use timely_communication::{allocator::Allocator, Bytesable};
-use crate::facts::{FactLSM, Forest, Lists, Terms};
+use crate::facts::{FactColumn, FactLSM, Forest, Lists, Terms};
 use crate::facts::trie::Layer;
 
 /// Cluster-wide default budget (bytes) for in-flight intermediate tuples.
@@ -39,7 +39,8 @@ impl Comms {
 
     pub fn next_id(&self) -> usize { self.count }
 
-    pub fn conduit<F: Exchangeable>(&mut self) -> Conduit<F> {
+    /// Allocates a conduit for exchanging facts, which requires a serializable column.
+    pub fn conduit<F: Exchangeable>(&mut self) -> Conduit<F> where Lists<F::Column>: columnar::ContainerBytes {
         let budget = self.mem_budget;
         let comms = self.ether.as_mut().map(|comms| {
             let (sends, recv) = comms.borrow_mut().allocate(self.count);
@@ -81,7 +82,7 @@ impl Comms {
     }
 
     /// Broadcasts facts to all workers.
-    pub fn broadcast(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
+    pub fn broadcast<C: FactColumn>(&mut self, facts: &mut FactLSM<Forest<C>>) where Lists<C>: columnar::ContainerBytes {
         if let Some(comms) = self.ether.as_mut() {
             let mut comms = comms.borrow_mut();
             let (senders, mut receiver) = comms.allocate(self.count);
@@ -145,10 +146,10 @@ impl Comms {
     }
 
     /// Exchanges facts among all workers.
-    pub fn exchange(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
+    pub fn exchange<F: Exchangeable>(&mut self, facts: &mut FactLSM<F>) where Lists<F::Column>: columnar::ContainerBytes {
         // Single-worker: nothing to shuffle, facts already local.
         if self.peers() == 1 { return; }
-        let mut conduit = self.conduit();
+        let mut conduit = self.conduit::<F>();
         conduit.extend(facts);
         *facts = conduit.finish();
     }
@@ -162,10 +163,10 @@ impl From<Allocator> for Comms {
 
 use timely_communication::{Push, Pull};
 
-pub struct Channel {
+pub struct Channel<C: FactColumn = Terms> {
     comms: Rc<RefCell<Allocator>>,
-    sends: Vec<Box<dyn Push<FactMessage>>>,
-    recv: Box<dyn Pull<FactMessage>>,
+    sends: Vec<Box<dyn Push<FactMessage<C>>>>,
+    recv: Box<dyn Pull<FactMessage<C>>>,
     count: usize,
     done: bool,
 }
@@ -173,13 +174,15 @@ pub struct Channel {
 /// Facts that can be exchanged among workers over a `Channel`.
 ///
 /// The implementation owns the routing of facts to peers and the message encoding.
-/// Implemented for `Forest<Terms>` only at the moment; other fact containers will
-/// need their own routing and encoding (or a generalized `FactMessage`).
+/// The blanket implementation for `Forest<C>` routes by `FactColumn::route` of the
+/// first column, and encodes messages as one columnar stash per layer.
 pub trait Exchangeable: crate::facts::Merge + crate::facts::Length + crate::facts::Arity + Sized {
+    /// The column container exchanged in messages.
+    type Column: FactColumn;
     /// Exchanges facts with other participants, drawing from and refilling `facts`.
-    fn exchange(channel: &mut Channel, facts: &mut FactLSM<Self>);
+    fn exchange(channel: &mut Channel<Self::Column>, facts: &mut FactLSM<Self>);
     /// Extracts all remaining facts, closing the channel.
-    fn complete(mut channel: Channel) -> FactLSM<Self> {
+    fn complete(mut channel: Channel<Self::Column>) -> FactLSM<Self> {
         channel.close();
         let mut facts = FactLSM::default();
         while channel.count > 0 { let mut temp = FactLSM::default(); Self::exchange(&mut channel, &mut temp); facts.extend(temp); }
@@ -187,17 +190,18 @@ pub trait Exchangeable: crate::facts::Merge + crate::facts::Length + crate::fact
     }
 }
 
-impl Exchangeable for Forest<Terms> {
-    fn exchange(channel: &mut Channel, facts: &mut FactLSM<Self>) { channel.exchange(facts) }
+impl<C: FactColumn> Exchangeable for Forest<C> {
+    type Column = C;
+    fn exchange(channel: &mut Channel<C>, facts: &mut FactLSM<Self>) { channel.exchange(facts) }
 }
 
-impl Channel {
+impl<C: FactColumn> Channel<C> {
     fn close(&mut self) { if !self.done {
         for sender in self.sends.iter_mut() { sender.send(FactMessage { facts: None } ); }
         self.done = true;
     }}
     /// Exchanges facts with other participants, drawing from and refilling `facts`.
-    fn exchange(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
+    fn exchange(&mut self, facts: &mut FactLSM<Forest<C>>) {
 
         if self.done && !facts.is_empty() { panic!("Exchanging on a sealed channel"); }
 
@@ -207,7 +211,7 @@ impl Channel {
         if let Some(facts) = facts.flatten() {
             let mut bools: std::collections::VecDeque<bool> = Default::default();
             for (index, sender) in self.sends.iter_mut().enumerate() {
-                bools.extend((0 .. facts.layer(0).list.values.len()).map(|i| (*facts.layer(0).list.values.borrow().get(i).as_slice().last().unwrap() as usize) % comms.peers() == index));
+                bools.extend((0 .. facts.layer(0).list.values.len()).map(|i| (C::route(facts.layer(0).list.values.borrow().get(i)) as usize) % comms.peers() == index));
                 if let Some(facts) = facts.clone().retain_core(1, bools.clone()).flatten() {
                     let layers = (0 .. facts.arity()).map(|i| facts.layer(i).clone()).collect::<Vec<_>>();
                     drop(facts);
@@ -236,9 +240,9 @@ impl Channel {
 ///
 /// Internally, a communication protocol with other peers relies on each eventually sending an empty `FactMessage`.
 /// Once as many of these have been received as there are peers, the exchange is complete.
-pub struct Conduit<F = Forest<Terms>> {
+pub struct Conduit<F: Exchangeable = Forest<Terms>> {
     /// Communication infrastructure.
-    comms: Option<Channel>,
+    comms: Option<Channel<F::Column>>,
     facts: FactLSM<F>,
     /// Snapshot of the cluster-wide budget at allocation time.
     mem_budget: usize,
@@ -266,21 +270,21 @@ impl<F: Exchangeable> Conduit<F> {
 ///
 /// The encoding is first the number of columns plus one, with zero indicating `None`.
 /// The columns are then appended.
-struct FactMessage { facts: Option<Vec<Lists<Terms>>> }
+pub struct FactMessage<C: FactColumn = Terms> { facts: Option<Vec<Lists<C>>> }
 
-use columnar::{Borrow, Container, Index, Len, bytes::{indexed, stash::Stash}};
+use columnar::{Borrow, Container, ContainerBytes, Index, Len, bytes::{indexed, stash::Stash}};
 
-impl Bytesable for FactMessage {
+impl<C: FactColumn> Bytesable for FactMessage<C> where Lists<C>: ContainerBytes {
     fn from_bytes(mut bytes: timely_bytes::arc::Bytes) -> Self {
         let count: u64 = u64::from_be_bytes(bytes[..8].try_into().unwrap());
         bytes.extract_to(8);
         if count > 0 {
             let mut columns = Vec::with_capacity(count as usize - 1);
             for _ in 1 .. count {
-                let stash: Stash<Lists<Terms>, timely_bytes::arc::Bytes> = Stash::try_from_bytes(bytes.clone()).unwrap();
+                let stash: Stash<Lists<C>, timely_bytes::arc::Bytes> = Stash::try_from_bytes(bytes.clone()).unwrap();
                 let length = stash.length_in_bytes();
                 let _ = bytes.extract_to(length);
-                let mut column: Lists<Terms> = Default::default();
+                let mut column: Lists<C> = Default::default();
                 column.extend_from_self(stash.borrow(), 0 .. stash.len());
                 columns.push(column);
             }

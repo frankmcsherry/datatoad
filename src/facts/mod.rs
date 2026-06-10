@@ -188,7 +188,7 @@ pub trait Arity {
 }
 
 /// A type that can contain and work with facts.
-pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
+pub trait FactContainer : Length + Merge + Arity + Sized + Clone + crate::comms::Exchangeable {
 
     /// Applies an action to the facts, building the corresponding output.
     fn act_on(&self, action: &Action<Vec<u8>>, thresh: usize) -> FactLSM<Self>;

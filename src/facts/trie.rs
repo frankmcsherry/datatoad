@@ -912,6 +912,11 @@ pub mod layers {
         /// decides how to decode them. The empty literal must be accepted, as it is
         /// used for placeholder items whose values are never inspected.
         fn push_literal(column: &mut Self, literal: &[u8]);
+        /// A routing key for an item, used to shard facts among workers.
+        ///
+        /// The key must be a function of the item's value alone, so that equal items
+        /// route identically on all workers. It is reduced modulo the number of workers.
+        fn route(item: Self::Ref<'_>) -> u64;
     }
 
     /// Byte strings, specialized at runtime to fixed-width kernels when widths allow.
@@ -967,6 +972,9 @@ pub mod layers {
         fn push_literal(column: &mut Terms, literal: &[u8]) {
             use columnar::Push;
             column.push(literal);
+        }
+        fn route(item: <Terms as Borrow>::Ref<'_>) -> u64 {
+            *item.as_slice().last().unwrap() as u64
         }
     }
 
