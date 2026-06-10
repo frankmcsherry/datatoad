@@ -1,0 +1,44 @@
+.wipe
+.time reset
+
+.flow Arc $DATATOAD_DATA/flowlog/roadNet-CA/Arc.csv
+.flow Source $DATATOAD_DATA/flowlog/netflix/Source.csv
+.time roadca bipartite loaded
+Zero(x) :- Source(x).
+One(y)  :- Arc(x, y), Zero(x).
+One(x)  :- Arc(x, y), Zero(y).
+Zero(y) :- Arc(x, y), One(x).
+Zero(x) :- Arc(x, y), One(y).
+.time roadca bipartite complete
+.list
+.test One 1957027
+.test Zero 1957027
+.test BipartiteViolation 1957027
+.wipe
+
+.flow Arc $DATATOAD_DATA/flowlog/netflix/Arc.csv
+.flow Source $DATATOAD_DATA/flowlog/netflix/Source.csv
+.time netflix bipartite loaded
+Zero(x) :- Source(x).
+One(y)  :- Arc(x, y), Zero(x).
+One(x)  :- Arc(x, y), Zero(y).
+Zero(y) :- Arc(x, y), One(x).
+Zero(x) :- Arc(x, y), One(y).
+.time netflix bipartite complete
+.list
+.test One 17770
+.test Zero 480189
+.wipe
+
+.flow Arc $DATATOAD_DATA/flowlog/mag/Arc.csv
+.flow Source $DATATOAD_DATA/flowlog/mag/Source.csv
+.time mag bipartite loaded
+Zero(x) :- Source(x).
+One(y)  :- Arc(x, y), Zero(x).
+One(x)  :- Arc(x, y), Zero(y).
+Zero(y) :- Arc(x, y), One(x).
+Zero(x) :- Arc(x, y), One(y).
+.time mag bipartite complete
+.list
+.wipe
+.quit

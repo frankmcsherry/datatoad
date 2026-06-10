@@ -1,0 +1,64 @@
+.wipe
+.sync
+.time reset
+
+.flow Assign $DATATOAD_DATA/flowlog/cspa-httpd/Assign.csv
+.flow Dereference $DATATOAD_DATA/flowlog/cspa-httpd/Dereference.csv
+.time httpd cspa loaded
+ValueFlow(y, x) :- Assign(y, x).
+ValueFlow(x, y) :- Assign(x, z), MemoryAlias(z, y).
+ValueFlow(x, y) :- ValueFlow(x, z), ValueFlow(z, y).
+MemoryAlias(x, w) :- Dereference(y, x), ValueAlias(y, z), Dereference(z, w).
+ValueAlias(x, y) :- ValueFlow(z, x), ValueFlow(z, y).
+ValueAlias(x, y) :- ValueFlow(z, x), MemoryAlias(z, w), ValueFlow(w, y).
+ValueFlow(x, x) :- Assign(x, y).
+ValueFlow(x, x) :- Assign(y, x).
+MemoryAlias(x, x) :- Assign(y, x).
+MemoryAlias(x, x) :- Assign(x, y).
+.time httpd cspa complete
+.list
+.test MemoryAlias 88905342
+.test ValueAlias 234237608
+.test ValueFlow 1365306
+.wipe
+
+.flow Assign $DATATOAD_DATA/flowlog/cspa-linux/Assign.csv
+.flow Dereference $DATATOAD_DATA/flowlog/cspa-linux/Dereference.csv
+.time linux cspa loaded
+ValueFlow(y, x) :- Assign(y, x).
+ValueFlow(x, y) :- Assign(x, z), MemoryAlias(z, y).
+ValueFlow(x, y) :- ValueFlow(x, z), ValueFlow(z, y).
+MemoryAlias(x, w) :- Dereference(y, x), ValueAlias(y, z), Dereference(z, w).
+ValueAlias(x, y) :- ValueFlow(z, x), ValueFlow(z, y).
+ValueAlias(x, y) :- ValueFlow(z, x), MemoryAlias(z, w), ValueFlow(w, y).
+ValueFlow(x, x) :- Assign(x, y).
+ValueFlow(x, x) :- Assign(y, x).
+MemoryAlias(x, x) :- Assign(y, x).
+MemoryAlias(x, x) :- Assign(x, y).
+.time linux cspa complete
+.list
+.test MemoryAlias 13777625
+.test ValueAlias 30938106
+.test ValueFlow 5509641
+.wipe
+
+.flow Assign $DATATOAD_DATA/flowlog/cspa-postgresql/Assign.csv
+.flow Dereference $DATATOAD_DATA/flowlog/cspa-postgresql/Dereference.csv
+.time postgresql cspa loaded
+ValueFlow(y, x) :- Assign(y, x).
+ValueFlow(x, y) :- Assign(x, z), MemoryAlias(z, y).
+ValueFlow(x, y) :- ValueFlow(x, z), ValueFlow(z, y).
+MemoryAlias(x, w) :- Dereference(y, x), ValueAlias(y, z), Dereference(z, w).
+ValueAlias(x, y) :- ValueFlow(z, x), ValueFlow(z, y).
+ValueAlias(x, y) :- ValueFlow(z, x), MemoryAlias(z, w), ValueFlow(w, y).
+ValueFlow(x, x) :- Assign(x, y).
+ValueFlow(x, x) :- Assign(y, x).
+MemoryAlias(x, x) :- Assign(y, x).
+MemoryAlias(x, x) :- Assign(x, y).
+.time postgresql cspa complete
+.list
+.test MemoryAlias 89475479
+.test ValueAlias 223793861
+.test ValueFlow 3712452
+.wipe
+.quit

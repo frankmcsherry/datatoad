@@ -1,0 +1,52 @@
+.wipe
+.time reset
+
+.flow Arc $DATATOAD_DATA/flowlog/roadNet-CA/Arc.csv
+.flow Source $DATATOAD_DATA/flowlog/netflix/Source.csv
+.time roadca bipartite-alt loaded
+Tmp(x) :- Arc(x, y).
+ArcT(y, x) :- Tmp(x), Arc(x, y).
+Zero(x) :- Source(x).
+One(y)  :- Zero(x), Arc(x, y).
+One(x)  :- Zero(y), ArcT(y, x).
+Zero(y) :- One(x), Arc(x, y).
+Zero(x) :- One(y), ArcT(y, x).
+.time roadca bipartite-alt complete
+.list
+.test One 1957027
+.test Zero 1957027
+.test BipartiteViolation 1957027
+.wipe
+
+.flow Arc $DATATOAD_DATA/flowlog/netflix/Arc.csv
+.flow Source $DATATOAD_DATA/flowlog/netflix/Source.csv
+.time netflix bipartite-alt loaded
+Tmp(x) :- Arc(x, y).
+ArcT(y, x) :- Tmp(x), Arc(x, y).
+Zero(x) :- Source(x).
+One(y)  :- Zero(x), Arc(x, y).
+One(x)  :- Zero(y), ArcT(y, x).
+Zero(y) :- One(x), Arc(x, y).
+Zero(x) :- One(y), ArcT(y, x).
+.time netflix bipartite-alt complete
+.list
+.test One 17770
+.test Zero 480189
+.wipe
+
+.flow Arc $DATATOAD_DATA/flowlog/mag/Arc.csv
+.flow Source $DATATOAD_DATA/flowlog/mag/Source.csv
+.time mag bipartite-alt loaded
+Tmp(x) :- Arc(x, y).
+ArcT(y, x) :- Tmp(x), Arc(x, y).
+Zero(x) :- Source(x).
+One(y)  :- Zero(x), Arc(x, y).
+One(x)  :- Zero(y), ArcT(y, x).
+Zero(y) :- One(x), Arc(x, y).
+Zero(x) :- One(y), ArcT(y, x).
+.time mag bipartite-alt complete
+.list
+.note datatoad result: 2763016 One
+.note datatoad result: 10541556 Zero
+.wipe
+.quit

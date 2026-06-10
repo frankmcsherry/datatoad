@@ -1,0 +1,103 @@
+.wipe
+.time reset
+
+.flow subset_base               $DATATOAD_DATA/flowlog/borrow/subset_base.csv
+.flow cfg_edge                  $DATATOAD_DATA/flowlog/borrow/cfg_edge.csv
+.flow loan_issued_at            $DATATOAD_DATA/flowlog/borrow/loan_issued_at.csv
+.flow universal_region          $DATATOAD_DATA/flowlog/borrow/universal_region.csv
+.flow var_used_at               $DATATOAD_DATA/flowlog/borrow/var_used_at.csv
+.flow loan_killed_at            $DATATOAD_DATA/flowlog/borrow/loan_killed_at.csv
+.flow known_placeholder_subset  $DATATOAD_DATA/flowlog/borrow/known_placeholder_subset.csv
+.flow var_dropped_at            $DATATOAD_DATA/flowlog/borrow/var_dropped_at.csv
+.flow drop_of_var_derefs_origin $DATATOAD_DATA/flowlog/borrow/drop_of_var_derefs_origin.csv
+.flow var_defined_at            $DATATOAD_DATA/flowlog/borrow/var_defined_at.csv
+.flow child_path                $DATATOAD_DATA/flowlog/borrow/child_path.csv
+.flow path_moved_at_base        $DATATOAD_DATA/flowlog/borrow/path_moved_at_base.csv
+.flow path_assigned_at_base     $DATATOAD_DATA/flowlog/borrow/path_assigned_at_base.csv
+.flow path_accessed_at_base     $DATATOAD_DATA/flowlog/borrow/path_accessed_at_base.csv
+.flow path_is_var               $DATATOAD_DATA/flowlog/borrow/path_is_var.csv
+.flow loan_invalidated_at       $DATATOAD_DATA/flowlog/borrow/loan_invalidated_at.csv
+.flow use_of_var_derefs_origin  $DATATOAD_DATA/flowlog/borrow/use_of_var_derefs_origin.csv
+
+.time clap-rs polonius loaded
+
+subset(origin1, origin2, point) :- subset_base(origin1, origin2, point).
+origin_contains_loan_on_entry(origin, loan, point) :- loan_issued_at(loan, origin, point).
+placeholder_origin(origin) :- universal_region(origin).
+known_placeholder_subset(x, z) :- known_placeholder_subset(x, y), known_placeholder_subset(y, z).
+subset(origin1, origin3, point) :- subset(origin1, origin2, point), subset_base(origin2, origin3, point), :noteq(origin1, origin3).
+subset(origin1, origin2, point2) :- subset(origin1, origin2, point1), cfg_edge(point1, point2), origin_live_on_entry(origin1, point2), origin_live_on_entry(origin2, point2).
+origin_contains_loan_on_entry(origin2, loan, point) :- origin_contains_loan_on_entry(origin1, loan, point), subset(origin1, origin2, point).
+origin_contains_loan_on_entry(origin, loan, point2) :- origin_contains_loan_on_entry(origin, loan, point1), cfg_edge(point1, point2), !loan_killed_at(loan, point1), origin_live_on_entry(origin, point2).
+loan_live_at(loan, point) :- origin_contains_loan_on_entry(origin, loan, point), origin_live_on_entry(origin, point).
+errors(loan, point) :- loan_invalidated_at(loan, point), loan_live_at(loan, point).
+subset_error(origin1, origin2, point) :- subset(origin1, origin2, point), placeholder_origin(origin1), placeholder_origin(origin2), !known_placeholder_subset(origin1, origin2), :noteq(origin1, origin2).
+
+.note .time clap-rs polonius basic
+
+.note # ========================================================
+.note # make_universal_regions_live (liveness.rs)
+origin_live_on_entry(origin, point) :- cfg_node(point), universal_region(origin).
+
+.note .time clap-rs polonius regions
+
+.note # ========================================================
+.note # populating cfg_node (output/mod.rs)
+cfg_node(point1) :- cfg_edge(point1, _0).
+cfg_node(point2) :- cfg_edge(_0, point2).
+
+.note .time clap-rs polonius cfg_node
+
+.note # ========================================================
+.note # liveness logic (liveness.rs)
+var_live_on_entry(var, point) :- var_used_at(var, point).
+var_maybe_partly_initialized_on_entry(var, point2) :- var_maybe_partly_initialized_on_exit(var, point1), cfg_edge(point1, point2).
+var_drop_live_on_entry(var, point) :- var_dropped_at(var, point), var_maybe_partly_initialized_on_entry(var, point).
+origin_live_on_entry(origin, point) :- var_drop_live_on_entry(var, point), drop_of_var_derefs_origin(var, origin).
+origin_live_on_entry(origin, point) :- var_live_on_entry(var, point), use_of_var_derefs_origin(var, origin).
+var_live_on_entry(var, point1) :- var_live_on_entry(var, point2), cfg_edge(point1, point2), !var_defined_at(var, point1).
+var_drop_live_on_entry(Var, SourceNode) :- var_drop_live_on_entry(Var, TargetNode), cfg_edge(SourceNode, TargetNode), !var_defined_at(Var, SourceNode), var_maybe_partly_initialized_on_exit(Var, SourceNode).
+
+.note .time clap-rs polonius liveness
+
+.note # ========================================================
+.note # initialization logic (initialization.rs)
+.note # Step 1: compute transitive closures of path operations
+ancestor_path(x, y) :- child_path(x, y).
+path_moved_at(x, y) :- path_moved_at_base(x, y).
+path_assigned_at(x, y) :- path_assigned_at_base(x, y).
+path_accessed_at(x, y) :- path_accessed_at_base(x, y).
+path_begins_with_var(x, var) :- path_is_var(x, var).
+ancestor_path(Grandparent, Child) :- ancestor_path(Parent, Child), child_path(Parent, Grandparent).
+path_moved_at(Child, Point) :- path_moved_at(Parent, Point), ancestor_path(Parent, Child).
+path_assigned_at(Child, point) :- path_assigned_at(Parent, point), ancestor_path(Parent, Child).
+path_accessed_at(Child, point) :- path_accessed_at(Parent, point), ancestor_path(Parent, Child).
+path_begins_with_var(Child, Var) :- path_begins_with_var(Parent, Var), ancestor_path(Parent, Child).
+
+.note .time clap-rs polonius step1
+
+.note # Step 2: Compute path initialization and deinitialization across the CFG.
+path_maybe_initialized_on_exit(path, point) :- path_assigned_at(path, point).
+path_maybe_uninitialized_on_exit(path, point) :- path_moved_at(path, point).
+path_maybe_initialized_on_exit(path, point2) :- path_maybe_initialized_on_exit(path, point1), cfg_edge(point1, point2), !path_moved_at(path, point2).
+path_maybe_uninitialized_on_exit(path, point2) :- path_maybe_uninitialized_on_exit(path, point1), cfg_edge(point1, point2), !path_assigned_at(path, point2).
+var_maybe_partly_initialized_on_exit(var, point) :- path_maybe_initialized_on_exit(path, point), path_begins_with_var(path, var).
+move_error(Path, TargetNode) :- path_maybe_uninitialized_on_exit(Path, SourceNode), cfg_edge(SourceNode, TargetNode).
+.note above should have a `path_accessed_at(Path, TargetNode)` clause to match Rust code.
+.note with that clause, and a clearer .output directive, the demand transform should dramatically reduce the `path_maybe_uninitialized_on_exit` explored.
+
+.time clap-rs polonius done
+.list
+.test ancestor_path 30
+.test path_assigned_at 6793
+.test path_begins_with_var 6372
+.test path_moved_at 16295
+.test path_accessed_at 7838
+.test var_live_on_entry 329734
+.test path_maybe_uninitialized_on_exit 291552229
+.test path_maybe_initialized_on_exit 1048567
+.test var_drop_live_on_entry 3588
+.test subset 5068815
+.test origin_contains_loan_on_entry 1316
+.note .wipe
+.quit

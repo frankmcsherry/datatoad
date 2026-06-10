@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{BufReader, BufRead};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use datatoad::{parse, types};
 
@@ -80,10 +81,12 @@ fn main() {
         state.comms = allocator.into();
         state.comms.set_mem_budget(mem_budget);
 
-        // Worker 0's command stack; initially .exec <file> for each command line argument.
-        let mut cmd_stack: Vec<String> = Vec::new();
+        // Worker 0's command stack. Each entry pairs a command line with the
+        // directory that relative `.exec` paths within it resolve against; the
+        // initial command-line `.exec`s resolve against the current directory.
+        let mut cmd_stack: Vec<(String, PathBuf)> = Vec::new();
         if state.comms.index() == 0 {
-            cmd_stack.extend(free.iter().rev().map(|f| format!(".exec {}", f)));
+            cmd_stack.extend(free.iter().rev().map(|f| (format!(".exec {}", f), PathBuf::from("."))));
         }
 
         let mut done = false;
@@ -127,11 +130,16 @@ fn main() {
 /// Driver-level directives (`.exec`, `.help`, `.quit`) are interpreted here and consumed without
 /// surfacing to the engine. EOF on a source pops it; an empty stack returns `None`,
 /// signaling the worker loop to broadcast "no more commands".
-fn next_command_line(cmd_stack: &mut Vec<String>) -> Option<String> {
+///
+/// Each stack entry carries the directory its relative `.exec` paths resolve
+/// against, so a script can `.exec` a sibling by name regardless of the
+/// current working directory.
+fn next_command_line(cmd_stack: &mut Vec<(String, PathBuf)>) -> Option<String> {
 
     // Loop, because .exec of an empty file could result in an empty queue.
     loop {
-        // If no pending commands, read one from the console.
+        // If no pending commands, read one from the console; console `.exec`
+        // paths resolve against the current directory.
         if cmd_stack.is_empty() {
             use std::io::Write;
             println!();
@@ -140,23 +148,64 @@ fn next_command_line(cmd_stack: &mut Vec<String>) -> Option<String> {
             let mut text = String::new();
             match std::io::stdin().read_line(&mut text) {
                 Ok(0) | Err(_) => { return None; },
-                Ok(_) => cmd_stack.push(text.trim_end().to_string()),
+                Ok(_) => cmd_stack.push((text.trim_end().to_string(), PathBuf::from("."))),
             }
         }
 
-        let text = cmd_stack.pop().unwrap();
+        let (text, base) = cmd_stack.pop().unwrap();
         let mut words = text.split_whitespace();
         match words.next() {
             Some(".quit") => { cmd_stack.clear(); return None; }
             Some(".exec") => {
-                // Read each file in order, record their lines.
-                let new_cmds: Vec<String> = words.flat_map(|filename| BufReader::new(File::open(filename).unwrap()).lines()).flatten().collect();
+                // Read each file in order; resolve relative paths against the
+                // directory of the script issuing this `.exec`. Lines from a
+                // file resolve their own `.exec`s against that file's directory.
+                let mut new_cmds: Vec<(String, PathBuf)> = Vec::new();
+                for filename in words {
+                    let path = base.join(filename);
+                    let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+                    for line in BufReader::new(File::open(&path).unwrap()).lines().flatten() {
+                        new_cmds.push((line, dir.clone()));
+                    }
+                }
                 cmd_stack.extend(new_cmds.into_iter().rev());
             }
             Some(".help") => { print_help(); }
             _ => return Some(text),
         }
     }
+}
+
+/// Expand `$VAR` and `${VAR}` references in `s` from the process environment.
+///
+/// Variable names run over ASCII alphanumerics and `_`. A lone `$` (followed by
+/// no name) is preserved literally. Returns `Err(name)` for the first referenced
+/// variable that is not set, so the caller can report which one to define.
+fn expand_env(s: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' { out.push(c); continue; }
+        let braced = chars.peek() == Some(&'{');
+        if braced { chars.next(); }
+        let mut name = String::new();
+        while let Some(&c) = chars.peek() {
+            if braced {
+                if c == '}' { chars.next(); break; }
+                name.push(c);
+                chars.next();
+            } else if c.is_ascii_alphanumeric() || c == '_' {
+                name.push(c);
+                chars.next();
+            } else { break; }
+        }
+        if name.is_empty() { out.push('$'); continue; }
+        match std::env::var(&name) {
+            Ok(value) => out.push_str(&value),
+            Err(_) => return Err(name),
+        }
+    }
+    Ok(out)
 }
 
 /// Print a summary of available directives.
@@ -178,6 +227,7 @@ fn print_help() {
     println!("  .time [tag ...]             print elapsed since previous .time and reset");
     println!("  .wipe                       clear all facts, rules, and declarations");
     println!("Datalog rules and facts are entered directly, e.g. `foo(x) :- bar(x).`");
+    println!("`.flow`/`.load` file paths expand $VAR/${{VAR}} from the environment.");
 }
 
 /// Commands executed symmetrically by all workers.
@@ -197,8 +247,13 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
 
                     let args: Result<[_;2],_> = words.take(2).collect::<Vec<_>>().try_into();
                     if let Ok(args) = args {
-                        flow_log::load_rows(args[0], args[1], state);
-                        state.update();
+                        match expand_env(args[1]) {
+                            Ok(filename) => {
+                                flow_log::load_rows(args[0], &filename, state);
+                                state.update();
+                            }
+                            Err(var) => println!(".flow: environment variable `{}` is not set", var),
+                        }
                     }
                     else { println!(".flow command requires arguments: <name> <file>"); }
                 }
@@ -211,11 +266,14 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                     if let Ok(args) = args {
                         let name = args[0].to_string();
                         let pattern = args[1];
-                        let filename = args[2];
+                        let filename = match expand_env(args[2]) {
+                            Ok(f) => f,
+                            Err(var) => { println!(".load: environment variable `{}` is not set", var); return; }
+                        };
 
                         if let Ok(regex) = regex::Regex::new(pattern) {
                             let names = regex.capture_names().map(|x| x.to_owned()).collect::<Vec<_>>();
-                            if let Ok(file) = File::open(filename) {
+                            if let Ok(file) = File::open(&filename) {
                                 let thresh = state.comms.thresh();
                                 let mut file = BufReader::new(file);
                                 use columnar::Push;

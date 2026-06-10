@@ -1,0 +1,42 @@
+.wipe
+.time reset
+
+.flow Assign $DATATOAD_DATA/flowlog/cspa-httpd/Assign.csv
+.flow Dereference $DATATOAD_DATA/flowlog/cspa-httpd/Dereference.csv
+.time httpd cspa loaded
+MFd(l1, l2) :- -M(l3, l1), Fd(l3,l2).
+-M(l2, l1) :- Fd(v3, l1), Fd(v3, l2) .
+-M(l2, l1) :- Fd(l3, l1), MFd(l3, l2).
+Fd(val, unk) :- Assign(val, loc), Fd(loc, unk).
+Fd(val, unk) :- Assign(val, loc), MFd(loc, unk).
+Fd(val, loc) :- Dereference(val, loc).
+.time httpd cspa complete
+.list
+.wipe
+
+.flow Assign $DATATOAD_DATA/flowlog/cspa-linux/Assign.csv
+.flow Dereference $DATATOAD_DATA/flowlog/cspa-linux/Dereference.csv
+.time linux cspa loaded
+MFd(l1, l2) :- -M(l3, l1), Fd(l3,l2).
+-M(l2, l1) :- Fd(v3, l1), Fd(v3, l2) .
+-M(l2, l1) :- Fd(l3, l1), MFd(l3, l2).
+Fd(val, unk) :- Assign(val, loc), Fd(loc, unk).
+Fd(val, unk) :- Assign(val, loc), MFd(loc, unk).
+Fd(val, loc) :- Dereference(val, loc).
+.time linux cspa complete
+.list
+.wipe
+
+.flow Assign $DATATOAD_DATA/flowlog/cspa-postgresql/Assign.csv
+.flow Dereference $DATATOAD_DATA/flowlog/cspa-postgresql/Dereference.csv
+.time postgresql cspa loaded
+MFd(l1, l2) :- -M(l3, l1), Fd(l3,l2).
+-M(l2, l1) :- Fd(v3, l1), Fd(v3, l2) .
+-M(l2, l1) :- Fd(l3, l1), MFd(l3, l2).
+Fd(val, unk) :- Assign(val, loc), Fd(loc, unk).
+Fd(val, unk) :- Assign(val, loc), MFd(loc, unk).
+Fd(val, loc) :- Dereference(val, loc).
+.time postgresql cspa complete
+.list
+.wipe
+.quit

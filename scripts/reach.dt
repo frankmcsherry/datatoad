@@ -1,0 +1,20 @@
+.sync
+.time reset
+
+.flow Arc $DATATOAD_DATA/flowlog/arabic/Arc.csv
+.flow Source $DATATOAD_DATA/flowlog/arabic/Source.csv
+.time arabic reach loaded
+Reach(y) :- Source(y).
+Reach(y) :- Reach(x), Arc(x,y).
+.time arabic reach complete
+.list
+.test Reach 22359925
+.wipe
+
+.quit
+
+# Other graphs available under flowlog/, swap in by moving the .flow/.test block
+# above the .quit. Expected Reach counts:
+#   livejournal/  -> .test Reach 4400347
+#   orkut/        -> .test Reach 3056659
+#   twitter/      -> .test Reach 35016157

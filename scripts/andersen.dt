@@ -1,0 +1,33 @@
+.wipe
+.sync
+.time reset
+
+.flow AddressOf $DATATOAD_DATA/flowlog/medium/addressOf.csv
+.flow Assign $DATATOAD_DATA/flowlog/medium/assign.csv
+.flow Load $DATATOAD_DATA/flowlog/medium/load.csv
+.flow Store $DATATOAD_DATA/flowlog/medium/store.csv
+.time medium andersen loaded
+PointsTo(y, x) :- AddressOf(y, x).
+PointsTo(y, x) :- Assign(y, z), PointsTo(z, x).
+PointsTo(y, w) :- Load(y, x), PointsTo(x, z), PointsTo(z, w).
+PointsTo(z, w) :- Store(y, x), PointsTo(y, z), PointsTo(x, w).
+.time medium andersen complete
+.list
+.test PointsTo 2654871
+.wipe
+
+.flow AddressOf $DATATOAD_DATA/flowlog/large/addressOf.csv
+.flow Assign $DATATOAD_DATA/flowlog/large/assign.csv
+.flow Load $DATATOAD_DATA/flowlog/large/load.csv
+.flow Store $DATATOAD_DATA/flowlog/large/store.csv
+.time large andersen loaded
+PointsTo(y, x) :- AddressOf(y, x).
+PointsTo(y, x) :- Assign(y, z), PointsTo(z, x).
+PointsTo(y, w) :- Load(y, x), PointsTo(x, z), PointsTo(z, w).
+PointsTo(z, w) :- Store(y, x), PointsTo(y, z), PointsTo(x, w).
+.time large andersen complete
+.list
+.test PointsTo 5315019
+.wipe
+
+.quit

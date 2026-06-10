@@ -1,0 +1,34 @@
+.wipe
+.sync
+.time reset
+
+.flow Arc $DATATOAD_DATA/flowlog/kernel/Arc.csv
+.time kernel dyck loaded
+Zero(x, y) :- Arc(x, y, 0x00000000).
+One(x, y)  :- Arc(x, y, 0x00000001).
+Dyck(x, y) :- Zero(x, z), Zero(z, y).
+Dyck(x, y) :- One(x, z), One(z, y).
+Dyck(x, y) :- Zero(x, z), Dyck(z, w), Zero(w, y).
+Dyck(x, y) :- One(x, z), Dyck(z, w), One(w, y).
+Dyck(x, y) :- Dyck(x, z), Dyck(z, y).
+.time kernel dyck complete
+.list
+.test Dyck 4458939
+.wipe
+
+.time reset
+.flow Arc $DATATOAD_DATA/flowlog/postgre/Arc.csv
+.time postgre dyck loaded
+Zero(x, y) :- Arc(x, y, 0x00000000).
+One(x, y)  :- Arc(x, y, 0x00000001).
+Dyck(x, y) :- Zero(x, z), Zero(z, y).
+Dyck(x, y) :- One(x, z), One(z, y).
+Dyck(x, y) :- Zero(x, z), Dyck(z, w), Zero(w, y).
+Dyck(x, y) :- One(x, z), Dyck(z, w), One(w, y).
+Dyck(x, y) :- Dyck(x, z), Dyck(z, y).
+.time postgre dyck complete
+.list
+.test Dyck 3854063
+.wipe
+
+.quit

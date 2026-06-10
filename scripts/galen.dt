@@ -1,0 +1,23 @@
+.note .wipe
+.sync
+.time reset
+
+.flow c $DATATOAD_DATA/flowlog/galen/C.csv
+.flow p $DATATOAD_DATA/flowlog/galen/P.csv
+.flow q $DATATOAD_DATA/flowlog/galen/Q.csv
+.flow r $DATATOAD_DATA/flowlog/galen/R.csv
+.flow s $DATATOAD_DATA/flowlog/galen/S.csv
+.flow u $DATATOAD_DATA/flowlog/galen/U.csv
+.time galen inference loaded
+p(x,z) :- p(x,y), p(y,z).
+q(x,r,z) :- p(x,y), q(y,r,z).
+q(x,q,z) :- q(x,r,z), s(r,q).
+p(x,z) :- p(y,w), u(w,r,z), q(x,r,y).
+p(x,z) :- c(y,w,z), p(x,w), p(x,y).
+q(x,e,o) :- q(x,y,z), q(z,u,o), r(y,u,e).
+.time galen inference complete
+.list
+.test p 7560179
+.test q 16595494
+.heap
+.quit

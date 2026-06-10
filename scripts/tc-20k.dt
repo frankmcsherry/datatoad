@@ -1,0 +1,12 @@
+.wipe
+.sync
+.time reset
+
+.flow Arc $DATATOAD_DATA/flowlog/G20K-0.001/Arc.csv
+.time g20k tc loaded
+Tc(x, y) :- Arc(x, y).
+Tc(x, y) :- Arc(z, y), Tc(x, z).
+.time g20k tc complete
+.list
+.wipe
+.quit

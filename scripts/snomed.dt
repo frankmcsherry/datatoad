@@ -1,0 +1,11 @@
+.flow c $DATATOAD_DATA/snomed/c.txt
+.flow p $DATATOAD_DATA/snomed/p.txt
+.flow q $DATATOAD_DATA/snomed/q.txt
+.flow r $DATATOAD_DATA/snomed/r.txt
+.flow s $DATATOAD_DATA/snomed/s.txt
+.flow u $DATATOAD_DATA/snomed/u.txt
+.time snomed inference loaded
+p(x,z) :- p(x,y), p(y,z). q(x,r,z) :- p(x,y), q(y,r,z). q(x,q,z) :- q(x,r,z),s(r,q). p(x,z) :- p(y,w),u(w,r,z),q(x,r,y). p(x,z) :- c(y,w,z),p(x,w),p(x,y).
+.time snomed inference loaded
+.wipe
+.quit

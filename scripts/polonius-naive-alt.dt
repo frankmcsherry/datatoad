@@ -1,0 +1,40 @@
+.wipe
+.time reset
+
+.load outlives          (?<h32_foo>[^\t]+)\t(?<h32_bar>[^\t]+)\t(?<h32_baz>[^\t]+) $DATATOAD_DATA/clap-rs/outlives.facts
+.load cfg_edge          (?<h32_foo>[^\t]+)\t(?<h32_bar>[^\t]+)                     $DATATOAD_DATA/clap-rs/cfg_edge.facts
+.load region_live_at    (?<h32_foo>[^\t]+)\t(?<h32_bar>[^\t]+)                     $DATATOAD_DATA/clap-rs/region_live_at.facts
+.load borrow_region     (?<h32_foo>[^\t]+)\t(?<h32_bar>[^\t]+)\t(?<h32_baz>[^\t]+) $DATATOAD_DATA/clap-rs/borrow_region.facts
+.load killed            (?<h32_foo>[^\t]+)\t(?<h32_bar>[^\t]+)                     $DATATOAD_DATA/clap-rs/killed.facts
+.load invalidates       (?<h32_foo>[^\t]+)\t(?<h32_bar>[^\t]+)                     $DATATOAD_DATA/clap-rs/invalidates.facts
+.load universal         (?<h32_foo>[^\t]+)                                         $DATATOAD_DATA/clap-rs/universal_region.facts
+
+.time loaded
+region_live_at(R, P) :- cfg_edge(P,_0), universal(R).
+region_live_at(R, Q) :- cfg_edge(_0,Q), universal(R).
+
+.note demand transformed derivations
+subset(R1, R2, P) :- subset_fbb(R2, P), outlives(R1, R2, P), :noteq(R1,R2).
+subset(R1, R3, P) :- subset_fbb(R3, P), subset(R2, R3, P), subset(R1, R2, P), :noteq(R1,R3).
+subset(R1, R2, Q) :- subset_fbb(R2, Q), cfg_edge(P, Q), region_live_at(R1, Q), region_live_at(R2, Q), :noteq(R1,R2), subset(R1, R2, P).
+requires(R, B, P)  :- requires_bbb(R, B, P), borrow_region(R, B, P).
+requires(R2, B, P) :- requires_bbb(R2, B, P), subset(R1, R2, P), requires(R1, B, P).
+requires(R, B, Q)  :- requires_bbb(R, B, Q), !killed(B, P), cfg_edge(P, Q), region_live_at(R, Q), requires(R, B, P).
+borrow_live_at(B, P) :- borrow_live_at_bb(B, P), region_live_at(R, P), requires(R, B, P).
+errors(B, P) :- invalidates(B, P), borrow_live_at(B, P).
+
+.note demand population rules
+borrow_live_at_bb(B, P) :- invalidates(B, P).
+requires_bbb(R, B, P) :- borrow_live_at_bb(B, P), region_live_at(R, P).
+requires_bbb(R, B, P) :- requires_bbb(R, B, Q), !killed(B, P), cfg_edge(P, Q), region_live_at(R, Q).
+requires_bbb(R1, B, P) :- requires_bbb(R2, B, P), subset(R1, R2, P).
+subset_fbb(R2, P) :- requires_bbb(R2, B, P).
+subset_fbb(R2, P) :- subset_fbb(R2, Q), cfg_edge(P, Q), region_live_at(R1, Q), region_live_at(R2, Q), :noteq(R1,R2).
+subset_fbb(R2, P) :- subset_fbb(R3, P), subset(R2, R3, P).
+
+.time complete
+
+.list
+.note polonius result: Subset: 6736693
+.note polonius result: Requires: 9585213
+.quit
