@@ -59,8 +59,7 @@ fn main() {
         let matches = opts.parse(args).map_err(|e| e.to_string()).unwrap();
         let config = Config::from_matches(&matches).unwrap();
         let mem_budget = matches.opt_str("m")
-            .or_else(|| std::env::var("DATATOAD_MEMORY").ok())
-            .map(|s| parse_byte_size(&s).expect("invalid -m/DATATOAD_MEMORY value"))
+            .map(|s| parse_byte_size(&s).expect("invalid -m/--memory value"))
             .unwrap_or(datatoad::comms::DEFAULT_MEM_BUDGET);
         (config, mem_budget, matches.free)
     };
