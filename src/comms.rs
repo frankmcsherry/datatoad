@@ -39,7 +39,7 @@ impl Comms {
 
     pub fn next_id(&self) -> usize { self.count }
 
-    pub fn conduit(&mut self) -> Conduit {
+    pub fn conduit<F: Exchangeable>(&mut self) -> Conduit<F> {
         let budget = self.mem_budget;
         let comms = self.ether.as_mut().map(|comms| {
             let (sends, recv) = comms.borrow_mut().allocate(self.count);
@@ -170,18 +170,32 @@ pub struct Channel {
     done: bool,
 }
 
+/// Facts that can be exchanged among workers over a `Channel`.
+///
+/// The implementation owns the routing of facts to peers and the message encoding.
+/// Implemented for `Forest<Terms>` only at the moment; other fact containers will
+/// need their own routing and encoding (or a generalized `FactMessage`).
+pub trait Exchangeable: crate::facts::Merge + crate::facts::Length + crate::facts::Arity + Sized {
+    /// Exchanges facts with other participants, drawing from and refilling `facts`.
+    fn exchange(channel: &mut Channel, facts: &mut FactLSM<Self>);
+    /// Extracts all remaining facts, closing the channel.
+    fn complete(mut channel: Channel) -> FactLSM<Self> {
+        channel.close();
+        let mut facts = FactLSM::default();
+        while channel.count > 0 { let mut temp = FactLSM::default(); Self::exchange(&mut channel, &mut temp); facts.extend(temp); }
+        facts
+    }
+}
+
+impl Exchangeable for Forest<Terms> {
+    fn exchange(channel: &mut Channel, facts: &mut FactLSM<Self>) { channel.exchange(facts) }
+}
+
 impl Channel {
     fn close(&mut self) { if !self.done {
         for sender in self.sends.iter_mut() { sender.send(FactMessage { facts: None } ); }
         self.done = true;
     }}
-    /// Extracts all remaining facts
-    fn complete(mut self) -> FactLSM<Forest<Terms>> {
-        self.close();
-        let mut facts = FactLSM::default();
-        while self.count > 0 { let mut temp = FactLSM::default(); self.exchange(&mut temp); facts.extend(temp); }
-        facts
-    }
     /// Exchanges facts with other participants, drawing from and refilling `facts`.
     fn exchange(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
 
@@ -222,28 +236,28 @@ impl Channel {
 ///
 /// Internally, a communication protocol with other peers relies on each eventually sending an empty `FactMessage`.
 /// Once as many of these have been received as there are peers, the exchange is complete.
-pub struct Conduit {
+pub struct Conduit<F = Forest<Terms>> {
     /// Communication infrastructure.
     comms: Option<Channel>,
-    facts: FactLSM<Forest<Terms>>,
+    facts: FactLSM<F>,
     /// Snapshot of the cluster-wide budget at allocation time.
     mem_budget: usize,
 }
 
-impl Conduit {
+impl<F: Exchangeable> Conduit<F> {
     /// The number of peers backing the conduit.
     pub fn peers(&self) -> usize { self.comms.as_ref().map(|c| c.comms.borrow().peers()).unwrap_or(1) }
     /// Per-peer slice of the cluster-wide budget. Mirrors `Comms::thresh`.
     pub fn thresh(&self) -> usize { self.mem_budget / self.peers() }
     /// Supplies facts to the conduit, which are exchanged and then collected.
-    pub fn extend(&mut self, facts: &mut FactLSM<Forest<Terms>>) {
-        if let Some(channel) = self.comms.as_mut() { channel.exchange(facts); }
+    pub fn extend(&mut self, facts: &mut FactLSM<F>) {
+        if let Some(channel) = self.comms.as_mut() { F::exchange(channel, facts); }
         self.facts.extend(std::mem::take(facts));
     }
     pub fn close(&mut self) { if let Some(channel) = self.comms.as_mut() { channel.close(); } }
     /// Finalizes the facts awaiting receipt from all other participants.
-    pub fn finish(mut self) -> FactLSM<Forest<Terms>> {
-        if let Some(channel) = self.comms { self.facts.extend(channel.complete()); }
+    pub fn finish(mut self) -> FactLSM<F> {
+        if let Some(channel) = self.comms { self.facts.extend(F::complete(channel)); }
         self.facts
     }
 }

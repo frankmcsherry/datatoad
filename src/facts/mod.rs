@@ -200,7 +200,7 @@ pub trait FactContainer : Length + Merge + Arity + Sized + Clone {
     /// Joins `self` and `others` on the first `arity` columns, putting projected results in `builders`.
     ///
     /// The default implementation processes `others` in order, but more thoughtful implementations exist.
-    fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize], conduit: crate::comms::Conduit) -> FactLSM<Self>;
+    fn join_many<'a>(&'a self, others: impl Iterator<Item = &'a Self>, arity: usize, projection: &[usize], conduit: crate::comms::Conduit<Self>) -> FactLSM<Self>;
 }
 
 /// An evolving set of facts.
