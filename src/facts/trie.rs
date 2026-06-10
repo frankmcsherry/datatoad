@@ -1215,37 +1215,29 @@ pub mod layers {
 
         assert_eq!(groups.len(), indexs.len());
 
+        // Contiguous LSB sorting, whose temp is two full copies of the rows. The paged form
+        // (`radix_sort::lsb_paged`, still used by loading) bounds its working set near one
+        // copy, but is slower here: reverting it from these methods recovered 20% on galen
+        // and 13% on csda on the M4 minis. A revival should beat contiguous at equal memory,
+        // e.g. with the `-m` budget raised to spend the footprint it saves.
         let mut output = Lists::<Vec<[u8;4]>>::default();
 
-        use crate::facts::radix_sort::{PageBuilder, lsb_paged};
-        let n = groups.len();
-        let mut row_iter = groups.iter().zip(indexs.iter()).enumerate().map(|(i, (group, index))| {
+        let mut rows: Vec<[u8; 12]> = groups.iter().zip(indexs.iter()).enumerate().map(|(i, (group, index))| {
             let mut row = [0u8; 12];
             row[0..4].copy_from_slice(&(*group as u32).to_be_bytes());
             row[4..8].copy_from_slice(&items[*index]);
             row[8..12].copy_from_slice(&(i as u32).to_be_bytes());
             row
-        });
-        let mut builder = PageBuilder::<[u8; 12], 12, 1024>::default();
-        let n_pages = (n + 1024 - 1) / 1024;
-        for _ in 0 .. n_pages {
-            // Vec::from_iter on a take()-bounded iterator pre-allocates exactly,
-            // avoiding the per-item cap check that PageBuilder::push pays.
-            let page: Vec<[u8; 12]> = row_iter.by_ref().take(1024).collect();
-            builder.push_page(page);
-        }
-        let (mut pages, mut filter) = builder.done();
-        for f in &mut filter[8..12] { *f = false; }
-        lsb_paged::<_, 1024>(&mut pages, &filter[..]);
+        }).collect();
+        // Sort on bytes 0..8 (group then value); bytes 8..12 are payload.
+        crate::facts::radix_sort::lsb_range(&mut rows[..], 0, 8);
 
         // We want to mint a new item for each distinct (group, value).
         // We want to seal a new list for each distinct group.
         // We want to update groups with index as we go (random access potentially pessimal).
-        let mut pages_iter = pages.drain(..).filter(|p| !p.is_empty());
-        if let Some(first_page) = pages_iter.next() {
-            let triples = first_page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
-            let mut iter = triples.iter();
-            let [group, value, index] = iter.next().expect("non-empty page has at least one row");
+        let triples = rows.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
+        let mut iter = triples.iter();
+        if let Some([group, value, index]) = iter.next() {
             output.values.push(*value);
             let mut prev = (*group, *value);
             groups[u32::from_be_bytes(*index) as usize] = 0;
@@ -1254,15 +1246,6 @@ pub mod layers {
                 if prev != (*group, *value) { output.values.push(*value); }
                 prev = (*group, *value);
                 groups[u32::from_be_bytes(*index) as usize] = output.values.len() - 1;
-            }
-            for page in pages_iter {
-                let triples = page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
-                for [group, value, index] in triples.iter() {
-                    if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
-                    if prev != (*group, *value) { output.values.push(*value); }
-                    prev = (*group, *value);
-                    groups[u32::from_be_bytes(*index) as usize] = output.values.len() - 1;
-                }
             }
             output.bounds.push(output.values.len() as u64);
         }
@@ -1276,32 +1259,19 @@ pub mod layers {
 
         let mut output = Lists::<Vec<[u8;4]>>::default();
 
-        use crate::facts::radix_sort::{PageBuilder, lsb_paged};
-        let n = groups.len();
-        let mut row_iter = groups.iter().zip(indexs.iter()).map(|(group, index)| {
+        let mut rows: Vec<[u8; 8]> = groups.iter().zip(indexs.iter()).map(|(group, index)| {
             let mut row = [0u8; 8];
             row[0..4].copy_from_slice(&(*group as u32).to_be_bytes());
             row[4..8].copy_from_slice(&items[*index]);
             row
-        });
-        let mut builder = PageBuilder::<[u8; 8], 8, 1024>::default();
-        let n_pages = (n + 1024 - 1) / 1024;
-        for _ in 0 .. n_pages {
-            let page: Vec<[u8; 8]> = row_iter.by_ref().take(1024).collect();
-            builder.push_page(page);
-        }
-        let (mut pages, filter) = builder.done();
-        lsb_paged::<_, 1024>(&mut pages, &filter[..]);
+        }).collect();
+        crate::facts::radix_sort::lsb_range(&mut rows[..], 0, 8);
 
         // We want to mint a new item for each distinct (group, value).
         // We want to seal a new list for each distinct group.
-        // Drain pages as we consume them so the input memory drops monotonically
-        // while `output` grows; peak ~= max(input, output) rather than their sum.
-        let mut pages_iter = pages.drain(..).filter(|p| !p.is_empty());
-        if let Some(first_page) = pages_iter.next() {
-            let pairs = first_page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<2>().0;
-            let mut iter = pairs.iter();
-            let [group, value] = iter.next().expect("non-empty page has at least one row");
+        let pairs = rows.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<2>().0;
+        let mut iter = pairs.iter();
+        if let Some([group, value]) = iter.next() {
             output.values.push(*value);
             let mut prev = (*group, *value);
             for [group, value] in iter {
@@ -1309,18 +1279,11 @@ pub mod layers {
                 if prev != (*group, *value) { output.values.push(*value); }
                 prev = (*group, *value);
             }
-            for page in pages_iter {
-                let pairs = page.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<2>().0;
-                for [group, value] in pairs.iter() {
-                    if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
-                    if prev != (*group, *value) { output.values.push(*value); }
-                    prev = (*group, *value);
-                }
-            }
             output.bounds.push(output.values.len() as u64);
         }
 
         output
     }
+
 
 }
