@@ -97,7 +97,7 @@ pub mod terms {
     use std::rc::Rc;
     use columnar::{Borrow, Container, Index, Len};
     use crate::facts::{FactContainer, FactLSM, Lists, Terms};
-    use crate::facts::trie::layers::Report;
+    use crate::facts::trie::layers::{FactColumn, Report};
     use crate::types::Action;
 
     use super::{Forest, Layer};
@@ -139,7 +139,7 @@ pub mod terms {
                     values: column.borrow(),
                 };
                 // TODO: Figure out how to avoid `indexs` being literally just `0 .. len`.
-                Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(lists, &mut groups[..], &indexs[..], index == columns_len-1) })
+                Rc::new(Layer { list: Terms::sort(lists, &mut groups[..], &indexs[..], index == columns_len-1) })
             }).collect();
             Some(layers.try_into().expect("empty columns tested earlier"))
         }
@@ -387,12 +387,12 @@ pub mod terms {
             groups_list_layer = col+1;
 
             let last = projection_idx == projection.len() - 1;
-            result.push(Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(layers[col], &mut groups, &indexs, last) }));
+            result.push(Rc::new(Layer { list: Terms::sort(layers[col], &mut groups, &indexs, last) }));
 
             projection_idx += 1;
 
-            // TODO:    Consider fusing this work into the preceding `sort_terms`, as these values will be 1:1 with those entries.
-            //          This would require a more advanced `sort_terms` implementation, one capable of accepting a list of layers.
+            // TODO:    Consider fusing this work into the preceding `sort`, as these values will be 1:1 with those entries.
+            //          This would require a more advanced `sort` implementation, one capable of accepting a list of layers.
             //          The advantage would be fewer (but larger) total rounds of sorting, nearly removing the cost of 1:1 columns.
 
             // For as long as column indexes do not advance, we project values forward 1:1 to meet `groups`.
@@ -413,7 +413,7 @@ pub mod terms {
                 indexs.extend(idents.iter().copied().flat_map(|(l,u)| l..u).zip(bounds.iter().copied().map(|(l,u)| u-l)).flat_map(|(i,c)| std::iter::repeat(i).take(c)));
 
                 let last = projection_idx == projection.len() - 1;
-                result.push(Rc::new(Layer { list: crate::facts::trie::layers::sort_terms(layers[col], &mut groups, &indexs, last) }));
+                result.push(Rc::new(Layer { list: Terms::sort(layers[col], &mut groups, &indexs, last) }));
 
                 projection_idx += 1;
             }
@@ -475,7 +475,7 @@ pub mod terms {
             let mut this_aligned = Vec::new();
             for other in 0 .. thats.len() {
                 let layer1 = &thats[other][layer];
-                let results = crate::facts::trie::layers::terms::intersection(*layer0, *layer1, &aligned[other].0, &aligned[other].1);
+                let results = Terms::intersect(*layer0, *layer1, &aligned[other].0, &aligned[other].1);
                 this_aligned.extend_from_slice(&results.0);
                 aligned[other] = (Rc::new(results.0), Rc::new(results.1));
             }
@@ -565,8 +565,6 @@ pub mod terms {
             // Layers correspond to the columns of `projection`, which we produce in turn.
             let layers = projection.iter().copied().enumerate().map(|(idx, column)| {
 
-                use crate::facts::trie::layers::sort_terms;
-
                 let last = idx+1 == projection.len();
 
                 let list = if column < arity {
@@ -595,7 +593,7 @@ pub mod terms {
                     // Flatten the (index, count) into repetitions.
                     let mut flat = Vec::with_capacity(groups.len());
                     flat.extend(aligneds[column].iter().zip(counts).flat_map(|(i,c)| std::iter::repeat(*i).take(c)));
-                    sort_terms(this[column], &mut groups, &flat, last)
+                    Terms::sort(this[column], &mut groups, &flat, last)
                 }
                 else if column < this.len() {
                     // We expect this to be the next column in `this_values`.
@@ -605,7 +603,7 @@ pub mod terms {
                     // Expand `this_i`, and corresponding repetitions in `groups` and `that_j`.
                     let mut others = if that_cursor < that_values.len() { vec![&mut groups, Rc::make_mut(&mut that_j)] } else { vec![&mut groups] };
                     expand(Rc::make_mut(&mut this_i), values, &mut others);
-                    sort_terms(values, &mut groups, &this_i, last)
+                    Terms::sort(values, &mut groups, &this_i, last)
                 }
                 else if column < this.len() + arity { unimplemented!("reference equated column of first join argument") }
                 else {
@@ -616,7 +614,7 @@ pub mod terms {
                     // Expand `that_j`, and corresponding repetitions in `groups` and `this_i`.
                     let mut others = if this_cursor < this_values.len() { vec![&mut groups, Rc::make_mut(&mut this_i)] } else { vec![&mut groups] };
                     expand(Rc::make_mut(&mut that_j), values, &mut others);
-                    sort_terms(values, &mut groups, &that_j, last)
+                    Terms::sort(values, &mut groups, &that_j, last)
                 };
                 Rc::new(Layer { list })
             }).collect::<Vec<_>>();
@@ -783,7 +781,7 @@ pub mod terms {
             for other in others.iter() {
                 let mut reports = (vec![0], vec![0]);
                 for (layer0, layer1) in self.layers.iter().zip(other.iter()) {
-                    reports = crate::facts::trie::layers::terms::intersection(layer0.borrow(), *layer1, &reports.0, &reports.1);
+                    reports = Terms::intersect(layer0.borrow(), *layer1, &reports.0, &reports.1);
                 }
                 // Mark shared paths appropriately.
                 for index in reports.0.iter().copied() { include[index] = semi; }
@@ -836,9 +834,11 @@ pub mod terms {
 
 /// Layer-at-a-time functionality.
 ///
-/// These are meant to be the high-performance kernels used by forests of more general layers.
-/// Implementations for `Layer<Terms>` are "abstract" and not performance optimized, whereas
-/// the implementations for generic container types are "specialized" and potentially efficient.
+/// The `FactColumn` trait names the kernels a container must supply to back a `Layer`,
+/// and the free functions here are generic implementations of those kernels for any
+/// container with `Ord` references, to which an implementor can defer one line at a time.
+/// The `Terms` implementation instead dispatches to width-specialized variants when the
+/// data allow.
 pub mod layers {
 
     use std::collections::VecDeque;
@@ -863,71 +863,91 @@ pub mod layers {
         Both(usize, usize),
     }
 
-    /// Layer-at-a-time methods for general `Layer<Term>` types, specialized as appropriate.
-    ///
-    /// These methods are specialized to various array sizes, mostly for demonstration purposes.
-    /// These sizes are not specifically important, but we do want to support this sort of thing.
-    impl Layer<Terms> {
+    /// Layer-at-a-time methods for any `Layer<C>` whose container implements `FactColumn`.
+    impl<C: FactColumn> Layer<C> {
         /// Unions two layers, aligned through `reports`, which is refilled if `next` is set.
-        pub fn union(&self, other: &Self, reports: &mut VecDeque<Report>, next: bool) -> Self { Self { list: terms::union(self.borrow(), other.borrow(), reports, next) } }
+        pub fn union(&self, other: &Self, reports: &mut VecDeque<Report>, next: bool) -> Self { Self { list: C::union(self.borrow(), other.borrow(), reports, next) } }
 
         /// Intersects two layers, aligned through `aligns`.
-        pub fn intersection(&self, other: &Self, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) { terms::intersection(self.borrow(), other.borrow(), both0, both1) }
+        pub fn intersection(&self, other: &Self, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) { C::intersect(self.borrow(), other.borrow(), both0, both1) }
 
         /// Retains lists indicated by `retain`, which is refilled.
-        pub fn retain_lists(&self, bounds: &mut [(usize, usize)]) -> Self { Self { list: terms::retain_lists(self.borrow(), bounds) } }
+        pub fn retain_lists(&self, bounds: &mut [(usize, usize)]) -> Self { Self { list: C::retain_lists(self.borrow(), bounds) } }
 
         /// Retains items indicated by `retain`, which is refilled.
-        pub fn retain_items(&self, retain: &mut VecDeque<bool>) -> Self { Self { list: terms::retain_items(self.borrow(), retain) } }
+        pub fn retain_items(&self, retain: &mut VecDeque<bool>) -> Self { Self { list: C::retain_items(self.borrow(), retain) } }
     }
 
-    pub mod terms {
-
-        use std::collections::VecDeque;
-        use columnar::Borrow;
-        use crate::facts::{Lists, Terms};
-        use crate::facts::trie::layers::Report;
-        use crate::facts::{upgrade_hint, upgrade, downgrade};
-
+    /// The operations a column container must support to serve as the values of a `Layer`.
+    ///
+    /// Each method is a layer-at-a-time kernel: it works on the values of one layer, and
+    /// communicates with adjacent layers only through type-erased state (`Report`s, index
+    /// bounds, and grouping identifiers). Implementors whose references are `Ord` can defer
+    /// to the generic kernels in this module (`union`, `intersection`, `retain_lists`,
+    /// `retain_items`, `col_sort`), each one line. The `Terms` implementation instead
+    /// inspects the data for fixed widths, and dispatches to kernels specialized to those
+    /// widths.
+    pub trait FactColumn: Container + Clone {
+        /// Sorts the items of `lists` at `indexs` subject to the grouping/ordering of `groups`.
+        ///
+        /// Mints a new item for each distinct `(group, item)` pair and a new list for each
+        /// distinct group, rewriting `groups` with output item indexes unless `last` is set.
+        fn sort(lists: <Lists<Self> as Borrow>::Borrowed<'_>, groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Self>;
         /// Unions two layers, aligned through `reports`, which is refilled if `next` is set.
-        pub fn union(lists0: <Lists<Terms> as Borrow>::Borrowed<'_>, lists1: <Lists<Terms> as Borrow>::Borrowed<'_>, reports: &mut VecDeque<Report>, next: bool) -> Lists<Terms> {
-            match (upgrade_hint(lists0), upgrade_hint(lists1)) {
-                (Some(1), Some(1)) => { downgrade(super::union(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), reports, next)) }
-                (Some(2), Some(2)) => { downgrade(super::union(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), reports, next)) }
-                (Some(3), Some(3)) => { downgrade(super::union(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), reports, next)) }
-                (Some(4), Some(4)) => { downgrade(super::union(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), reports, next)) }
-                _ => { super::union(lists0, lists1, reports, next) }
-            }
-        }
-        /// Intersects two layers, aligned through `aligns`.
-        pub fn intersection(lists0: <Lists<Terms> as Borrow>::Borrowed<'_>, lists1: <Lists<Terms> as Borrow>::Borrowed<'_>, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) {
-            // Update `aligns` for the next layer, or output.
-            match (upgrade_hint(lists0), upgrade_hint(lists1)) {
-                (Some(1), Some(1)) => { super::intersection::<Vec<[u8; 1]>>(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), both0, both1) }
-                (Some(2), Some(2)) => { super::intersection::<Vec<[u8; 2]>>(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), both0, both1) }
-                (Some(3), Some(3)) => { super::intersection::<Vec<[u8; 3]>>(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), both0, both1) }
-                (Some(4), Some(4)) => { super::intersection::<Vec<[u8; 4]>>(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), both0, both1) }
-                _ => { super::intersection::<Terms>(lists0, lists1, both0, both1) }
-            }
-        }
-        /// Retains lists indicated by `retain`, which is refilled.
-        pub fn retain_lists(lists: <Lists<Terms> as Borrow>::Borrowed<'_>, bounds: &mut [(usize, usize)]) -> Lists<Terms> {
+        fn union(lists0: <Lists<Self> as Borrow>::Borrowed<'_>, lists1: <Lists<Self> as Borrow>::Borrowed<'_>, reports: &mut VecDeque<Report>, next: bool) -> Lists<Self>;
+        /// Intersects pairs of lists aligned by `both0` and `both1`, producing aligned item indexes.
+        fn intersect(lists0: <Lists<Self> as Borrow>::Borrowed<'_>, lists1: <Lists<Self> as Borrow>::Borrowed<'_>, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>);
+        /// Retains list ranges indicated by `bounds`, which is advanced to bounds on items.
+        fn retain_lists(lists: <Lists<Self> as Borrow>::Borrowed<'_>, bounds: &mut [(usize, usize)]) -> Lists<Self>;
+        /// Retains items indicated by `retain`, which is refilled with per-list bools.
+        fn retain_items(lists: <Lists<Self> as Borrow>::Borrowed<'_>, retain: &mut VecDeque<bool>) -> Lists<Self>;
+    }
+
+    /// Byte strings, specialized at runtime to fixed-width kernels when widths allow.
+    impl FactColumn for Terms {
+        fn sort(lists: <Lists<Terms> as Borrow>::Borrowed<'_>, groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Terms> {
             match upgrade_hint(lists) {
-                Some(1) => { downgrade(super::retain_lists(upgrade::<1>(lists).unwrap(), bounds)) }
-                Some(2) => { downgrade(super::retain_lists(upgrade::<2>(lists).unwrap(), bounds)) }
-                Some(3) => { downgrade(super::retain_lists(upgrade::<3>(lists).unwrap(), bounds)) }
-                Some(4) => { downgrade(super::retain_lists(upgrade::<4>(lists).unwrap(), bounds)) }
-                _______ => { super::retain_lists(lists, bounds) }
+                Some(1) => { downgrade(col_sort(upgrade::<1>(lists).unwrap().values, groups, indexs, last)) }
+                Some(2) => { downgrade(col_sort(upgrade::<2>(lists).unwrap().values, groups, indexs, last)) }
+                Some(3) => { downgrade(col_sort(upgrade::<3>(lists).unwrap().values, groups, indexs, last)) }
+                Some(4) => { downgrade(u32_sort(upgrade::<4>(lists).unwrap().values, groups, indexs, last)) }
+                _______ => { col_sort(lists.values, groups, indexs, last) }
             }
         }
-        /// Retains items indicated by `retain`, which is refilled.
-        pub fn retain_items(lists: <Lists<Terms> as Borrow>::Borrowed<'_>, retain: &mut VecDeque<bool>) -> Lists<Terms> {
+        fn union(lists0: <Lists<Terms> as Borrow>::Borrowed<'_>, lists1: <Lists<Terms> as Borrow>::Borrowed<'_>, reports: &mut VecDeque<Report>, next: bool) -> Lists<Terms> {
+            match (upgrade_hint(lists0), upgrade_hint(lists1)) {
+                (Some(1), Some(1)) => { downgrade(union(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), reports, next)) }
+                (Some(2), Some(2)) => { downgrade(union(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), reports, next)) }
+                (Some(3), Some(3)) => { downgrade(union(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), reports, next)) }
+                (Some(4), Some(4)) => { downgrade(union(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), reports, next)) }
+                _ => { union(lists0, lists1, reports, next) }
+            }
+        }
+        fn intersect(lists0: <Lists<Terms> as Borrow>::Borrowed<'_>, lists1: <Lists<Terms> as Borrow>::Borrowed<'_>, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) {
+            match (upgrade_hint(lists0), upgrade_hint(lists1)) {
+                (Some(1), Some(1)) => { intersection::<Vec<[u8; 1]>>(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), both0, both1) }
+                (Some(2), Some(2)) => { intersection::<Vec<[u8; 2]>>(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), both0, both1) }
+                (Some(3), Some(3)) => { intersection::<Vec<[u8; 3]>>(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), both0, both1) }
+                (Some(4), Some(4)) => { intersection::<Vec<[u8; 4]>>(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), both0, both1) }
+                _ => { intersection::<Terms>(lists0, lists1, both0, both1) }
+            }
+        }
+        fn retain_lists(lists: <Lists<Terms> as Borrow>::Borrowed<'_>, bounds: &mut [(usize, usize)]) -> Lists<Terms> {
             match upgrade_hint(lists) {
-                Some(1) => { downgrade(super::retain_items(upgrade::<1>(lists).unwrap(), retain)) }
-                Some(2) => { downgrade(super::retain_items(upgrade::<2>(lists).unwrap(), retain)) }
-                Some(3) => { downgrade(super::retain_items(upgrade::<3>(lists).unwrap(), retain)) }
-                Some(4) => { downgrade(super::retain_items(upgrade::<4>(lists).unwrap(), retain)) }
-                _______ => { super::retain_items(lists, retain) }
+                Some(1) => { downgrade(retain_lists(upgrade::<1>(lists).unwrap(), bounds)) }
+                Some(2) => { downgrade(retain_lists(upgrade::<2>(lists).unwrap(), bounds)) }
+                Some(3) => { downgrade(retain_lists(upgrade::<3>(lists).unwrap(), bounds)) }
+                Some(4) => { downgrade(retain_lists(upgrade::<4>(lists).unwrap(), bounds)) }
+                _______ => { retain_lists(lists, bounds) }
+            }
+        }
+        fn retain_items(lists: <Lists<Terms> as Borrow>::Borrowed<'_>, retain: &mut VecDeque<bool>) -> Lists<Terms> {
+            match upgrade_hint(lists) {
+                Some(1) => { downgrade(retain_items(upgrade::<1>(lists).unwrap(), retain)) }
+                Some(2) => { downgrade(retain_items(upgrade::<2>(lists).unwrap(), retain)) }
+                Some(3) => { downgrade(retain_items(upgrade::<3>(lists).unwrap(), retain)) }
+                Some(4) => { downgrade(retain_items(upgrade::<4>(lists).unwrap(), retain)) }
+                _______ => { retain_items(lists, retain) }
             }
         }
     }
@@ -1131,16 +1151,6 @@ pub mod layers {
         assert_eq!(active.len(), aligned.len());
         let mut aligned = aligned.iter().copied();
         active.retain(|i| lists.values.get(*i) == other.get(aligned.next().unwrap()));
-    }
-
-    pub fn sort_terms(lists: <Lists<Terms> as Borrow>::Borrowed<'_>, groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Terms> {
-        match upgrade_hint(lists) {
-            Some(1) => { downgrade(col_sort(upgrade::<1>(lists).unwrap().values, groups, indexs, last)) }
-            Some(2) => { downgrade(col_sort(upgrade::<2>(lists).unwrap().values, groups, indexs, last)) }
-            Some(3) => { downgrade(col_sort(upgrade::<3>(lists).unwrap().values, groups, indexs, last)) }
-            Some(4) => { downgrade(u32_sort(upgrade::<4>(lists).unwrap().values, groups, indexs, last)) }
-            _______ => { col_sort(lists.values, groups, indexs, last) }
-        }
     }
 
     /// Sort the items of `lists` subject to the grouping/ordering of `group` of the lists.

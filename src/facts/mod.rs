@@ -135,6 +135,7 @@ impl Relations {
 
 // pub use list::FactList as FactCollection;
 pub use trie::Forest;
+pub use trie::layers::FactColumn;
 pub type FactCollection = Forest<Terms>;
 
 /// A constant integer to which the facts could be upgraded.

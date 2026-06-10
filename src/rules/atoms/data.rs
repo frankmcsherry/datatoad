@@ -29,7 +29,7 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
 
         use columnar::Len;
         use crate::facts::trie::layers::advance_bounds;
-        use crate::facts::trie::layers::terms::intersection;
+        use crate::facts::FactColumn;
 
         let (other_facts, other_terms, _other_recent) = self;
 
@@ -58,7 +58,7 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
                 for other_part in other_facts.iter() {
                     let mut delta_idxs = vec![0];
                     let mut other_idxs = vec![0];
-                    for layer in 0 .. prefix { (delta_idxs, other_idxs) = intersection(delta.layer(layer).borrow(), other_part.layer(layer).borrow(), &delta_idxs, &other_idxs); }
+                    for layer in 0 .. prefix { (delta_idxs, other_idxs) = Terms::intersect(delta.layer(layer).borrow(), other_part.layer(layer).borrow(), &delta_idxs, &other_idxs); }
                     // The count derives from projecting `other_idxs` forward through `terms`.
                     let mut ranges = other_idxs.iter().map(|i| (*i,*i+1)).collect::<Vec<_>>();
                     for layer in prefix .. (prefix + terms.len()) { advance_bounds::<Terms>(other_part.layer(layer).borrow(), &mut ranges); }
