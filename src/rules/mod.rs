@@ -118,7 +118,7 @@ pub fn plan_and_build_with_fields(
     // atom takes a turn, optionally restricted to those whose relation has
     // recent facts on some worker.
     let delta_atoms: Vec<usize> = if stable {
-        let atoms_map = plan::build_atoms_map(body, decls);
+        let atoms_map = plan::build_atoms_map(body, decls, rules);
         (0..body.len())
             .find(|i| {
                 let a = &atoms_map[i];
@@ -132,7 +132,7 @@ pub fn plan_and_build_with_fields(
         (0..body.len()).collect()
     };
 
-    let (plans, loads) = plan::plan_rule(head, body, &delta_atoms, decls);
+    let (plans, loads) = plan::plan_rule(head, body, &delta_atoms, decls, rules);
 
     // Ensure arranged facts exist for every load atom across every plan_atom.
     for (plan_atom, _plan) in plans.iter() {

@@ -15,15 +15,151 @@ use crate::rules::plan::{self, PlanAtom};
 use crate::rules::{ExecAtom, SeedExec, StageExec};
 use crate::types::{Action, Atom, RelationDecl, Rule, Term};
 
-/// PlanAtom proxy for view references — no apparatus, just term info.
+/// PlanAtom for view references. Holds per-disjunct mode-analysis information so
+/// that `ground` can honestly answer "which use-site vars can I produce given
+/// these inputs?" rather than the prior overpromise of "I can ground anything."
+///
+/// At construction (`build`), each defining disjunct is examined: head shape is
+/// checked against the use site (rejecting lit-vs-lit contradictions and head
+/// shapes that compose_disjunct would also bail on), and the substituted body's
+/// atoms map is built so we can run `ground_closure` over it at query time.
+///
+/// At query time (`ground`), each runnable disjunct's body closure is computed
+/// from the use-site→disjunct head-mapped seed, projected back to use-site
+/// vars, and intersected across disjuncts. A use-site var is groundable only
+/// if *every* runnable disjunct can ground it — that's the disjunction's
+/// contract honestly stated.
 pub struct ViewPlan {
-    pub head_terms: BTreeSet<String>,
+    use_site: Atom,
+    use_site_vars: BTreeSet<String>,
+    /// One entry per defining disjunct (rule for the view's name). `None` marks
+    /// disjuncts that cannot run for this use site (head-shape contradiction).
+    disjuncts: Vec<Option<DisjunctMode>>,
+}
+
+/// Per-disjunct mode-analysis state for one defining rule.
+struct DisjunctMode {
+    /// The disjunct's head atom (cloned). Used to translate ins to disjunct-body
+    /// space and to project the closure back to use-site vars.
+    head: Atom,
+    /// Pre-built atoms map for the disjunct body. Closure runs over this.
+    body_atoms: BTreeMap<usize, Box<dyn PlanAtom<String>>>,
+}
+
+impl ViewPlan {
+    /// Construct a `ViewPlan` for a view reference at the given use site.
+    ///
+    /// `rules` is scanned for defining rules of the view's name. Each such rule
+    /// becomes one disjunct; disjuncts that can't run for this use site (head
+    /// shape contradiction, head-var repetition we don't support) are recorded
+    /// as `None` and excluded from the per-disjunct intersection at `ground`
+    /// time.
+    pub fn build(
+        use_site: &Atom,
+        decls: &BTreeMap<String, RelationDecl>,
+        rules: &[(Rule, Vec<Vec<(usize, std::time::Duration)>>)],
+    ) -> Self {
+        let use_site_vars: BTreeSet<String> = use_site.terms.iter()
+            .filter_map(|t| t.as_var().cloned())
+            .collect();
+
+        let view_name = use_site.name.as_str();
+        let defining: Vec<&Rule> = rules.iter()
+            .map(|(r, _)| r)
+            .filter(|r| !r.head.is_empty() && r.head[0].name.as_str() == view_name)
+            .collect();
+
+        let disjuncts: Vec<Option<DisjunctMode>> = defining.iter()
+            .map(|rule| Self::build_disjunct(use_site, &rule.head[0], &rule.body, decls, rules))
+            .collect();
+
+        ViewPlan { use_site: use_site.clone(), use_site_vars, disjuncts }
+    }
+
+    /// Build mode-analysis state for a single disjunct, or return `None` if the
+    /// disjunct can't run for this use site.
+    ///
+    /// Bails matching `compose_disjunct`'s contract: arity mismatch, lit-vs-lit
+    /// disagreement, and head shapes with repeated vars (which would require
+    /// equality push-down we don't implement here). For mode analysis the bail
+    /// is a soft drop — the disjunct just doesn't participate — not an error.
+    fn build_disjunct(
+        use_site: &Atom,
+        head: &Atom,
+        body: &[Atom],
+        decls: &BTreeMap<String, RelationDecl>,
+        rules: &[(Rule, Vec<Vec<(usize, std::time::Duration)>>)],
+    ) -> Option<DisjunctMode> {
+        if use_site.terms.len() != head.terms.len() { return None; }
+
+        // Walk position-by-position. Reject lit-vs-lit contradictions outright;
+        // reject head shapes with repeated vars (compose_disjunct also bails).
+        let mut head_vars_seen: BTreeSet<&String> = BTreeSet::default();
+        for (us, hd) in use_site.terms.iter().zip(head.terms.iter()) {
+            match (us, hd) {
+                (Term::Lit(lu), Term::Lit(ld)) if lu != ld => return None,
+                (_, Term::Var(d)) => {
+                    if !head_vars_seen.insert(d) { return None; }
+                }
+                _ => {}
+            }
+        }
+
+        let body_atoms = plan::build_atoms_map(body, decls, rules);
+        Some(DisjunctMode { head: head.clone(), body_atoms })
+    }
+
+    /// For one runnable disjunct, return the set of use-site vars groundable
+    /// given the use-site `ins`.
+    fn disjunct_ground(&self, dj: &DisjunctMode, ins: &BTreeSet<String>) -> BTreeSet<String> {
+        // Seed in disjunct-body space: a disjunct head var is bound iff the
+        // corresponding use-site position is (a) a literal or (b) a var in ins.
+        let mut body_seed: BTreeSet<String> = BTreeSet::default();
+        for (us, hd) in self.use_site.terms.iter().zip(dj.head.terms.iter()) {
+            match (us, hd) {
+                (Term::Var(u), Term::Var(d)) if ins.contains(u) => { body_seed.insert(d.clone()); }
+                (Term::Lit(_), Term::Var(d)) => { body_seed.insert(d.clone()); }
+                _ => {}
+            }
+        }
+
+        // Closure under the disjunct body's `ground` methods.
+        let closure = plan::ground_closure(&dj.body_atoms, &body_seed);
+
+        // Project back to use-site vars. A use-site var u at position i is
+        // groundable iff either the disjunct head emits a literal at position i
+        // (constant value, always available) or it emits a var d that the
+        // closure can ground.
+        let mut out: BTreeSet<String> = BTreeSet::default();
+        for (us, hd) in self.use_site.terms.iter().zip(dj.head.terms.iter()) {
+            if let Term::Var(u) = us {
+                match hd {
+                    Term::Var(d) if closure.contains(d) => { out.insert(u.clone()); }
+                    Term::Lit(_) => { out.insert(u.clone()); }
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
 }
 
 impl PlanAtom<String> for ViewPlan {
-    fn terms(&self) -> BTreeSet<String> { self.head_terms.clone() }
-    fn ground(&self, terms: &BTreeSet<String>) -> BTreeSet<String> {
-        self.head_terms.difference(terms).cloned().collect()
+    fn terms(&self) -> BTreeSet<String> { self.use_site_vars.clone() }
+
+    fn ground(&self, ins: &BTreeSet<String>) -> BTreeSet<String> {
+        // Intersect groundable-var sets across runnable disjuncts. If no
+        // disjunct can run for this use site, the view grounds nothing.
+        let mut result: Option<BTreeSet<String>> = None;
+        for dj_opt in self.disjuncts.iter() {
+            let Some(dj) = dj_opt else { continue };
+            let groundable = self.disjunct_ground(dj, ins);
+            result = Some(match result {
+                None => groundable,
+                Some(prev) => prev.intersection(&groundable).cloned().collect(),
+            });
+        }
+        result.unwrap_or_default()
     }
 }
 
@@ -208,7 +344,7 @@ fn build_join_apparatus(
         // atoms it needs. So `comp.body` can drop at the end of this iteration.
         let body = &comp.body[..];
 
-        let (plan, loads) = plan::plan_rule_seeded(body, &comp.seed, &comp.need, decls);
+        let (plan, loads) = plan::plan_rule_seeded(body, &comp.seed, &comp.need, decls, rules);
 
         // Ensure index actions for each load action in the seeded plan.
         crate::rules::ensure_actions_for_loads(facts, comms, decls, body, &loads);
