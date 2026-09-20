@@ -1,0 +1,8 @@
+.time
+succ(x, y) :- :range(0, x, 10000), :plus(x, 1, y).
+.time
+count(0) :- .
+count(y) :- count(x), succ(x, y).
+.time
+.list
+.quit

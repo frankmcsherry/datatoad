@@ -1,0 +1,11 @@
+.flow c /Users/mcsherry/Projects/datasets/snomed/c.txt
+.flow p /Users/mcsherry/Projects/datasets/snomed/p.txt
+.flow q /Users/mcsherry/Projects/datasets/snomed/q.txt
+.flow r /Users/mcsherry/Projects/datasets/snomed/r.txt
+.flow s /Users/mcsherry/Projects/datasets/snomed/s.txt
+.flow u /Users/mcsherry/Projects/datasets/snomed/u.txt
+.time snomed inference loaded
+p(x,z) :- p(x,y), p(y,z). q(x,r,z) :- p(x,y), q(y,r,z). q(x,q,z) :- q(x,r,z),s(r,q). p(x,z) :- p(y,w),u(w,r,z),q(x,r,y). p(x,z) :- c(y,w,z),p(x,w),p(x,y).
+.time snomed inference loaded
+.wipe
+.quit

@@ -13,6 +13,17 @@ simd-csv = "0.10.3"
 timely_bytes = { version = "0.30" }
 timely_communication = { version = "0.30" }
 
+# forge-sort is a GPU/Metal radix sort (Apple Silicon only); used solely by the
+# radix_bakeoff example to compare against our CPU kernels. Optional and off by
+# default because its build.rs AOT-compiles a .metal shader via `xcrun metal`,
+# which needs a full Xcode install (the Command Line Tools alone lack `metal`).
+# Enable with `--features forge` once Xcode is present.
+[target.'cfg(target_os = "macos")'.dependencies]
+forge-sort = { version = "0.2", optional = true }
+# The `metal` crate compiles our shader at runtime via the Metal driver (no Xcode,
+# unlike forge-sort). Backs the GPU radix kernels in `radix_sort_metal`.
+metal = { version = "0.29", optional = true }
+
 [profile.release]
 # One codegen unit, so that inlining is deterministic across builds. The default (16)
 # partitions the crate by size estimate, and a one-line source change can reshuffle
@@ -29,3 +40,7 @@ codegen-units = 1
 # `default-features = false` to drop it.
 default = ["mimalloc"]
 mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
+# Adds the forge-sort GPU contender to the radix_bakeoff example (needs Xcode).
+forge = ["dep:forge-sort"]
+# Our own runtime-compiled Metal GPU radix kernels (no Xcode needed).
+metal = ["dep:metal"]

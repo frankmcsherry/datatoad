@@ -1,0 +1,33 @@
+.wipe
+.time reset
+
+.flow Edge /Users/mcsherry/Projects/datasets/flowlog/csda-httpd/Edge.csv
+.flow NullEdge /Users/mcsherry/Projects/datasets/flowlog/csda-httpd/NullEdge.csv
+.time httpd csda loaded
+NullNode(y, x) :- NullEdge(x, y).
+NullNode(y, x) :- NullNode(w, x), Edge(w, y).
+.time httpd csda complete
+.list
+.note flowlog result: [NullNode]: ((), (), 9393283)
+.wipe
+
+.flow Edge /Users/mcsherry/Projects/datasets/flowlog/csda-linux/Edge.csv
+.flow NullEdge /Users/mcsherry/Projects/datasets/flowlog/csda-linux/NullEdge.csv
+.time linux csda loaded
+NullNode(y, x) :- NullEdge(x, y).
+NullNode(y, x) :- NullNode(w, x), Edge(w, y).
+.time linux csda complete
+.list
+.note flowlog result: [NullNode]: ((), (), 55751178)
+.wipe
+
+.flow Edge /Users/mcsherry/Projects/datasets/flowlog/csda-postgresql/Edge.csv
+.flow NullEdge /Users/mcsherry/Projects/datasets/flowlog/csda-postgresql/NullEdge.csv
+.time postgresql csda loaded
+NullNode(y, x) :- NullEdge(x, y).
+NullNode(y, x) :- NullNode(w, x), Edge(w, y).
+.time postgresql csda complete
+.list
+.note flowlog result: [NullNode]: ((), (), 21503813)
+.wipe
+.quit

@@ -1,0 +1,13 @@
+
+.flow Arc /Users/mcsherry/Projects/datasets/flowlog/mag/Arc.csv
+.flow Source /Users/mcsherry/Projects/datasets/flowlog/mag/Source.csv
+.time mag bipartite loaded
+Zero(x) :- Source(x).
+One(y)  :- Arc(x, y), Zero(x).
+One(x)  :- Arc(x, y), Zero(y).
+Zero(y) :- Arc(x, y), One(x).
+Zero(x) :- Arc(x, y), One(y).
+.time mag bipartite complete
+.list
+.wipe
+.quit

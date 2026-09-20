@@ -9,6 +9,10 @@ use crate::types::Action;
 
 pub mod trie;
 
+/// GPU radix sort via Metal (Apple Silicon). Runtime-compiled shader, no Xcode needed.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub mod radix_sort_metal;
+
 /// A `Vecs` using strided offsets.
 pub type Lists<C> = Vecs<C, Strides>;
 /// Use the `List` type to access an alternate columnar container.
@@ -379,6 +383,57 @@ pub mod radix_sort {
         if filter.iter().filter(|b| **b).count() % 2 == 1 { temp.copy_from_slice(data); }
     }
 
+    /// Compaction radix sort for the 12-byte `u32_sort` shape (sort by bytes `0..8`,
+    /// 4-byte payload at `8..12`). Where `lsb_range` *skips* constant key-byte planes
+    /// (fewer passes) but still shuffles the full 12-byte row each pass, this *removes*
+    /// them: when at most four key bytes are live it packs them plus the payload into a
+    /// fixed, aligned `[u8;8]`, radix-sorts that (33% less data moved per pass, via the
+    /// same vectorized typed copies `lsb_range` already uses), then expands back —
+    /// refilling the dead key positions with their known constant value (no index, no
+    /// gather). With five or more live bytes there is no aligned type narrower than 12,
+    /// so it falls back to `lsb_range` unchanged. Result matches `lsb_range(rows, 0, 8)`.
+    ///
+    /// Note: the win hinges on compacting to a *fixed power-of-two* element. A naive
+    /// `(live+4)`-byte stride loses badly — unaligned, non-vectorizable byte copies cost
+    /// far more than the bytes they save.
+    #[inline(never)]
+    pub fn lsb_compact(rows: &mut [[u8; 12]]) {
+        let n = rows.len();
+        if n < 2 { return; }
+
+        // Detect live key bytes among 0..8 and the constant value of the dead ones.
+        let mut live = Vec::with_capacity(8);
+        let mut dead_val = [0u8; 8];
+        for p in 0..8 {
+            let first = rows[0][p];
+            if rows.iter().all(|r| r[p] == first) { dead_val[p] = first; }
+            else { live.push(p); }
+        }
+        let l = live.len();
+        if l == 0 { return; } // all keys identical → already sorted by key.
+
+        // No aligned element narrower than 12 once 5+ bytes are live: just skip-sort.
+        if l > 4 { lsb_range(rows, 0, 8); return; }
+
+        // Narrow into [u8;8]: live key bytes (MSB..LSB) in 0..l, zero-pad l..4 (constant,
+        // so order-neutral), payload in 4..8. Sort by the key half via the fast path.
+        let mut narrow: Vec<[u8; 8]> = vec![[0u8; 8]; n];
+        for (i, r) in rows.iter().enumerate() {
+            for (j, &p) in live.iter().enumerate() { narrow[i][j] = r[p]; }
+            narrow[i][4..8].copy_from_slice(&r[8..12]);
+        }
+        lsb_range(&mut narrow, 0, 4); // dead pad bytes in l..4 are auto-skipped.
+
+        // Expand: dead positions from constants, live from the narrow key, payload back.
+        for (i, r) in rows.iter_mut().enumerate() {
+            let mut row = [0u8; 12];
+            row[..8].copy_from_slice(&dead_val);
+            for (j, &p) in live.iter().enumerate() { row[p] = narrow[i][j]; }
+            row[8..12].copy_from_slice(&narrow[i][4..8]);
+            *r = row;
+        }
+    }
+
     pub trait Radixable : Copy + std::fmt::Debug {
         const WIDTH: usize;
         fn byte(&self, index: usize) -> u8;
@@ -608,6 +663,66 @@ pub mod radix_sort {
 
                 counts = writes;
             }
+        }
+    }
+
+    /// MSB radix sort over the *key* bytes `lower .. upper` only, leaving bytes outside
+    /// that range as payload that rides along on the swaps. This is the sort-by-prefix
+    /// analog of `lsb_range`: we partition on the key and never scatter by the payload.
+    ///
+    /// The small-range cutoff uses full `Ord`, which breaks prefix-ties by the trailing
+    /// payload bytes. For `u32_sort`, whose payload is the unique, ascending row index,
+    /// that tie-break reproduces input order exactly — so the (unstable) permutation's
+    /// scrambling is invisible and the result is identical to the stable `lsb_range(.,0,8)`.
+    /// (A property test asserting that equivalence lives in the bake-off bench.)
+    pub fn msb_range<R: Radixable + Ord>(data: &mut [R], lower: usize, upper: usize) {
+
+        let size_thresh = 512;
+
+        if data.len() <= size_thresh { data.sort_unstable(); return; }
+
+        let mut counts = vec![0usize; 256];
+        let mut bounds = vec![0usize; 256];
+
+        let mut todo = vec![((0, data.len()), lower)];
+
+        while let Some(((lo, hi), digit)) = todo.pop() {
+            counts.fill(0);
+            for item in data[lo .. hi].iter() { counts[item.byte(digit) as usize] += 1; }
+            // A byte common to everyone: advance to the next key byte without partitioning.
+            if counts.iter().filter(|c| **c > 0).count() == 1 {
+                if digit + 1 < upper { todo.push(((lo, hi), digit + 1)); }
+                else { data[lo .. hi].sort_unstable(); }  // key exhausted: order the payload.
+                continue;
+            }
+
+            bounds[0] = lo;
+            for index in 0 .. 255 {
+                bounds[index + 1] = bounds[index] + counts[index];
+                counts[index] = bounds[index];
+            }
+            counts[255] = bounds[255];
+            let mut writes = counts;
+
+            for byte in 0 .. 255 {      // Skip the last byte, as it ends up fine.
+                while writes[byte] < bounds[byte + 1] {
+                    for index in writes[byte] .. bounds[byte + 1] {
+                        let data_byte = data[index].byte(digit) as usize;
+                        data.swap(index, writes[data_byte]);
+                        writes[data_byte] += 1;
+                    }
+                }
+            }
+
+            for byte in (0 .. 256).rev() {  // enqueue in reverse so we pop in byte order.
+                let l = bounds[byte];
+                let u = bounds.get(byte + 1).copied().unwrap_or(hi);
+                if u - l <= 1 { continue; }
+                if digit + 1 < upper && u - l >= size_thresh { todo.push(((l, u), digit + 1)); }
+                else { data[l .. u].sort_unstable(); }  // small, or key exhausted: full-Ord cutoff.
+            }
+
+            counts = writes;
         }
     }
 }

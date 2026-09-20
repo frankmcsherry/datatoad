@@ -1,0 +1,33 @@
+.wipe
+.sync
+.time reset
+
+.flow AddressOf /Users/mcsherry/Projects/datasets/flowlog/medium/addressOf.csv
+.flow Assign /Users/mcsherry/Projects/datasets/flowlog/medium/assign.csv
+.flow Load /Users/mcsherry/Projects/datasets/flowlog/medium/load.csv
+.flow Store /Users/mcsherry/Projects/datasets/flowlog/medium/store.csv
+.time medium andersen loaded
+PointsTo(y, x) :- AddressOf(y, x).
+PointsTo(y, x) :- Assign(y, z), PointsTo(z, x).
+PointsTo(y, w) :- Load(y, x), PointsTo(x, z), PointsTo(z, w).
+PointsTo(z, w) :- Store(y, x), PointsTo(y, z), PointsTo(x, w).
+.time medium andersen complete
+.list
+.test PointsTo 2654871
+.wipe
+
+.flow AddressOf /Users/mcsherry/Projects/datasets/flowlog/large/addressOf.csv
+.flow Assign /Users/mcsherry/Projects/datasets/flowlog/large/assign.csv
+.flow Load /Users/mcsherry/Projects/datasets/flowlog/large/load.csv
+.flow Store /Users/mcsherry/Projects/datasets/flowlog/large/store.csv
+.time large andersen loaded
+PointsTo(y, x) :- AddressOf(y, x).
+PointsTo(y, x) :- Assign(y, z), PointsTo(z, x).
+PointsTo(y, w) :- Load(y, x), PointsTo(x, z), PointsTo(z, w).
+PointsTo(z, w) :- Store(y, x), PointsTo(y, z), PointsTo(x, w).
+.time large andersen complete
+.list
+.test PointsTo 5315019
+.wipe
+
+.quit
