@@ -54,32 +54,45 @@ impl Relations {
     pub fn entry(&mut self, atom: &crate::types::Atom) -> &mut FactSet<FactCollection> {
         &mut self.relations.entry(atom.name.clone()).or_default().0
     }
-    pub fn advance(&mut self, comms: &mut crate::comms::Comms) {
+    /// Advances each relation's facts, returning the indices (in iteration order) of relations with
+    /// recent facts on some worker.
+    pub fn advance(&mut self, comms: &mut crate::comms::Comms) -> std::collections::BTreeSet<usize> {
         let thresh = comms.thresh();
+        for (facts, _transforms) in self.relations.values_mut() { facts.advance(); }
+        // Learn which relations have recent facts anywhere: only these have facts to move into their forms,
+        // and the exchanges that would move nothing are as costly as any when facts are few.
+        let mut active = std::collections::BTreeSet::new();
+        self.active_indices(&mut active);
+        comms.active_set(&mut active);
         let mut conduits = Vec::new();
-        for (facts, transforms) in self.relations.values_mut() {
-            facts.advance();
+        for (index, (facts, transforms)) in self.relations.values_mut().enumerate() {
             for (action, transform) in transforms.iter_mut() {
                 // Permuted forms need not deduplicate their recent facts against their stable facts,
                 // and so we defer merging recent facts into stable until someone reads them, which
                 // for forms only read as the source of new facts (seeds) may be never.
                 if action.is_permutation() { transform.pending.extend(transform.recent.take()); }
                 else { transform.stable.extend(transform.recent.take()); }
-                let mut acted_on = if let Some(recent) = facts.recent.as_ref() { recent.act_on(action, thresh) } else { FactLSM::default() };
-                let mut conduit = if keeps_partition(action) { comms.local_conduit() } else { comms.conduit() };
-                conduit.extend(&mut acted_on);
-                conduit.close();
-                conduits.push(conduit);
+                if active.contains(&index) {
+                    let mut acted_on = if let Some(recent) = facts.recent.as_ref() { recent.act_on(action, thresh) } else { FactLSM::default() };
+                    let mut conduit = if keeps_partition(action) { comms.local_conduit() } else { comms.conduit() };
+                    conduit.extend(&mut acted_on);
+                    conduit.close();
+                    conduits.push(Some(conduit));
+                }
+                else { conduits.push(None); }
             }
         }
         let mut conduits = conduits.into_iter();
         for (_facts, transforms) in self.relations.values_mut() {
             for (action, transform) in transforms.iter_mut() {
-                if let Some(recent) = conduits.next().unwrap().finish().flatten() {
-                    transform.recent = if !action.is_permutation() { recent.antijoin(transform.stable.contents()).flatten() } else { Some(recent) };
+                if let Some(conduit) = conduits.next().unwrap() {
+                    if let Some(recent) = conduit.finish().flatten() {
+                        transform.recent = if !action.is_permutation() { recent.antijoin(transform.stable.contents()).flatten() } else { Some(recent) };
+                    }
                 }
             }
         }
+        active
     }
     /// Fills the provided set with indices of relations with non-empty recent facts (in BTreeMap iteration order).
     pub fn active_indices(&self, indices: &mut std::collections::BTreeSet<usize>) {
