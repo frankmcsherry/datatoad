@@ -106,10 +106,14 @@ impl Comms {
                 for mut sender in senders { sender.send(FactMessage { facts: None } ); }
             }
 
+            let mut idle = Idle::default();
             while countdown > 0 {
                 comms.receive();
+                comms.events().borrow_mut().clear();
+                let before = countdown;
                 while let Some(message) = receiver.recv() { if let Some(fact) = message.facts { facts.push(fact.into_iter().map(|l| std::rc::Rc::new(Layer { list: l })).collect::<Vec<_>>().try_into().unwrap()); } countdown -= 1; }
                 comms.release();
+                if countdown == before { idle.wait(&comms); } else { idle.reset(); }
             }
         }
     }
@@ -196,7 +200,14 @@ pub trait Exchangeable: crate::facts::Merge + crate::facts::Length + crate::fact
     fn complete(mut channel: Channel<Self::Column>) -> FactLSM<Self> {
         channel.close();
         let mut facts = FactLSM::default();
-        while channel.count > 0 { let mut temp = FactLSM::default(); Self::exchange(&mut channel, &mut temp); facts.extend(temp); }
+        let mut idle = Idle::default();
+        while channel.count > 0 {
+            let before = channel.count;
+            let mut temp = FactLSM::default();
+            Self::exchange(&mut channel, &mut temp);
+            if temp.is_empty() && channel.count == before { idle.wait(&channel.comms.borrow()); }
+            else { idle.reset(); facts.extend(temp); }
+        }
         facts
     }
 }
@@ -248,6 +259,8 @@ impl<C: FactColumn> Channel<C> {
         }
 
         comms.receive();
+        // We do not schedule by channel events, and clear them so that they neither accumulate nor prevent parking.
+        comms.events().borrow_mut().clear();
 
         // Receive data first, to allow early consolidation.
         while let Some(message) = self.recv.recv() {
@@ -333,5 +346,25 @@ impl<C: FactColumn> Bytesable for FactMessage<C> where Lists<C>: ContainerBytes 
             }
         }
         else { writer.write_all(&0u64.to_be_bytes()).unwrap(); }
+    }
+}
+
+/// Waits for messages from peers: first by spinning briefly, as the wait is often short, and then by
+/// parking the thread until a peer's message arrives (or a timeout elapses), to free the core.
+#[derive(Default)]
+struct Idle { spins: usize, since: Option<std::time::Instant> }
+impl Idle {
+    /// How long to spin before parking.
+    const SPIN: std::time::Duration = std::time::Duration::from_micros(200);
+    fn reset(&mut self) { self.spins = 0; self.since = None; }
+    fn wait(&mut self, comms: &Allocator) {
+        self.spins += 1;
+        if self.spins % 64 == 0 {
+            let since = *self.since.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() > Self::SPIN {
+                comms.events().borrow_mut().clear();
+                comms.await_events(Some(std::time::Duration::from_millis(1)));
+            }
+        }
     }
 }
