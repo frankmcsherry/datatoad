@@ -42,6 +42,8 @@ impl Comms {
     /// Allocates a conduit for exchanging facts, which requires a serializable column.
     pub fn conduit<F: Exchangeable>(&mut self) -> Conduit<F> where Lists<F::Column>: columnar::ContainerBytes {
         let budget = self.mem_budget;
+        // With a single worker, facts are already where they need to be.
+        if self.peers() == 1 { return self.local_conduit(); }
         let comms = self.ether.as_mut().map(|comms| {
             let (sends, recv) = comms.borrow_mut().allocate(self.count);
             self.count += 1;
@@ -91,6 +93,7 @@ impl Comms {
 
     /// Broadcasts facts to all workers.
     pub fn broadcast<C: FactColumn>(&mut self, facts: &mut FactLSM<Forest<C>>) where Lists<C>: columnar::ContainerBytes {
+        if self.peers() == 1 { return; }
         if let Some(comms) = self.ether.as_mut() {
             let mut comms = comms.borrow_mut();
             let (senders, mut receiver) = comms.allocate(self.count);
@@ -215,18 +218,32 @@ impl<C: FactColumn> Channel<C> {
 
         let mut comms = self.comms.borrow_mut();
 
-        // TODO: put self-sends back in to `facts`.
-        if let Some(facts) = facts.flatten() {
-            let mut bools: std::collections::VecDeque<bool> = Default::default();
-            for (index, sender) in self.sends.iter_mut().enumerate() {
-                bools.extend((0 .. facts.layer(0).list.values.len()).map(|i| (C::route(facts.layer(0).list.values.borrow().get(i)) as usize) % comms.peers() == index));
-                if let Some(facts) = facts.clone().retain_core(1, bools.clone()).flatten() {
-                    let layers = (0 .. facts.arity()).map(|i| facts.layer(i).clone()).collect::<Vec<_>>();
-                    drop(facts);
+        let peers = comms.peers();
+        let index = comms.index();
+        // Facts routed to this worker, which bypass the channel (and avoid a copy).
+        let mut local: Vec<Forest<C>> = Vec::new();
+        // Partition each layer of the LSM separately, rather than merge them first: recipients merge what they receive.
+        for forest in std::mem::take(facts) {
+            // Item indexes of the first layer, grouped by destination.
+            let mut routes: Vec<Vec<usize>> = vec![Vec::new(); peers];
+            {
+                let first = forest.layer(0).list.values.borrow();
+                for item in 0 .. first.len() { routes[(C::route(first.get(item)) as usize) % peers].push(item); }
+            }
+            let items = forest.layer(0).list.values.len();
+            let mut forest = Some(forest);
+            for (peer, route) in routes.into_iter().enumerate() {
+                if route.is_empty() { continue; }
+                // Move the forest if it all goes to one place; otherwise extract the facts for `peer`.
+                let piece = if route.len() == items { forest.take().unwrap() }
+                    else { forest.as_ref().unwrap().clone().retain_sparse(1, route).flatten().expect("non-empty route") };
+                if peer == index { local.push(piece); }
+                else {
+                    let layers = (0 .. piece.arity()).map(|i| piece.layer(i).clone()).collect::<Vec<_>>();
+                    drop(piece);
                     let message = FactMessage { facts: Some(layers.into_iter().map(|l| Rc::unwrap_or_clone(l).list).collect::<Vec<_>>()) };
-                    sender.send(message);
+                    self.sends[peer].send(message);
                 }
-                bools.clear();
             }
         }
 
@@ -241,6 +258,7 @@ impl<C: FactColumn> Channel<C> {
         }
 
         comms.release();
+        for piece in local { facts.push(piece); }
     }
 }
 
