@@ -8,6 +8,8 @@ use columnar::primitive::offsets::Strides;
 use crate::types::Action;
 
 pub mod trie;
+pub mod packed;
+pub mod fixed;
 
 /// A `Vecs` using strided offsets.
 pub type Lists<C> = Vecs<C, Strides>;
@@ -52,7 +54,11 @@ impl Relations {
         for (facts, transforms) in self.relations.values_mut() {
             facts.advance();
             for (action, transform) in transforms.iter_mut() {
-                transform.stable.extend(transform.recent.take());
+                // Permuted forms need not deduplicate their recent facts against their stable facts,
+                // and so we defer merging recent facts into stable until someone reads them, which
+                // for forms only read as the source of new facts (seeds) may be never.
+                if action.is_permutation() { transform.pending.extend(transform.recent.take()); }
+                else { transform.stable.extend(transform.recent.take()); }
                 let mut acted_on = if let Some(recent) = facts.recent.as_ref() { recent.act_on(action, thresh) } else { FactLSM::default() };
                 let mut conduit = comms.conduit();
                 conduit.extend(&mut acted_on);
@@ -121,6 +127,19 @@ impl Relations {
                 fact_set.recent = recent.antijoin(fact_set.stable.contents()).flatten();
             }
             transforms.insert(action.clone(), fact_set);
+        }
+    }
+
+    /// Merges any facts whose introduction into the stable facts of `name` acted on by `action` was deferred.
+    ///
+    /// This should be called before reading the stable facts of a form, as `get_action` does not.
+    pub fn materialize(&mut self, name: &str, action: &Action<Vec<u8>>) {
+        if let Some((_base, transforms)) = self.relations.get_mut(name) {
+            if let Some(transform) = transforms.get_mut(action) {
+                // Push batches one at a time, as `tidy` re-sorts all layers after each merge and
+                // would be quadratic in the number of batches if they arrived at once.
+                for batch in transform.pending.drain(..) { transform.stable.push(batch); }
+            }
         }
     }
 
@@ -208,13 +227,15 @@ pub struct FactSet<F: FactContainer = FactCollection> {
     pub stable: FactLSM<F>,
     pub recent: Option<F>,
     pub to_add: FactLSM<F>,
+    /// Former recent facts not yet merged into `stable`; see `Relations::materialize`.
+    pub pending: Vec<F>,
 }
 
-impl<F: FactContainer> Default for FactSet<F> { fn default() -> Self { Self { stable: Default::default(), recent: None, to_add: Default::default() } } }
+impl<F: FactContainer> Default for FactSet<F> { fn default() -> Self { Self { stable: Default::default(), recent: None, to_add: Default::default(), pending: Vec::new() } } }
 
 impl<F: FactContainer> FactSet<F> {
 
-    pub fn len(&self) -> usize { self.stable.layers.iter().chain(self.recent.as_ref()).map(|x| x.len()).sum::<usize>() }
+    pub fn len(&self) -> usize { self.stable.layers.iter().chain(self.recent.as_ref()).chain(self.pending.iter()).map(|x| x.len()).sum::<usize>() }
 
     pub fn active(&self) -> bool {
         self.recent.is_some() || !self.to_add.layers.is_empty()

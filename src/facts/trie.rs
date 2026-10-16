@@ -779,18 +779,55 @@ pub mod forest {
                 assert_eq!(other.len(), other_arity);
             });
 
-            // First, collect reports to determine paths to retain to `self`.
-            let mut include = std::iter::repeat(!semi).take(self.layers[other_arity-1].list.values.len()).collect::<VecDeque<_>>();
+            // First, collect the indexes of items in layer `other_arity - 1` that start shared paths.
+            let mut shared: Vec<usize> = Vec::new();
             for other in others.iter() {
                 let mut reports = (vec![0], vec![0]);
                 for (layer0, layer1) in self.layers.iter().zip(other.iter()) {
                     reports = C::intersect(layer0.borrow(), <Lists<C> as Borrow>::reborrow(*layer1), &reports.0, &reports.1);
                 }
-                // Mark shared paths appropriately.
-                for index in reports.0.iter().copied() { include[index] = semi; }
+                if shared.is_empty() { shared = reports.0; } else { shared.extend(reports.0); }
+            }
+            let items = self.layers[other_arity-1].list.values.len();
+
+            // A semijoin that retains few of many items should take time proportional to what it
+            // retains, where `retain_core` visits every item of `self` through `other_arity`.
+            if semi && shared.len() * 16 < items {
+                if others.len() > 1 { shared.sort_unstable(); shared.dedup(); }
+                return self.retain_sparse(other_arity, shared);
             }
 
+            // Mark shared paths appropriately.
+            let mut include = std::iter::repeat(!semi).take(items).collect::<VecDeque<_>>();
+            for index in shared.iter().copied() { include[index] = semi; }
+
             self.retain_core(other_arity, include)
+        }
+
+        /// Retains the facts through the items `retain` (sorted and distinct) of layer `layer_index - 1`.
+        ///
+        /// Takes time proportional to the retained facts (with a logarithmic factor), rather than to `self`.
+        pub fn retain_sparse(self, layer_index: usize, retain: Vec<usize>) -> FactLSM<Self> {
+            if retain.is_empty() { return Default::default(); }
+            let mut layers: Vec<Rc<Layer<C>>> = Vec::with_capacity(self.arity());
+            // Layers before `layer_index`, last to first: retain the named items, grouped by their lists,
+            // and name those lists for the layer before.
+            let mut names = retain.clone();
+            for layer in self.layers[..layer_index].iter().rev() { layers.push(Rc::new(layer.retain_items_sparse(&mut names))); }
+            layers.reverse();
+            // Layers from `layer_index` on: retain the named lists, as runs of consecutive lists.
+            if self.arity() > layer_index {
+                let mut bounds: Vec<(usize, usize)> = Vec::new();
+                for index in retain.iter().copied() {
+                    match bounds.last_mut() {
+                        Some((_, upper)) if *upper == index => { *upper += 1; }
+                        _ => { bounds.push((index, index + 1)); }
+                    }
+                }
+                for layer in self.layers[layer_index..].iter() { layers.push(Rc::new(layer.retain_lists(&mut bounds))); }
+            }
+            let forest: Self = layers.try_into().expect("non-empty retain");
+            forest.into()
         }
 
         /// Retains facts based on a bitmap for a layer of the trie.
@@ -879,6 +916,29 @@ pub mod layers {
 
         /// Retains items indicated by `retain`, which is refilled.
         pub fn retain_items(&self, retain: &mut VecDeque<bool>) -> Self { Self { list: C::retain_items(self.borrow(), retain) } }
+
+        /// Retains the items named by `retain` (sorted and distinct), one list for each list they belong to.
+        ///
+        /// Refills `retain` with the indexes of those lists, and takes time proportional to `retain` (with a
+        /// logarithmic factor), rather than to the layer.
+        pub fn retain_items_sparse(&self, retain: &mut Vec<usize>) -> Self {
+            let lists = self.borrow();
+            let mut output = Lists::<C>::default();
+            let mut parents: Vec<usize> = Vec::new();
+            let mut list = 0;
+            for index in retain.iter().copied() {
+                // Advance `list` past lists that end at or before `index`; it then contains `index`.
+                crate::facts::gallop(lists.bounds, &mut list, lists.len(), |upper| upper as usize <= index);
+                if parents.is_empty() || parents[parents.len() - 1] != list {
+                    if !parents.is_empty() { output.bounds.push(output.values.len() as u64); }
+                    parents.push(list);
+                }
+                output.values.extend_from_self(lists.values, index .. index + 1);
+            }
+            output.bounds.push(output.values.len() as u64);
+            *retain = parents;
+            Self { list: output }
+        }
     }
 
     /// The operations a column container must support to serve as the values of a `Layer`.
@@ -926,25 +986,25 @@ pub mod layers {
                 Some(1) => { downgrade(col_sort(upgrade::<1>(lists).unwrap().values, groups, indexs, last)) }
                 Some(2) => { downgrade(col_sort(upgrade::<2>(lists).unwrap().values, groups, indexs, last)) }
                 Some(3) => { downgrade(col_sort(upgrade::<3>(lists).unwrap().values, groups, indexs, last)) }
-                Some(4) => { downgrade(u32_sort(upgrade::<4>(lists).unwrap().values, groups, indexs, last)) }
+                Some(4) => { downgrade(crate::facts::packed::u32_sort(upgrade::<4>(lists).unwrap().values, groups, indexs, last)) }
                 _______ => { col_sort(lists.values, groups, indexs, last) }
             }
         }
         fn union(lists0: <Lists<Terms> as Borrow>::Borrowed<'_>, lists1: <Lists<Terms> as Borrow>::Borrowed<'_>, reports: &mut VecDeque<Report>, next: bool) -> Lists<Terms> {
             match (upgrade_hint(lists0), upgrade_hint(lists1)) {
-                (Some(1), Some(1)) => { downgrade(union(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), reports, next)) }
-                (Some(2), Some(2)) => { downgrade(union(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), reports, next)) }
-                (Some(3), Some(3)) => { downgrade(union(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), reports, next)) }
-                (Some(4), Some(4)) => { downgrade(union(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), reports, next)) }
+                (Some(1), Some(1)) => { downgrade(crate::facts::fixed::union(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), reports, next)) }
+                (Some(2), Some(2)) => { downgrade(crate::facts::fixed::union(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), reports, next)) }
+                (Some(3), Some(3)) => { downgrade(crate::facts::fixed::union(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), reports, next)) }
+                (Some(4), Some(4)) => { downgrade(crate::facts::fixed::union(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), reports, next)) }
                 _ => { union(lists0, lists1, reports, next) }
             }
         }
         fn intersect(lists0: <Lists<Terms> as Borrow>::Borrowed<'_>, lists1: <Lists<Terms> as Borrow>::Borrowed<'_>, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) {
             match (upgrade_hint(lists0), upgrade_hint(lists1)) {
-                (Some(1), Some(1)) => { intersection::<Vec<[u8; 1]>>(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), both0, both1) }
-                (Some(2), Some(2)) => { intersection::<Vec<[u8; 2]>>(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), both0, both1) }
-                (Some(3), Some(3)) => { intersection::<Vec<[u8; 3]>>(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), both0, both1) }
-                (Some(4), Some(4)) => { intersection::<Vec<[u8; 4]>>(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), both0, both1) }
+                (Some(1), Some(1)) => { crate::facts::fixed::intersection(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), both0, both1) }
+                (Some(2), Some(2)) => { crate::facts::fixed::intersection(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), both0, both1) }
+                (Some(3), Some(3)) => { crate::facts::fixed::intersection(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), both0, both1) }
+                (Some(4), Some(4)) => { crate::facts::fixed::intersection(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), both0, both1) }
                 _ => { intersection::<Terms>(lists0, lists1, both0, both1) }
             }
         }
@@ -1208,82 +1268,56 @@ pub mod layers {
         output
     }
 
-    /// Sort the items of `lists` subject to the grouping/ordering of `group` of the lists.
-    pub fn u32_sort(items: &[[u8;4]], groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Vec<[u8;4]>> {
 
-        if last { return u32_sort_last(items, groups, indexs); }
+}
 
-        assert_eq!(groups.len(), indexs.len());
+#[cfg(test)]
+mod tests {
 
-        // Contiguous LSB sorting, whose temp is two full copies of the rows. The paged form
-        // (`radix_sort::lsb_paged`, still used by loading) bounds its working set near one
-        // copy, but is slower here: reverting it from these methods recovered 20% on galen
-        // and 13% on csda on the M4 minis. A revival should beat contiguous at equal memory,
-        // e.g. with the `-m` budget raised to spend the footprint it saves.
-        let mut output = Lists::<Vec<[u8;4]>>::default();
+    use columnar::{Index, Len, Push};
+    use crate::facts::{Forest, Terms};
 
-        let mut rows: Vec<[u8; 12]> = groups.iter().zip(indexs.iter()).enumerate().map(|(i, (group, index))| {
-            let mut row = [0u8; 12];
-            row[0..4].copy_from_slice(&(*group as u32).to_be_bytes());
-            row[4..8].copy_from_slice(&items[*index]);
-            row[8..12].copy_from_slice(&(i as u32).to_be_bytes());
-            row
-        }).collect();
-        // Sort on bytes 0..8 (group then value); bytes 8..12 are payload.
-        crate::facts::radix_sort::lsb_range(&mut rows[..], 0, 8);
-
-        // We want to mint a new item for each distinct (group, value).
-        // We want to seal a new list for each distinct group.
-        // We want to update groups with index as we go (random access potentially pessimal).
-        let triples = rows.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
-        let mut iter = triples.iter();
-        if let Some([group, value, index]) = iter.next() {
-            output.values.push(*value);
-            let mut prev = (*group, *value);
-            groups[u32::from_be_bytes(*index) as usize] = 0;
-            for [group, value, index] in iter {
-                if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
-                if prev != (*group, *value) { output.values.push(*value); }
-                prev = (*group, *value);
-                groups[u32::from_be_bytes(*index) as usize] = output.values.len() - 1;
-            }
-            output.bounds.push(output.values.len() as u64);
-        }
-
-        output
+    fn lcg(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed.wrapping_mul(2) + 1;
+        move || { state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); state >> 33 }
     }
 
-    pub fn u32_sort_last(items: &[[u8;4]], groups: &mut [usize], indexs: &[usize]) -> Lists<Vec<[u8;4]>> {
-
-        assert_eq!(groups.len(), indexs.len());
-
-        let mut output = Lists::<Vec<[u8;4]>>::default();
-
-        let mut rows: Vec<[u8; 8]> = groups.iter().zip(indexs.iter()).map(|(group, index)| {
-            let mut row = [0u8; 8];
-            row[0..4].copy_from_slice(&(*group as u32).to_be_bytes());
-            row[4..8].copy_from_slice(&items[*index]);
-            row
-        }).collect();
-        crate::facts::radix_sort::lsb_range(&mut rows[..], 0, 8);
-
-        // We want to mint a new item for each distinct (group, value).
-        // We want to seal a new list for each distinct group.
-        let pairs = rows.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<2>().0;
-        let mut iter = pairs.iter();
-        if let Some([group, value]) = iter.next() {
-            output.values.push(*value);
-            let mut prev = (*group, *value);
-            for [group, value] in iter {
-                if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
-                if prev != (*group, *value) { output.values.push(*value); }
-                prev = (*group, *value);
+    fn facts(forest: &Forest<Terms>) -> Vec<Vec<Vec<u8>>> {
+        // Enumerate facts by walking the trie.
+        let layers = forest.borrow();
+        let mut paths: Vec<(usize, Vec<Vec<u8>>)> = vec![(0, Vec::new())];
+        for layer in layers.iter() {
+            let mut next = Vec::new();
+            for (list, path) in paths {
+                let (lower, upper) = layer.bounds.bounds(list);
+                for item in lower .. upper {
+                    let mut path = path.clone();
+                    path.push(layer.values.get(item).as_slice().to_vec());
+                    next.push((item, path));
+                }
             }
-            output.bounds.push(output.values.len() as u64);
+            paths = next;
         }
-
-        output
+        paths.into_iter().map(|(_, p)| p).collect()
     }
 
-
+    #[test]
+    fn retain_sparse_matches_core() {
+        for seed in 0 .. 100u64 {
+            let mut next = lcg(seed);
+            let arity = 1 + (next() % 4) as usize;
+            let rows = 1 + (next() % 3000) as usize;
+            let mut cols = vec![Terms::default(); arity];
+            for _ in 0 .. rows { for col in 0 .. arity { cols[col].push(&((next() % 20) as u32).to_be_bytes()); } }
+            let forest = Forest::from_columns(cols).unwrap();
+            let layer_index = 1 + (next() as usize) % arity;
+            let items = forest.layer(layer_index - 1).list.values.len();
+            let retain: Vec<usize> = (0 .. items).filter(|_| next() % 10 == 0).collect();
+            let mut include = std::collections::VecDeque::from(vec![false; items]);
+            for i in retain.iter() { include[*i] = true; }
+            let sparse = forest.clone().retain_sparse(layer_index, retain).flatten();
+            let dense = forest.clone().retain_core(layer_index, include).flatten();
+            assert_eq!(sparse.as_ref().map(facts), dense.as_ref().map(facts), "seed {}", seed);
+        }
+    }
 }
