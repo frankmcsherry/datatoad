@@ -926,7 +926,7 @@ pub mod layers {
                 Some(1) => { downgrade(col_sort(upgrade::<1>(lists).unwrap().values, groups, indexs, last)) }
                 Some(2) => { downgrade(col_sort(upgrade::<2>(lists).unwrap().values, groups, indexs, last)) }
                 Some(3) => { downgrade(col_sort(upgrade::<3>(lists).unwrap().values, groups, indexs, last)) }
-                Some(4) => { downgrade(u32_sort(upgrade::<4>(lists).unwrap().values, groups, indexs, last)) }
+                Some(4) => { downgrade(crate::facts::packed::u32_sort(upgrade::<4>(lists).unwrap().values, groups, indexs, last)) }
                 _______ => { col_sort(lists.values, groups, indexs, last) }
             }
         }
@@ -1204,83 +1204,6 @@ pub mod layers {
         output.bounds.push(output.values.len() as u64);
 
         if !last { for (g, _, i) in to_sort { groups[i] = g; } }
-
-        output
-    }
-
-    /// Sort the items of `lists` subject to the grouping/ordering of `group` of the lists.
-    pub fn u32_sort(items: &[[u8;4]], groups: &mut [usize], indexs: &[usize], last: bool) -> Lists<Vec<[u8;4]>> {
-
-        if last { return u32_sort_last(items, groups, indexs); }
-
-        assert_eq!(groups.len(), indexs.len());
-
-        // Contiguous LSB sorting, whose temp is two full copies of the rows. The paged form
-        // (`radix_sort::lsb_paged`, still used by loading) bounds its working set near one
-        // copy, but is slower here: reverting it from these methods recovered 20% on galen
-        // and 13% on csda on the M4 minis. A revival should beat contiguous at equal memory,
-        // e.g. with the `-m` budget raised to spend the footprint it saves.
-        let mut output = Lists::<Vec<[u8;4]>>::default();
-
-        let mut rows: Vec<[u8; 12]> = groups.iter().zip(indexs.iter()).enumerate().map(|(i, (group, index))| {
-            let mut row = [0u8; 12];
-            row[0..4].copy_from_slice(&(*group as u32).to_be_bytes());
-            row[4..8].copy_from_slice(&items[*index]);
-            row[8..12].copy_from_slice(&(i as u32).to_be_bytes());
-            row
-        }).collect();
-        // Sort on bytes 0..8 (group then value); bytes 8..12 are payload.
-        crate::facts::radix_sort::lsb_range(&mut rows[..], 0, 8);
-
-        // We want to mint a new item for each distinct (group, value).
-        // We want to seal a new list for each distinct group.
-        // We want to update groups with index as we go (random access potentially pessimal).
-        let triples = rows.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<3>().0;
-        let mut iter = triples.iter();
-        if let Some([group, value, index]) = iter.next() {
-            output.values.push(*value);
-            let mut prev = (*group, *value);
-            groups[u32::from_be_bytes(*index) as usize] = 0;
-            for [group, value, index] in iter {
-                if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
-                if prev != (*group, *value) { output.values.push(*value); }
-                prev = (*group, *value);
-                groups[u32::from_be_bytes(*index) as usize] = output.values.len() - 1;
-            }
-            output.bounds.push(output.values.len() as u64);
-        }
-
-        output
-    }
-
-    pub fn u32_sort_last(items: &[[u8;4]], groups: &mut [usize], indexs: &[usize]) -> Lists<Vec<[u8;4]>> {
-
-        assert_eq!(groups.len(), indexs.len());
-
-        let mut output = Lists::<Vec<[u8;4]>>::default();
-
-        let mut rows: Vec<[u8; 8]> = groups.iter().zip(indexs.iter()).map(|(group, index)| {
-            let mut row = [0u8; 8];
-            row[0..4].copy_from_slice(&(*group as u32).to_be_bytes());
-            row[4..8].copy_from_slice(&items[*index]);
-            row
-        }).collect();
-        crate::facts::radix_sort::lsb_range(&mut rows[..], 0, 8);
-
-        // We want to mint a new item for each distinct (group, value).
-        // We want to seal a new list for each distinct group.
-        let pairs = rows.as_slice().as_flattened().as_chunks::<4>().0.as_chunks::<2>().0;
-        let mut iter = pairs.iter();
-        if let Some([group, value]) = iter.next() {
-            output.values.push(*value);
-            let mut prev = (*group, *value);
-            for [group, value] in iter {
-                if prev.0 != *group { output.bounds.push(output.values.len() as u64); }
-                if prev != (*group, *value) { output.values.push(*value); }
-                prev = (*group, *value);
-            }
-            output.bounds.push(output.values.len() as u64);
-        }
 
         output
     }

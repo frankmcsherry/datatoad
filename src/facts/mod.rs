@@ -8,6 +8,7 @@ use columnar::primitive::offsets::Strides;
 use crate::types::Action;
 
 pub mod trie;
+pub mod packed;
 
 /// A `Vecs` using strided offsets.
 pub type Lists<C> = Vecs<C, Strides>;
