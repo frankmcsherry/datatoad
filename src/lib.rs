@@ -107,6 +107,8 @@ pub mod types {
         /// Count of `.test` directives that have reported a mismatch. Surfaced
         /// at `.quit` so a script with any failed assertion exits nonzero.
         pub test_failures: usize,
+        /// Plans for each rule (by index in `rules`), which depend only on the rule, `decls`, and the seeds.
+        pub plan_caches: std::collections::BTreeMap<usize, crate::rules::PlanCache>,
     }
 
     impl State {
@@ -125,7 +127,7 @@ pub mod types {
                         self.decls.get(&atom.name).map_or(false, |d| d.view)
                     );
                     if head_is_view { continue; }
-                    let per_seed = self.implement(&self.rules[index].0.clone(), false, Some(&active_names));
+                    let per_seed = self.implement_index(index, false, Some(&active_names));
                     if !per_seed.is_empty() { self.rules[index].1.push(per_seed); }
                 }
                 self.advance();

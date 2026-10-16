@@ -469,6 +469,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                     );
                                 }
                                 _ => {
+                                    state.plan_caches.clear();
                                     state.decls.insert(
                                         name,
                                         types::RelationDecl { arity, explicit: true, view },
@@ -479,7 +480,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                         None => { println!(".decl requires `.decl name(_, _, ...) [flags]`"); }
                     }
                 }
-                ".wipe" => { state.facts = Default::default(); state.rules = Default::default(); state.decls = Default::default(); *bytes = Default::default(); }
+                ".wipe" => { state.facts = Default::default(); state.rules = Default::default(); state.decls = Default::default(); state.plan_caches = Default::default(); *bytes = Default::default(); }
                 _ => { println!("Parse failure: {:?}", text); }
             }
         }

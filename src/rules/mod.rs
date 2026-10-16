@@ -14,6 +14,7 @@
 //!
 //! These traits are implemented for relations that are *explicit* (represented by data) and *implicit* (represented by code), and in-between (e.g. antijoins).
 
+use std::rc::Rc;
 use crate::types::{Atom, Rule, Action, Term};
 use crate::facts::{FactContainer, Forest, Relations, Terms};
 
@@ -113,6 +114,27 @@ pub fn plan_and_build_with_fields(
     stable: bool,
     active_relations: Option<&std::collections::BTreeSet<&str>>,
 ) -> Vec<SeedExec> {
+    plan_and_build_cached(facts, comms, decls, rules, body, head, stable, active_relations, None)
+}
+
+/// Plans for one rule, keyed by the body atoms acting as seeds.
+///
+/// A rule's plans depend only on the rule, the declarations, and which atoms seed, and planning
+/// (which manipulates terms by name) can cost more than a round's work when deltas are small.
+pub type PlanCache = std::collections::BTreeMap<Vec<usize>, Rc<(plan::Plans<usize, String>, plan::Loads<usize, String>)>>;
+
+/// As `plan_and_build_with_fields`, but reusing and recording plans in `cache` if supplied.
+pub fn plan_and_build_cached(
+    facts: &mut Relations,
+    comms: &mut crate::comms::Comms,
+    decls: &std::collections::BTreeMap<String, crate::types::RelationDecl>,
+    rules: &[(Rule, Vec<Vec<(usize, std::time::Duration)>>)],
+    body: &[Atom],
+    head: &[Atom],
+    stable: bool,
+    active_relations: Option<&std::collections::BTreeSet<&str>>,
+    cache: Option<&mut PlanCache>,
+) -> Vec<SeedExec> {
     // Body atoms that should take a turn as the source of novelty this round.
     // In `stable` mode only the first *seedable* body atom drives — anti/logic
     // atoms can't ground their own terms and so can't act as seeds. Picking
@@ -135,7 +157,11 @@ pub fn plan_and_build_with_fields(
         (0..body.len()).collect()
     };
 
-    let (plans, loads) = plan::plan_rule(head, body, &delta_atoms, decls);
+    let planned = match cache {
+        Some(cache) => cache.entry(delta_atoms).or_insert_with_key(|delta_atoms| Rc::new(plan::plan_rule(head, body, delta_atoms, decls))).clone(),
+        None => Rc::new(plan::plan_rule(head, body, &delta_atoms, decls)),
+    };
+    let (plans, loads) = &*planned;
 
     // Ensure arranged facts exist for every load atom across every plan_atom.
     for (plan_atom, _plan) in plans.iter() {
@@ -173,9 +199,15 @@ impl crate::types::State {
     /// The `stable` argument indicates whether we should perform a join with all facts (true),
     /// or only a join that involves novel facts (false).
     pub fn implement(&mut self, rule: &Rule, stable: bool, active_relations: Option<&std::collections::BTreeSet<&str>>) -> Vec<(usize, std::time::Duration)> {
+        self.implement_inner(Err(rule), stable, active_relations)
+    }
 
-        let head = &rule.head[..];
-        let body = &rule.body[..];
+    /// Implements the rule at `index` of `self.rules`, reusing its plans across calls.
+    pub fn implement_index(&mut self, index: usize, stable: bool, active_relations: Option<&std::collections::BTreeSet<&str>>) -> Vec<(usize, std::time::Duration)> {
+        self.implement_inner(Ok(index), stable, active_relations)
+    }
+
+    fn implement_inner(&mut self, rule: Result<usize, &Rule>, stable: bool, active_relations: Option<&std::collections::BTreeSet<&str>>) -> Vec<(usize, std::time::Duration)> {
 
         // Split `self` into independent field borrows so that the apparatus (which holds
         // a borrow of `decls` and `rules` for as long as it lives) can coexist with
@@ -185,7 +217,14 @@ impl crate::types::State {
         let decls = &self.decls;
         let rules = &self.rules[..];
 
-        let seed_execs = plan_and_build_with_fields(facts, comms, decls, rules, body, head, stable, active_relations);
+        let (rule, cache) = match rule {
+            Ok(index) => (&rules[index].0, Some(self.plan_caches.entry(index).or_default())),
+            Err(rule) => (rule, None),
+        };
+        let head = &rule.head[..];
+        let body = &rule.body[..];
+
+        let seed_execs = plan_and_build_cached(facts, comms, decls, rules, body, head, stable, active_relations, cache);
 
         // Per seed: seed → wco_join stages → emit head facts.
         // Seed atoms are pre-built, so each seed sees the round's input state
