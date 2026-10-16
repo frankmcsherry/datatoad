@@ -17,11 +17,16 @@ pub struct Comms {
     /// Cluster-wide budget for in-flight intermediate tuples (bytes).
     /// Configurable via the `-m`/`--memory` CLI flag.
     mem_budget: usize,
+    /// Physical channels, one per column type (each an `Rc<RefCell<Mux<C>>>`), shared by all logical channels.
+    ///
+    /// Allocating a physical channel for each logical exchange costs a lock and a queue per peer,
+    /// which dominates exchanges of little data; we instead multiplex logical channels over one.
+    muxes: std::collections::BTreeMap<std::any::TypeId, Box<dyn std::any::Any>>,
 }
 
 impl Default for Comms {
     fn default() -> Self {
-        Self { ether: None, count: 0, mem_budget: DEFAULT_MEM_BUDGET }
+        Self { ether: None, count: 0, mem_budget: DEFAULT_MEM_BUDGET, muxes: Default::default() }
     }
 }
 
@@ -44,14 +49,26 @@ impl Comms {
         let budget = self.mem_budget;
         // With a single worker, facts are already where they need to be.
         if self.peers() == 1 { return self.local_conduit(); }
-        let comms = self.ether.as_mut().map(|comms| {
-            let (sends, recv) = comms.borrow_mut().allocate(self.count);
-            self.count += 1;
-            let count = sends.len();
-            Channel { comms: comms.clone(), sends, recv, count, done: false }
-        });
         let peers = self.peers();
+        let comms = if self.ether.is_some() {
+            let mux = self.mux::<F::Column>();
+            let id = self.count as u64;
+            self.count += 1;
+            Some(Channel { comms: self.ether.as_ref().unwrap().clone(), mux, id, count: peers, done: false })
+        } else { None };
         Conduit { comms, facts: FactLSM::default(), mem_budget: budget, peers }
+    }
+
+    /// The physical channel for column type `C`, allocated on first use (at the same point on all workers).
+    fn mux<C: FactColumn>(&mut self) -> Rc<RefCell<Mux<C>>> where Lists<C>: columnar::ContainerBytes {
+        let key = std::any::TypeId::of::<C>();
+        if !self.muxes.contains_key(&key) {
+            let (sends, recv) = self.ether.as_ref().expect("multiplexing requires communication").borrow_mut().allocate(self.count);
+            self.count += 1;
+            let mux: Rc<RefCell<Mux<C>>> = Rc::new(RefCell::new(Mux { sends, recv, pending: Default::default() }));
+            self.muxes.insert(key, Box::new(mux));
+        }
+        self.muxes[&key].downcast_ref::<Rc<RefCell<Mux<C>>>>().expect("mux of the wrong type").clone()
     }
 
     /// A conduit that only collects facts, for facts that are already where they need to be.
@@ -94,16 +111,19 @@ impl Comms {
     /// Broadcasts facts to all workers.
     pub fn broadcast<C: FactColumn>(&mut self, facts: &mut FactLSM<Forest<C>>) where Lists<C>: columnar::ContainerBytes {
         if self.peers() == 1 { return; }
-        if let Some(comms) = self.ether.as_mut() {
-            let mut comms = comms.borrow_mut();
-            let (senders, mut receiver) = comms.allocate(self.count);
-            let mut countdown = senders.len();
+        if self.ether.is_some() {
+            let mux = self.mux::<C>();
+            let mut mux = mux.borrow_mut();
+            let id = self.count as u64;
             self.count += 1;
+            let mut comms = self.ether.as_ref().unwrap().borrow_mut();
+            let peers = comms.peers();
+            let mut countdown = peers;
             if let Some(fact) = facts.flatten() {
-                for mut sender in senders { sender.send(FactMessage { facts: Some((0 .. fact.arity()).map(|i| fact.layer(i).list.clone()).collect::<Vec<_>>()) } ); }
+                for peer in 0 .. peers { mux.send(peer, FactMessage { channel: id, facts: Some((0 .. fact.arity()).map(|i| fact.layer(i).list.clone()).collect::<Vec<_>>()) }); }
             }
             else {
-                for mut sender in senders { sender.send(FactMessage { facts: None } ); }
+                for peer in 0 .. peers { mux.send(peer, FactMessage { channel: id, facts: None }); }
             }
 
             let mut idle = Idle::default();
@@ -111,7 +131,10 @@ impl Comms {
                 comms.receive();
                 comms.events().borrow_mut().clear();
                 let before = countdown;
-                while let Some(message) = receiver.recv() { if let Some(fact) = message.facts { facts.push(fact.into_iter().map(|l| std::rc::Rc::new(Layer { list: l })).collect::<Vec<_>>().try_into().unwrap()); } countdown -= 1; }
+                mux.pull(id, |message| {
+                    if let Some(fact) = message.facts { facts.push(fact.into_iter().map(|l| std::rc::Rc::new(Layer { list: l })).collect::<Vec<_>>().try_into().unwrap()); }
+                    countdown -= 1;
+                });
                 comms.release();
                 if countdown == before { idle.wait(&comms); } else { idle.reset(); }
             }
@@ -172,16 +195,42 @@ impl Comms {
 
 impl From<Allocator> for Comms {
     fn from(comm: Allocator) -> Self {
-        Self { ether: Some(Rc::new(RefCell::new(comm))), count: 0, mem_budget: DEFAULT_MEM_BUDGET }
+        Self { ether: Some(Rc::new(RefCell::new(comm))), count: 0, mem_budget: DEFAULT_MEM_BUDGET, muxes: Default::default() }
+    }
+}
+
+/// A physical channel carrying the messages of many logical channels, each tagged with its identifier.
+///
+/// Messages from one peer arrive in the order sent, so a logical channel's messages from a peer precede
+/// its completion marker. Messages for logical channels other than the one being drained (e.g. those a
+/// peer has moved on to) are stashed until that channel is drained.
+pub struct Mux<C: FactColumn> {
+    sends: Vec<Box<dyn Push<FactMessage<C>>>>,
+    recv: Box<dyn Pull<FactMessage<C>>>,
+    pending: std::collections::BTreeMap<u64, std::collections::VecDeque<FactMessage<C>>>,
+}
+
+impl<C: FactColumn> Mux<C> {
+    fn send(&mut self, peer: usize, message: FactMessage<C>) { self.sends[peer].send(message); }
+    /// Delivers received messages for logical channel `id` to `action`, stashing those for other channels.
+    fn pull(&mut self, id: u64, mut action: impl FnMut(FactMessage<C>)) {
+        if let Some(queue) = self.pending.remove(&id) { for message in queue { action(message); } }
+        while let Some(message) = self.recv.recv() {
+            if message.channel == id { action(message); }
+            else { self.pending.entry(message.channel).or_default().push_back(message); }
+        }
     }
 }
 
 use timely_communication::{Push, Pull};
 
+/// A logical channel, multiplexed over its column type's physical channel.
 pub struct Channel<C: FactColumn = Terms> {
     comms: Rc<RefCell<Allocator>>,
-    sends: Vec<Box<dyn Push<FactMessage<C>>>>,
-    recv: Box<dyn Pull<FactMessage<C>>>,
+    mux: Rc<RefCell<Mux<C>>>,
+    /// The logical channel's identifier, carried by its messages.
+    id: u64,
+    /// The number of peers yet to signal completion.
     count: usize,
     done: bool,
 }
@@ -219,7 +268,9 @@ impl<C: FactColumn> Exchangeable for Forest<C> {
 
 impl<C: FactColumn> Channel<C> {
     fn close(&mut self) { if !self.done {
-        for sender in self.sends.iter_mut() { sender.send(FactMessage { facts: None } ); }
+        let peers = self.comms.borrow().peers();
+        let mut mux = self.mux.borrow_mut();
+        for peer in 0 .. peers { mux.send(peer, FactMessage { channel: self.id, facts: None }); }
         self.done = true;
     }}
     /// Exchanges facts with other participants, drawing from and refilling `facts`.
@@ -228,6 +279,7 @@ impl<C: FactColumn> Channel<C> {
         if self.done && !facts.is_empty() { panic!("Exchanging on a sealed channel"); }
 
         let mut comms = self.comms.borrow_mut();
+        let mut mux = self.mux.borrow_mut();
 
         let peers = comms.peers();
         let index = comms.index();
@@ -252,8 +304,8 @@ impl<C: FactColumn> Channel<C> {
                 else {
                     let layers = (0 .. piece.arity()).map(|i| piece.layer(i).clone()).collect::<Vec<_>>();
                     drop(piece);
-                    let message = FactMessage { facts: Some(layers.into_iter().map(|l| Rc::unwrap_or_clone(l).list).collect::<Vec<_>>()) };
-                    self.sends[peer].send(message);
+                    let message = FactMessage { channel: self.id, facts: Some(layers.into_iter().map(|l| Rc::unwrap_or_clone(l).list).collect::<Vec<_>>()) };
+                    mux.send(peer, message);
                 }
             }
         }
@@ -263,12 +315,13 @@ impl<C: FactColumn> Channel<C> {
         comms.events().borrow_mut().clear();
 
         // Receive data first, to allow early consolidation.
-        while let Some(message) = self.recv.recv() {
+        let count = &mut self.count;
+        mux.pull(self.id, |message| {
             if let Some(fact) = message.facts {
                 facts.push(fact.into_iter().map(|l| std::rc::Rc::new(Layer { list: l })).collect::<Vec<_>>().try_into().unwrap());
             }
-            else { self.count -= 1; }
-        }
+            else { *count -= 1; }
+        });
 
         comms.release();
         for piece in local { facts.push(piece); }
@@ -307,16 +360,18 @@ impl<F: Exchangeable> Conduit<F> {
     }
 }
 
-/// An optional list of non-empty columns.
+/// An optional list of non-empty columns, sent on the logical channel `channel`.
 ///
-/// The encoding is first the number of columns plus one, with zero indicating `None`.
+/// The encoding is first the logical channel, then the number of columns plus one, with zero indicating `None`.
 /// The columns are then appended.
-pub struct FactMessage<C: FactColumn = Terms> { facts: Option<Vec<Lists<C>>> }
+pub struct FactMessage<C: FactColumn = Terms> { channel: u64, facts: Option<Vec<Lists<C>>> }
 
 use columnar::{Borrow, Container, ContainerBytes, Index, Len, bytes::{indexed, stash::Stash}};
 
 impl<C: FactColumn> Bytesable for FactMessage<C> where Lists<C>: ContainerBytes {
     fn from_bytes(mut bytes: timely_bytes::arc::Bytes) -> Self {
+        let channel: u64 = u64::from_be_bytes(bytes[..8].try_into().unwrap());
+        bytes.extract_to(8);
         let count: u64 = u64::from_be_bytes(bytes[..8].try_into().unwrap());
         bytes.extract_to(8);
         if count > 0 {
@@ -329,15 +384,16 @@ impl<C: FactColumn> Bytesable for FactMessage<C> where Lists<C>: ContainerBytes 
                 column.extend_from_self(stash.borrow(), 0 .. stash.len());
                 columns.push(column);
             }
-            FactMessage { facts: Some(columns) }
+            FactMessage { channel, facts: Some(columns) }
         }
-        else { FactMessage { facts: None } }
+        else { FactMessage { channel, facts: None } }
     }
     fn length_in_bytes(&self) -> usize {
-        if let Some(columns) = self.facts.as_ref() { 8 + columns.iter().map(|c| indexed::length_in_bytes(&c.borrow())).sum::<usize>() }
-        else { 8 }
+        if let Some(columns) = self.facts.as_ref() { 16 + columns.iter().map(|c| indexed::length_in_bytes(&c.borrow())).sum::<usize>() }
+        else { 16 }
     }
     fn into_bytes<W: ::std::io::Write>(&self, mut writer: &mut W) {
+        writer.write_all(&self.channel.to_be_bytes()).unwrap();
         if let Some(columns) = self.facts.as_ref() {
             let count: u64 = 1 + columns.len() as u64;
             writer.write_all(&count.to_be_bytes()).unwrap();
