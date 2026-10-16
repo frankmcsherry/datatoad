@@ -74,6 +74,13 @@ pub trait PlanAtom<T: Ord> {
     /// any grounding of the input terms, as they may be called upon to be the ones to do this.
     fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T>;
 
+    /// True when `term` is the atom's only term not in `terms`, and the atom would propose exactly
+    /// the values of `term` that it holds for each binding of `terms`, as a data-backed relation does.
+    ///
+    /// The planner prefers such terms among otherwise equal candidates. Implementors that propose
+    /// values by computation, perhaps without bound (e.g. a range), should return `false`.
+    fn proposes_exactly(&self, _terms: &BTreeSet<T>, _term: &T) -> bool { false }
+
 }
 
 use std::collections::{BTreeSet, BTreeMap};
@@ -300,8 +307,19 @@ pub fn plan_body<A: Ord+Copy, T: Ord+Clone+std::fmt::Debug>(
             .filter(|term| !terms.contains(term) && terms_to_atoms.contains_key(term))
             .collect::<Vec<_>>();
 
-        // Pick the term incident on the most atoms (most-constrained-first).
-        next_terms.sort_by_key(|t| terms_to_atoms[t].len());
+        // Pick the term incident on the most atoms (most-constrained-first), a proxy for how
+        // strongly the stage constrains bindings. The count treats incident atoms alike, but
+        // they constrain differently: an atom whose only unbound term is `t` becomes fully bound
+        // and admits exactly its facts, whereas an atom with terms still unbound admits any
+        // binding with *some* extension (its projection), and bindings that later fail to extend
+        // are carried, counted, and sorted until a later stage removes them. Among equally
+        // incident terms, prefer the one that leaves fewer atoms constrained only by projection,
+        // i.e. that completes more data-backed atoms; ties otherwise fall to iteration order over
+        // variable names and atom positions. Without statistics this is still a heuristic: an
+        // exact constraint from a high-degree relation can admit more bindings than a selective
+        // projection.
+        let completes = |t: &T| terms_to_atoms[t].iter().filter(|a| body[*a].proposes_exactly(&terms, t)).count();
+        next_terms.sort_by_key(|t| (terms_to_atoms[t].len(), completes(t)));
         // Fallback: any groundable term, allowing cross joins with data-backed atoms.
         let next_term = next_terms.last().cloned().or_else(|| body.values()
             .flat_map(|a| a.ground(&terms))

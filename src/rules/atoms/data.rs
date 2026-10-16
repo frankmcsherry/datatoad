@@ -11,6 +11,9 @@ use crate::comms::Comms;
 impl<T: Ord + Clone> PlanAtom<T> for BTreeSet<T> {
     fn terms(&self) -> BTreeSet<T> { self.clone() }
     fn ground(&self, terms: &BTreeSet<T>) -> BTreeSet<T> { self.difference(terms).cloned().collect() }
+    fn proposes_exactly(&self, terms: &BTreeSet<T>, term: &T) -> bool {
+        self.contains(term) && self.iter().all(|t| t == term || terms.contains(t))
+    }
 }
 
 impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<T>, Option<Forest<Terms>>) {
