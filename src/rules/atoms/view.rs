@@ -221,7 +221,7 @@ fn build_join_apparatus(
                     .map(|inner_load| crate::rules::build_atom(
                         facts, comms, decls, rules,
                         body, 0, *inner_load, &loads,
-                        None,
+                        None, true,
                     ))
                     .collect();
                 StageExec { terms: terms.clone(), output_order: output_order.clone(), atoms }

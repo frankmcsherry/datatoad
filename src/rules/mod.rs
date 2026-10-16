@@ -44,6 +44,7 @@ pub(crate) fn build_atom(
     load_atom: usize,
     loads: &std::collections::BTreeMap<usize, plan::Load<String>>,
     parent_plan: Option<&plan::Plan<usize, String>>,
+    stable: bool,
 ) -> Box<dyn exec::ExecAtom<String>> {
     use crate::rules::atoms;
     if let Some(logic) = atoms::logic::resolve(&body[load_atom]) {
@@ -54,6 +55,8 @@ pub(crate) fn build_atom(
         ))
     } else {
         let (load_action, load_terms) = &loads[&load_atom];
+        // The atom reads stable facts unless it is the seed in incremental (non-`stable`) evaluation.
+        if load_atom != plan_atom || stable { facts.materialize(body[load_atom].name.as_str(), load_action); }
         let other = facts.get_action(body[load_atom].name.as_str(), load_action).unwrap();
         let to_chain = if load_atom >= plan_atom { other.recent.as_ref() } else { None };
         let other_facts: Vec<Forest<Terms>> = other.stable.contents().chain(to_chain).cloned().collect();
@@ -145,11 +148,11 @@ pub fn plan_and_build_with_fields(
     plans.iter()
         .map(|(plan_atom, plan)| {
             let plan_loads = &loads[plan_atom];
-            let seed = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None);
+            let seed = build_atom(facts, comms, decls, rules, body, *plan_atom, *plan_atom, plan_loads, None, stable);
             let stages: Vec<StageExec> = plan.iter()
                 .map(|(atom_set, terms, output_order)| {
                     let atoms = atom_set.iter()
-                        .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan)))
+                        .map(|load_atom| build_atom(facts, comms, decls, rules, body, *plan_atom, *load_atom, plan_loads, Some(plan), stable))
                         .collect();
                     StageExec {
                         terms: terms.clone(),
