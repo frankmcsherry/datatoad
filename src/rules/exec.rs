@@ -49,11 +49,20 @@ pub struct Salad<T> {
     pub facts: FactLSM<Forest<Terms>>,
     /// Names for the sequence of columns.
     pub terms: Vec<T>,
+    /// Whether the facts are partitioned among workers by their first column, as `Comms::exchange` leaves them.
+    ///
+    /// Joins, semijoins, and antijoins against relations (which are so partitioned) rely on this, and
+    /// permuting a partitioned salad needs no exchange unless its first column changes. Salads not known
+    /// to be partitioned (e.g. those computed redundantly by every worker) are exchanged when permuted.
+    /// The flag must be set identically on all workers, i.e. independent of the data any one holds.
+    pub partitioned: bool,
 }
 
 impl<T: Ord+Clone> Salad<T> {
-    /// Constructs a new `Self` from facts and terms.
-    pub fn new(facts: FactLSM<Forest<Terms>>, terms: Vec<T>) -> Self { Self { facts, terms } }
+    /// Constructs a new `Self` from facts and terms, not known to be partitioned.
+    pub fn new(facts: FactLSM<Forest<Terms>>, terms: Vec<T>) -> Self { Self { facts, terms, partitioned: false } }
+    /// Constructs a new `Self` from facts and terms, partitioned by their first column.
+    pub fn new_partitioned(facts: FactLSM<Forest<Terms>>, terms: Vec<T>) -> Self { Self { facts, terms, partitioned: true } }
 
     /// The number of columns.
     pub fn arity(&self) -> usize { self.terms.len() }
@@ -88,6 +97,7 @@ impl<T: Ord+Clone> Salad<T> {
 
         let identity = permutation.iter().enumerate().all(|(i, p)| i == *p);
         let truncates = matches!(mode, PermuteMode::Prune) && permutation.len() < salad.terms.len();
+        let moves_key = permutation.first() != Some(&0);
 
         if !identity {
             if let Some(flattened) = salad.facts.flatten() {
@@ -99,9 +109,16 @@ impl<T: Ord+Clone> Salad<T> {
         // Maybe necessary if `permutation` is `0 .. k` for k less than the input arity.
         if let PermuteMode::Prune = mode { salad.truncate(permutation.len()); }
 
-        // Skip the exchange when nothing about the salad changed: identity permutation,
-        // TODO: Investigate more assertive guards, like column 0 (the partition key) not changing.
-        if !identity || truncates { comms.exchange(&mut salad.facts); }
+        // Facts partitioned by a first column that did not move remain partitioned (truncation
+        // cannot create duplicates across workers, as equal prefixes share a first column).
+        // Otherwise, exchange to partition by the (new) first column.
+        if permutation.is_empty() {
+            if !identity || truncates { comms.exchange(&mut salad.facts); }
+        }
+        else if !salad.partitioned || moves_key {
+            comms.exchange(&mut salad.facts);
+            salad.partitioned = true;
+        }
     }
 }
 
@@ -191,15 +208,17 @@ pub fn wco_join<T: Ord + Clone + std::fmt::Debug>(
                 }
                 salad.facts = out;
                 salad.terms = prefix.terms.iter().chain(salad.terms.iter()).cloned().collect();
+                salad.partitioned = prefix.partitioned;
                 salad.align_to(comms, target.iter().cloned());
             } else {
-                // Re-install sequestered terms.
-                let conduit = comms.conduit();
+                // Re-install sequestered terms. Both inputs are partitioned by their (shared) first
+                // column, and if the output leads with it, it needs no exchange.
+                let mut crossed_terms = salad.terms.clone();
+                crossed_terms.extend(salad.terms[..shared.len()].iter().cloned());
+                crossed_terms.extend(terms.iter().cloned());
+                let projection = target.iter().map(|t| crossed_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
+                let conduit = if salad.partitioned && prefix.partitioned && projection.first() == Some(&0) { comms.local_conduit() } else { comms.conduit() };
                 if let Some(facts) = salad.facts.flatten() {
-                    let mut crossed_terms = salad.terms.clone();
-                    crossed_terms.extend(salad.terms[..shared.len()].iter().cloned());
-                    crossed_terms.extend(terms.iter().cloned());
-                    let projection = target.iter().map(|t| crossed_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
                     salad.facts = facts.join_many(prefix.facts.contents(), shared.len(), &projection[..], conduit);
                 }
                 else {
@@ -207,6 +226,7 @@ pub fn wco_join<T: Ord + Clone + std::fmt::Debug>(
                 }
                 salad.terms.clear();
                 salad.terms.extend_from_slice(target);
+                salad.partitioned = true;
             }
         }
         else { wco_join_inner(comms, salad, terms, atoms, potato, target) }
@@ -263,6 +283,7 @@ fn wco_join_inner<T: Ord + Clone + std::fmt::Debug>(
         bools.clear();
         bools.extend((0 .. notes.len()/4).map(|i| notes[4*i] > 0 && notes[4*i+1] == other_index as u8));
         let mut shard = Salad::new(FactLSM::default(), salad.terms.clone());
+        shard.partitioned = salad.partitioned;
         if bools.iter().any(|x| *x) {
             if let Some(facts) = salad.facts.flatten() {
                 let mut layers = Vec::default();
@@ -275,8 +296,8 @@ fn wco_join_inner<T: Ord + Clone + std::fmt::Debug>(
         shards.push(shard);
     }
 
-    //  Prepare to absorb contributions from each shard.
-    *salad = Salad::new(FactLSM::default(), target.to_vec());
+    //  Prepare to absorb contributions from each shard, each of which is partitioned once pruned.
+    *salad = Salad::new_partitioned(FactLSM::default(), target.to_vec());
 
     //  3.  For each (shard, atom) pair, join to propose values then semijoin with other atoms.
     for (shard_index, (mut shard, other)) in shards.into_iter().zip(atoms.iter()).enumerate() {

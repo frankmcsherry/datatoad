@@ -223,16 +223,19 @@ fn emit_head_facts(
             Term::Var(name) => Ok(salad.terms.iter().position(|t2| t2 == name).expect(format!("Failed to find {:?} in {:?}", name, salad.terms).as_str())),
             Term::Lit(data) => Err(data.clone()),
         }).collect();
+        // Head facts remain partitioned if the salad was, and they lead with its first column.
+        let partitioned = salad.partitioned && action.projection.first() == Some(&Ok(0));
         if let Some(delta) = salad.facts.flatten() {
-            extend_facts_with_fields(facts, comms, atom, delta.act_on(&action, thresh));
+            extend_facts_with_fields(facts, comms, atom, delta.act_on(&action, thresh), partitioned);
             salad.extend([delta]);
         }
         else {
-            extend_facts_with_fields(facts, comms, atom, Default::default());
+            extend_facts_with_fields(facts, comms, atom, Default::default(), partitioned);
         }
     }
     if let Some(pos) = exact_match {
-        extend_facts_with_fields(facts, comms, &head[pos], salad.facts);
+        let partitioned = salad.partitioned;
+        extend_facts_with_fields(facts, comms, &head[pos], salad.facts, partitioned);
     }
 }
 
@@ -281,17 +284,20 @@ pub fn run_wco_stages(
 }
 
 /// Free-function form of `State::extend_facts` so it can be called with split borrows.
+///
+/// The `partitioned` argument indicates that `data` is already partitioned by its first column.
 pub fn extend_facts_with_fields(
     facts: &mut Relations,
     comms: &mut crate::comms::Comms,
     atom: &Atom,
     mut data: crate::facts::FactLSM<Forest<Terms>>,
+    partitioned: bool,
 ) {
     // 0-arity heads are presence markers, not sharded relations:
     // replicate via broadcast rather than partition-by-column-0.
     if atom.terms.is_empty() {
         comms.broadcast(&mut data);
-    } else {
+    } else if !partitioned {
         comms.exchange(&mut data);
     }
     // Always materialize the relation entry, even when this worker's shard is

@@ -48,7 +48,15 @@ impl Comms {
             let count = sends.len();
             Channel { comms: comms.clone(), sends, recv, count, done: false }
         });
-        Conduit { comms, facts: FactLSM::default(), mem_budget: budget }
+        let peers = self.peers();
+        Conduit { comms, facts: FactLSM::default(), mem_budget: budget, peers }
+    }
+
+    /// A conduit that only collects facts, for facts that are already where they need to be.
+    ///
+    /// Workers must agree on which conduits are local, as other conduits involve all workers.
+    pub fn local_conduit<F: Exchangeable>(&self) -> Conduit<F> {
+        Conduit { comms: None, facts: FactLSM::default(), mem_budget: self.mem_budget, peers: self.peers() }
     }
 
     /// Drains a set of active indices, broadcasts, and refills with the union across all workers.
@@ -246,11 +254,13 @@ pub struct Conduit<F: Exchangeable = Forest<Terms>> {
     facts: FactLSM<F>,
     /// Snapshot of the cluster-wide budget at allocation time.
     mem_budget: usize,
+    /// The number of peers among which the budget is divided.
+    peers: usize,
 }
 
 impl<F: Exchangeable> Conduit<F> {
     /// The number of peers backing the conduit.
-    pub fn peers(&self) -> usize { self.comms.as_ref().map(|c| c.comms.borrow().peers()).unwrap_or(1) }
+    pub fn peers(&self) -> usize { self.peers }
     /// Per-peer slice of the cluster-wide budget. Mirrors `Comms::thresh`.
     pub fn thresh(&self) -> usize { self.mem_budget / self.peers() }
     /// Supplies facts to the conduit, which are exchanged and then collected.

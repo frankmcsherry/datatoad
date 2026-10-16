@@ -225,8 +225,16 @@ pub mod types {
                             continue;
                         }
                     }
+                    // Every worker sees the fact, but only the worker its first column routes to keeps it,
+                    // as relations are partitioned by their first column. (0-arity facts are replicated.)
+                    let keep = lits.first().map_or(true, |first| {
+                        use columnar::{Borrow, Index};
+                        use crate::facts::FactColumn;
+                        (Terms::route(first.borrow().get(0)) as usize) % self.comms.peers() == self.comms.index()
+                    });
                     let facts = Forest::<Terms>::from_columns(lits);
-                    self.facts.entry(atom).extend(facts);
+                    if keep { self.facts.entry(atom).extend(facts); }
+                    else { self.facts.entry(atom); }
                 }
             }
             else {

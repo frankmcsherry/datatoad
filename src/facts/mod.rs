@@ -35,6 +35,12 @@ pub struct Relations {
     relations: BTreeMap<String, (FactSet<FactCollection>, Forms)>,
 }
 
+/// True when `action` leaves facts partitioned by their first column if they were before.
+///
+/// Relations are partitioned among workers by their first column, and an action whose output leads
+/// with the input's first column leaves each fact on the worker it started on.
+fn keeps_partition(action: &Action<Vec<u8>>) -> bool { action.projection.first() == Some(&Ok(0)) }
+
 /// An alias for a map from actions to fact sets, one for each relation.
 pub type Forms = BTreeMap<Action<Vec<u8>>, FactSet<FactCollection>>;
 
@@ -60,7 +66,7 @@ impl Relations {
                 if action.is_permutation() { transform.pending.extend(transform.recent.take()); }
                 else { transform.stable.extend(transform.recent.take()); }
                 let mut acted_on = if let Some(recent) = facts.recent.as_ref() { recent.act_on(action, thresh) } else { FactLSM::default() };
-                let mut conduit = comms.conduit();
+                let mut conduit = if keeps_partition(action) { comms.local_conduit() } else { comms.conduit() };
                 conduit.extend(&mut acted_on);
                 conduit.close();
                 conduits.push(conduit);
@@ -111,7 +117,7 @@ impl Relations {
             // identical across workers (no per-worker state inspection).
             if action.projection.is_empty() {
                 comms.broadcast(&mut fact_set.stable);
-            } else {
+            } else if !keeps_partition(action) {
                 comms.exchange(&mut fact_set.stable);
             }
             // Flattening deduplicates, which may be necessary as `action` may introduce collisions
@@ -120,7 +126,7 @@ impl Relations {
             let mut acted_on = if let Some(recent) = base.recent.as_ref() { recent.act_on(action, thresh) } else { FactLSM::default() };
             if action.projection.is_empty() {
                 comms.broadcast(&mut acted_on);
-            } else {
+            } else if !keeps_partition(action) {
                 comms.exchange(&mut acted_on);
             }
             if let Some(recent) = acted_on.flatten() {
