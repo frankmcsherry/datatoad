@@ -932,19 +932,19 @@ pub mod layers {
         }
         fn union(lists0: <Lists<Terms> as Borrow>::Borrowed<'_>, lists1: <Lists<Terms> as Borrow>::Borrowed<'_>, reports: &mut VecDeque<Report>, next: bool) -> Lists<Terms> {
             match (upgrade_hint(lists0), upgrade_hint(lists1)) {
-                (Some(1), Some(1)) => { downgrade(union(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), reports, next)) }
-                (Some(2), Some(2)) => { downgrade(union(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), reports, next)) }
-                (Some(3), Some(3)) => { downgrade(union(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), reports, next)) }
-                (Some(4), Some(4)) => { downgrade(union(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), reports, next)) }
+                (Some(1), Some(1)) => { downgrade(crate::facts::fixed::union(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), reports, next)) }
+                (Some(2), Some(2)) => { downgrade(crate::facts::fixed::union(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), reports, next)) }
+                (Some(3), Some(3)) => { downgrade(crate::facts::fixed::union(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), reports, next)) }
+                (Some(4), Some(4)) => { downgrade(crate::facts::fixed::union(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), reports, next)) }
                 _ => { union(lists0, lists1, reports, next) }
             }
         }
         fn intersect(lists0: <Lists<Terms> as Borrow>::Borrowed<'_>, lists1: <Lists<Terms> as Borrow>::Borrowed<'_>, both0: &[usize], both1: &[usize]) -> (Vec<usize>, Vec<usize>) {
             match (upgrade_hint(lists0), upgrade_hint(lists1)) {
-                (Some(1), Some(1)) => { intersection::<Vec<[u8; 1]>>(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), both0, both1) }
-                (Some(2), Some(2)) => { intersection::<Vec<[u8; 2]>>(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), both0, both1) }
-                (Some(3), Some(3)) => { intersection::<Vec<[u8; 3]>>(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), both0, both1) }
-                (Some(4), Some(4)) => { intersection::<Vec<[u8; 4]>>(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), both0, both1) }
+                (Some(1), Some(1)) => { crate::facts::fixed::intersection(upgrade::<1>(lists0).unwrap(), upgrade::<1>(lists1).unwrap(), both0, both1) }
+                (Some(2), Some(2)) => { crate::facts::fixed::intersection(upgrade::<2>(lists0).unwrap(), upgrade::<2>(lists1).unwrap(), both0, both1) }
+                (Some(3), Some(3)) => { crate::facts::fixed::intersection(upgrade::<3>(lists0).unwrap(), upgrade::<3>(lists1).unwrap(), both0, both1) }
+                (Some(4), Some(4)) => { crate::facts::fixed::intersection(upgrade::<4>(lists0).unwrap(), upgrade::<4>(lists1).unwrap(), both0, both1) }
                 _ => { intersection::<Terms>(lists0, lists1, both0, both1) }
             }
         }

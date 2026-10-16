@@ -9,6 +9,7 @@ use crate::types::Action;
 
 pub mod trie;
 pub mod packed;
+pub mod fixed;
 
 /// A `Vecs` using strided offsets.
 pub type Lists<C> = Vecs<C, Strides>;
