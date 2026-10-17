@@ -107,13 +107,15 @@ pub mod types {
         /// Count of `.test` directives that have reported a mismatch. Surfaced
         /// at `.quit` so a script with any failed assertion exits nonzero.
         pub test_failures: usize,
+        /// Plans for each rule (by index in `rules`), which depend only on the rule, `decls`, and the seeds.
+        pub plan_caches: std::collections::BTreeMap<usize, crate::rules::PlanCache>,
     }
 
     impl State {
         /// Applies all rules to all facts.
         pub fn update(&mut self) {
-            self.advance();
-            while let Some(active) = self.active_indices() {
+            let mut active = self.advance();
+            while !active.is_empty() {
                 let names = self.facts.relation_names();
                 let active_names: std::collections::BTreeSet<&str> = active.iter()
                     .filter_map(|&i| names.get(i).map(|s| s.as_str()))
@@ -125,19 +127,11 @@ pub mod types {
                         self.decls.get(&atom.name).map_or(false, |d| d.view)
                     );
                     if head_is_view { continue; }
-                    let per_seed = self.implement(&self.rules[index].0.clone(), false, Some(&active_names));
+                    let per_seed = self.implement_index(index, false, Some(&active_names));
                     if !per_seed.is_empty() { self.rules[index].1.push(per_seed); }
                 }
-                self.advance();
+                active = self.advance();
             }
-        }
-
-        /// Returns the globally active relation indices, or `None` if no worker has recent facts.
-        fn active_indices(&mut self) -> Option<std::collections::BTreeSet<usize>> {
-            let mut active = std::collections::BTreeSet::new();
-            self.facts.active_indices(&mut active);
-            self.comms.active_set(&mut active);
-            if active.is_empty() { None } else { Some(active) }
         }
 
         pub fn extend_facts(&mut self, atom: &Atom, mut facts: crate::facts::FactLSM<crate::facts::Forest<crate::facts::Terms>>) {
@@ -156,7 +150,8 @@ pub mod types {
             }
         }
 
-        pub fn advance(&mut self) { self.facts.advance(&mut self.comms);}
+        /// Advances all relations, returning the indices of those with recent facts on some worker.
+        pub fn advance(&mut self) -> std::collections::BTreeSet<usize> { self.facts.advance(&mut self.comms) }
 
 
         pub fn extend(&mut self, rules: impl IntoIterator<Item=Rule>) {
@@ -225,8 +220,16 @@ pub mod types {
                             continue;
                         }
                     }
+                    // Every worker sees the fact, but only the worker its first column routes to keeps it,
+                    // as relations are partitioned by their first column. (0-arity facts are replicated.)
+                    let keep = lits.first().map_or(true, |first| {
+                        use columnar::{Borrow, Index};
+                        use crate::facts::FactColumn;
+                        (Terms::route(first.borrow().get(0)) as usize) % self.comms.peers() == self.comms.index()
+                    });
                     let facts = Forest::<Terms>::from_columns(lits);
-                    self.facts.entry(atom).extend(facts);
+                    if keep { self.facts.entry(atom).extend(facts); }
+                    else { self.facts.entry(atom); }
                 }
             }
             else {

@@ -469,6 +469,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                                     );
                                 }
                                 _ => {
+                                    state.plan_caches.clear();
                                     state.decls.insert(
                                         name,
                                         types::RelationDecl { arity, explicit: true, view },
@@ -479,7 +480,7 @@ fn handle_command(text: &str, state: &mut types::State, bytes: &mut BTreeMap<Vec
                         None => { println!(".decl requires `.decl name(_, _, ...) [flags]`"); }
                     }
                 }
-                ".wipe" => { state.facts = Default::default(); state.rules = Default::default(); state.decls = Default::default(); *bytes = Default::default(); }
+                ".wipe" => { state.facts = Default::default(); state.rules = Default::default(); state.decls = Default::default(); state.plan_caches = Default::default(); *bytes = Default::default(); }
                 _ => { println!("Parse failure: {:?}", text); }
             }
         }
@@ -565,28 +566,40 @@ mod flow_log {
     /// Row-oriented loading; usually faster than column-oriented loading, as the rows have a common column type.
     pub fn load_rows(name: &str, filename: &str, state: &mut datatoad::types::State) {
 
+        use std::io::{Read, Seek, SeekFrom};
+
         let index = state.comms.index();
         let peers = state.comms.peers();
 
-        if let Ok(file) = std::fs::File::open(filename) {
+        if let Ok(mut file) = std::fs::File::open(filename) {
 
-            let file = std::io::BufReader::new(file);
-            let mut reader = simd_csv::ZeroCopyReaderBuilder::default().has_headers(false).from_reader(file);
-            if let Some(record) = reader.read_byte_record().unwrap() {
-                let first = record.iter().flat_map(|term| term.iter().fold(0u32, |n,b| n*10 + ((b-48) as u32)).to_be_bytes()).collect::<Vec<_>>();
-                for _ in 0 .. index { reader.read_byte_record().unwrap(); }
-                let atom = crate::types::Atom { name: name.to_string(), anti: false, terms: vec![crate::types::Term::Lit(vec![]); first.len()/4] };
-                let data = match first.len()/4 {
-                    0 => { to_facts::<_, 0>(reader, first, peers) },
-                    1 => { to_facts::<_, 4>(reader, first, peers) },
-                    2 => { to_facts::<_, 8>(reader, first, peers) },
-                    3 => { to_facts::<_,12>(reader, first, peers) },
-                    4 => { to_facts::<_,16>(reader, first, peers) },
-                    5 => { to_facts::<_,20>(reader, first, peers) },
-                    6 => { to_facts::<_,24>(reader, first, peers) },
-                    7 => { to_facts::<_,28>(reader, first, peers) },
-                    8 => { to_facts::<_,32>(reader, first, peers) },
-                    9 => { to_facts::<_,36>(reader, first, peers) },
+            // Every worker reads the first record, to learn the arity.
+            let arity = {
+                let mut reader = simd_csv::ZeroCopyReaderBuilder::default().has_headers(false).from_reader(std::io::BufReader::new(&file));
+                reader.read_byte_record().unwrap().map(|record| record.iter().count())
+            };
+
+            if let Some(arity) = arity {
+                // Each worker parses the records that start in its share of the file's bytes,
+                // rather than every worker parsing every record and keeping a share of them.
+                let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+                let start = line_start_at(&mut file, len * index as u64 / peers as u64);
+                let end = line_start_at(&mut file, len * (index as u64 + 1) / peers as u64);
+                file.seek(SeekFrom::Start(start)).unwrap();
+                let range = std::io::BufReader::new(file.take(end - start));
+                let reader = simd_csv::ZeroCopyReaderBuilder::default().has_headers(false).from_reader(range);
+                let atom = crate::types::Atom { name: name.to_string(), anti: false, terms: vec![crate::types::Term::Lit(vec![]); arity] };
+                let data = match arity {
+                    0 => { to_facts::<_, 0>(reader) },
+                    1 => { to_facts::<_, 4>(reader) },
+                    2 => { to_facts::<_, 8>(reader) },
+                    3 => { to_facts::<_,12>(reader) },
+                    4 => { to_facts::<_,16>(reader) },
+                    5 => { to_facts::<_,20>(reader) },
+                    6 => { to_facts::<_,24>(reader) },
+                    7 => { to_facts::<_,28>(reader) },
+                    8 => { to_facts::<_,32>(reader) },
+                    9 => { to_facts::<_,36>(reader) },
                     _ => { unimplemented!("too many columns! (use `load_cols`)") }
                 };
                 state.extend_facts(&atom, data);
@@ -595,17 +608,26 @@ mod flow_log {
         else { println!("file not found: {:?}", filename); }
     }
 
+    /// The offset of the first line that starts at or after `position`.
+    fn line_start_at(file: &mut std::fs::File, position: u64) -> u64 {
+        use std::io::{BufRead, Seek, SeekFrom};
+        if position == 0 { return 0; }
+        // A line starts at `position` exactly if the preceding byte ends a line.
+        file.seek(SeekFrom::Start(position - 1)).unwrap();
+        let mut skipped = Vec::new();
+        let read = std::io::BufReader::new(&*file).read_until(b'\n', &mut skipped).unwrap();
+        position - 1 + read as u64
+    }
+
     use datatoad::facts::{FactLSM, Forest, Lists, Terms, trie::Layer};
     use datatoad::facts::radix_sort::{lsb_paged, PageBuilder};
 
     /// Converts a CSV reader into a collection of facts, provided `KW` the bytes per whole record.
-    fn to_facts<R: std::io::Read, const KW: usize>(mut reader: simd_csv::ZeroCopyReader<R>, bytes: Vec<u8>, step: usize) -> FactLSM<Forest<Terms>> {
-        let mut array: [u8; KW] = bytes.try_into().unwrap();
+    fn to_facts<R: std::io::Read, const KW: usize>(mut reader: simd_csv::ZeroCopyReader<R>) -> FactLSM<Forest<Terms>> {
+        let mut array = [0u8; KW];
         let mut builder = PageBuilder::<[u8;KW], KW>::default();
         let mut counter = 0;
         let mut result = FactLSM::default();
-        builder.push(array);
-        counter += 1;
         while let Some(record) = reader.read_byte_record().unwrap() {
 
             let mut iter = record.iter();
@@ -626,8 +648,6 @@ mod flow_log {
                 }
                 counter = 0;
             }
-
-            for _ in 0 .. step-1 { reader.read_byte_record().unwrap(); }
         }
 
         let (mut data, diff) = builder.done();

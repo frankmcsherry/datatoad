@@ -21,7 +21,8 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
     fn terms(&self) -> &[T] { &self.1 }
 
     fn seed(&self, _comms: &mut Comms, recent: bool) -> Salad<T> {
-        let mut salad = crate::rules::exec::Salad::new(Default::default(), Vec::default());
+        // Relations, and so their facts, are partitioned by their first column.
+        let mut salad = crate::rules::exec::Salad::new_partitioned(Default::default(), Vec::default());
         salad.terms = self.1.clone();
         if recent { salad.extend(self.2.iter().cloned()) }
         else { salad.extend(self.0.iter().cloned()) }
@@ -161,16 +162,19 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
             }
             let prior_terms = std::mem::take(&mut salad.terms);
             salad.terms = my_terms.iter().chain(prior_terms.iter()).cloned().collect();
+            salad.partitioned = true;
             salad.align_to(comms, after.iter().cloned());
             return;
         }
         if !terms.is_empty() {
             // join with atom: permute `salad.terms` into the right order, join adding the new column, permute into target order (`delta_terms_new`).
-            let conduit = comms.conduit();
+            let join_terms = salad.terms.iter().chain(salad.terms[..prefix].iter()).chain(terms.iter()).cloned().collect::<Vec<_>>();
+            // Our output join order (until we learn how to do FDB shapes) is the first of `others` not equal to ourself.
+            let projection = after.iter().map(|t| join_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
+            // The salad (aligned above) and the relation are both partitioned by the first join column;
+            // output that leads with it is already partitioned, and needs no exchange.
+            let conduit = if salad.partitioned && prefix > 0 && projection.first() == Some(&0) { comms.local_conduit() } else { comms.conduit() };
             if let Some(delta) = salad.facts.flatten() {
-                let join_terms = salad.terms.iter().chain(salad.terms[..prefix].iter()).chain(terms.iter()).cloned().collect::<Vec<_>>();
-                // Our output join order (until we learn how to do FDB shapes) is the first of `others` not equal to ourself.
-                let projection = after.iter().map(|t| join_terms.iter().position(|t2| t == t2).unwrap()).collect::<Vec<_>>();
                 salad.facts.extend(delta.join_many(my_facts.iter(), prefix, &projection[..], conduit));
             }
             else {
@@ -178,6 +182,7 @@ impl<T: Ord + Clone + std::fmt::Debug> ExecAtom<T> for (Vec<Forest<Terms>>, Vec<
             }
             salad.terms.clear();
             salad.terms.extend_from_slice(after);
+            salad.partitioned = true;
         }
         else {
             if let Some(delta) = salad.facts.flatten() {
